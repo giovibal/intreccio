@@ -53,6 +53,34 @@ func InternKey(txn storage.Txn, name string) (uint32, error) {
 	return internDict(txn, tagKeyFwd, kindKey, name)
 }
 
+// LookupLabel risolve un nome di label nel suo ID senza allocarlo. found è false
+// se la label non esiste (utile nel read path dentro una View).
+func LookupLabel(txn storage.Txn, name string) (id uint32, found bool, err error) {
+	return lookupDict(txn, tagLabelFwd, name)
+}
+
+// LookupType risolve un nome di tipo nel suo ID senza allocarlo.
+func LookupType(txn storage.Txn, name string) (id uint32, found bool, err error) {
+	return lookupDict(txn, tagTypeFwd, name)
+}
+
+// LookupKey risolve un nome di chiave-proprietà nel suo ID senza allocarlo.
+func LookupKey(txn storage.Txn, name string) (id uint32, found bool, err error) {
+	return lookupDict(txn, tagKeyFwd, name)
+}
+
+func lookupDict(txn storage.Txn, fwdTag byte, name string) (uint32, bool, error) {
+	fwd := append([]byte{fwdTag}, name...)
+	switch v, err := txn.Get(fwd); {
+	case err == nil:
+		return binary.BigEndian.Uint32(v), true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return 0, false, nil
+	default:
+		return 0, false, err
+	}
+}
+
 // LabelName risolve l'ID di una label nel suo nome.
 func LabelName(txn storage.Txn, id uint32) (string, error) { return revName(txn, kindLabel, id) }
 
