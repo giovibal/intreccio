@@ -5,7 +5,7 @@ Contesto di progetto per Claude Code. Leggere `DESIGN.md` per l'architettura e
 **invarianti** da non violare mai.
 
 ## Cos'è
-`grafo` — graph DB **embedded**, **single-binary**, in **puro Go**, che parla un
+`mycypher` — graph DB **embedded**, **single-binary**, in **puro Go**, che parla un
 sottoinsieme di **openCypher 9**. Carico target: **OLTP / knowledge-graph**
 (lookup e traversal a poche hop su grafi medi). Non è un motore analitico OLAP.
 
@@ -33,12 +33,12 @@ sottoinsieme di **openCypher 9**. Carico target: **OLTP / knowledge-graph**
 
 ## Layout
 ```
-cmd/grafo/            entrypoint CLI/REPL
+cmd/mycypher/         entrypoint CLI/REPL
 internal/storage/     interfaccia Store + codec + adapter (badger, bolt)
 internal/catalog/     dizionari, contatori ID, registry indici
 internal/graph/       modello + CRUD transazionale + primitive traversal
 internal/cypher/      ast, parser, sema, plan, exec
-grafo.go              API pubblica embeddable (package grafo)
+mycypher.go           API pubblica embeddable (package mycypher)
 ```
 API pubblica solo nel package radice; tutto il resto in `internal/`.
 

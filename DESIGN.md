@@ -1,4 +1,4 @@
-# DESIGN — Graph DB embedded in puro Go (nome di lavoro: `grafo`)
+# DESIGN — Graph DB embedded in puro Go (`mycypher`)
 
 > Documento di design di alto livello. È la fonte di verità dell'architettura.
 > `PLAN.md` traduce questo design in fasi di sviluppo; `CLAUDE.md` ne estrae le
@@ -224,7 +224,7 @@ per la v1.
 ## 10. API embeddable (bozza)
 
 ```go
-db, err := grafo.Open("data/")   // apre/crea il database
+db, err := mycypher.Open("data/")   // apre/crea il database
 defer db.Close()
 
 res, err := db.Query(ctx, `
@@ -245,8 +245,8 @@ restare separati (`Query` read-only, `Execute` write). Decisione in Fase 7.
 ## 11. Layout del progetto (Go)
 
 ```
-grafo/
-  cmd/grafo/            # entrypoint CLI/REPL (single binary)
+mycypher/
+  cmd/mycypher/         # entrypoint CLI/REPL (single binary)
   internal/
     storage/            # interfaccia Store + adapter engine
       codec/            # key & value encoding (order-preserving)
@@ -260,13 +260,13 @@ grafo/
       sema/             # analisi semantica / binding
       plan/             # piano logico+fisico, planner a regole
       exec/             # operatori executor (Volcano)
-  grafo.go              # API pubblica embeddable (package grafo)
+  mycypher.go           # API pubblica embeddable (package mycypher)
   CLAUDE.md DESIGN.md PLAN.md
   go.mod
 ```
 
 > `internal/` per ciò che non è API pubblica; l'API embeddable vive nel package
-> radice `grafo`. Nome modulo placeholder: `github.com/<utente>/grafo`.
+> radice `mycypher`. Nome modulo: `github.com/giovibal/mycypher`.
 
 ## 12. Evoluzione futura (fuori v1)
 - **Replica / distribuzione**: NATS JetStream come write-ahead/replication log o

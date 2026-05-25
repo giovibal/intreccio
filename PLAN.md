@@ -21,7 +21,7 @@
 - `go mod init`, layout package come in `DESIGN.md §11`.
 - Toolchain: `golangci-lint`, `go test`, target `Makefile`/`Taskfile`.
 - CI minima (build + test + lint).
-- `cmd/grafo` con un main che apre/chiude un DB vuoto.
+- `cmd/mycypher` con un main che apre/chiude un DB vuoto.
 
 **Fatto quando:** `go build ./...`, `go test ./...`, `golangci-lint run` passano in CI.
 
@@ -156,7 +156,7 @@ rimuove nodo e archi incidenti con indici coerenti.
 **Deliverable:** indici gestiti via Cypher e usati dal planner.
 - `CREATE INDEX` su `(:Label).prop`; backfill degli esistenti.
 - Il planner sceglie l'indice quando disponibile.
-- CLI/REPL in `cmd/grafo` per uso interattivo.
+- CLI/REPL in `cmd/mycypher` per uso interattivo.
 
 **Test:** dopo `CREATE INDEX`, una query con equality usa l'indice (verificabile
 via `EXPLAIN`) e i risultati restano identici.
