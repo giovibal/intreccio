@@ -6,29 +6,29 @@ import (
 	"github.com/giovibal/mycypher/internal/storage/codec"
 )
 
-// Errori sentinella del graph layer.
+// Graph layer sentinel errors.
 var (
-	ErrNodeNotFound = errors.New("graph: nodo non trovato")
-	ErrEdgeNotFound = errors.New("graph: arco non trovato")
-	ErrNodeHasEdges = errors.New("graph: il nodo ha archi incidenti")
+	ErrNodeNotFound = errors.New("graph: node not found")
+	ErrEdgeNotFound = errors.New("graph: edge not found")
+	ErrNodeHasEdges = errors.New("graph: node has incident edges")
 )
 
-// Node è un nodo materializzato: ID più il record (label e proprietà come ID
-// interni del dizionario).
+// Node is a materialized node: ID plus the record (labels and properties as
+// internal dictionary IDs).
 type Node struct {
 	ID uint64
 	codec.NodeRecord
 }
 
-// Edge è un arco materializzato: ID più il record (tipo, src, dst, proprietà).
+// Edge is a materialized edge: ID plus the record (type, src, dst, properties).
 type Edge struct {
 	ID uint64
 	codec.EdgeRecord
 }
 
-// EdgeRef è la vista leggera di un arco ricavata dalla sola chiave di adiacenza
-// (`o`/`i`), senza leggere il record `e`. Sufficiente per il traversal quando non
-// servono le proprietà dell'arco (DESIGN §9).
+// EdgeRef is the lightweight view of an edge derived from the adjacency key alone
+// (`o`/`i`), without reading the `e` record. Sufficient for traversal when the
+// edge properties are not needed (DESIGN §9).
 type EdgeRef struct {
 	ID   uint64
 	Type uint32

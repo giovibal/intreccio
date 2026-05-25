@@ -1,5 +1,5 @@
-// Package parser traduce il testo Cypher in AST (recursive descent + Pratt per
-// le espressioni), limitato allo slice MVP (DESIGN §8).
+// Package parser translates Cypher text into an AST (recursive descent + Pratt for
+// expressions), limited to the MVP slice (DESIGN §8).
 package parser
 
 import (
@@ -9,7 +9,7 @@ import (
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 )
 
-// Parse analizza una query Cypher e restituisce l'AST, oppure un *ParseError.
+// Parse parses a Cypher query and returns the AST, or a *ParseError.
 func Parse(src string) (*ast.Query, error) {
 	toks, err := newLexer(src).tokenize()
 	if err != nil {
@@ -24,7 +24,7 @@ func Parse(src string) (*ast.Query, error) {
 		p.advance()
 	}
 	if !p.at(tEOF) {
-		return nil, p.errf(p.cur().pos, "token inatteso %s", p.describe(p.cur()))
+		return nil, p.errf(p.cur().pos, "unexpected token %s", p.describe(p.cur()))
 	}
 	return q, nil
 }
@@ -68,9 +68,9 @@ func (p *parser) describe(t token) string {
 	case tIdent:
 		return fmt.Sprintf("%q", t.text)
 	case tString:
-		return "stringa"
+		return "string"
 	case tInt, tFloat:
-		return "numero"
+		return "number"
 	default:
 		return t.typ.String()
 	}
@@ -78,20 +78,20 @@ func (p *parser) describe(t token) string {
 
 func (p *parser) expect(tt tokenType) (token, error) {
 	if !p.at(tt) {
-		return token{}, p.errf(p.cur().pos, "atteso %s, trovato %s", tt, p.describe(p.cur()))
+		return token{}, p.errf(p.cur().pos, "expected %s, found %s", tt, p.describe(p.cur()))
 	}
 	return p.advance(), nil
 }
 
 func (p *parser) expectKw(kw string) error {
 	if !p.atKw(kw) {
-		return p.errf(p.cur().pos, "attesa parola chiave %s, trovato %s", kw, p.describe(p.cur()))
+		return p.errf(p.cur().pos, "expected keyword %s, found %s", kw, p.describe(p.cur()))
 	}
 	p.advance()
 	return nil
 }
 
-// identName consuma un identificatore e ne restituisce il testo.
+// identName consumes an identifier and returns its text.
 func (p *parser) identName() (string, error) {
 	t, err := p.expect(tIdent)
 	if err != nil {
@@ -100,7 +100,7 @@ func (p *parser) identName() (string, error) {
 	return t.text, nil
 }
 
-// --- Clausole ---
+// --- Clauses ---
 
 func (p *parser) parseQuery() (*ast.Query, error) {
 	q := &ast.Query{}
@@ -112,7 +112,7 @@ func (p *parser) parseQuery() (*ast.Query, error) {
 		q.Clauses = append(q.Clauses, c)
 	}
 	if len(q.Clauses) == 0 {
-		return nil, p.errf(p.cur().pos, "query vuota")
+		return nil, p.errf(p.cur().pos, "empty query")
 	}
 	return q, nil
 }
@@ -148,7 +148,7 @@ func (p *parser) parseClause() (ast.Clause, error) {
 		pos := p.advance().pos
 		return p.deleteBody(pos, false)
 	default:
-		return nil, p.errf(p.cur().pos, "clausola inattesa: %s", p.describe(p.cur()))
+		return nil, p.errf(p.cur().pos, "unexpected clause: %s", p.describe(p.cur()))
 	}
 }
 
@@ -325,7 +325,7 @@ func (p *parser) parseCreate() (ast.Clause, error) {
 
 func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	p.advance() // INDEX
-	// Nome dell'indice opzionale prima di FOR.
+	// Optional index name before FOR.
 	if !p.atKw("FOR") && p.at(tIdent) {
 		p.advance()
 	}
@@ -355,7 +355,7 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	if _, err := p.expect(tLParen); err != nil {
 		return nil, err
 	}
-	if _, err := p.identName(); err != nil { // riferimento alla variabile (ignorato)
+	if _, err := p.identName(); err != nil { // variable reference (ignored)
 		return nil, err
 	}
 	if _, err := p.expect(tDot); err != nil {
@@ -415,7 +415,7 @@ func (p *parser) parseSetTarget() (*ast.PropertyAccess, error) {
 	}
 	pa, ok := e.(*ast.PropertyAccess)
 	if !ok {
-		return nil, p.errf(p.cur().pos, "atteso accesso a proprietà (es. n.prop) a sinistra di =")
+		return nil, p.errf(p.cur().pos, "expected property access (e.g. n.prop) on the left of =")
 	}
 	return pa, nil
 }
@@ -456,7 +456,7 @@ func (p *parser) parsePattern() ([]ast.PatternPart, error) {
 
 func (p *parser) parsePatternPart() (ast.PatternPart, error) {
 	var part ast.PatternPart
-	// Variabile di path opzionale: var = (...)
+	// Optional path variable: var = (...)
 	if p.at(tIdent) && p.peek(1).typ == tEq {
 		part.Variable = p.cur().text
 		p.advance() // var
@@ -550,7 +550,7 @@ func (p *parser) parseRelPattern() (*ast.RelPattern, error) {
 
 	switch {
 	case leftArrow && rightArrow:
-		return nil, p.errf(pos, "relazione con direzione ambigua (<-...->)")
+		return nil, p.errf(pos, "relationship with ambiguous direction (<-...->)")
 	case leftArrow:
 		rel.Direction = ast.DirIn
 	case rightArrow:
@@ -561,7 +561,7 @@ func (p *parser) parseRelPattern() (*ast.RelPattern, error) {
 	return rel, nil
 }
 
-// parseRelDetail analizza il contenuto tra parentesi quadre di una relazione.
+// parseRelDetail parses the content between the square brackets of a relationship.
 func (p *parser) parseRelDetail(rel *ast.RelPattern) error {
 	p.advance() // [
 	if p.at(tIdent) {
@@ -595,7 +595,7 @@ func (p *parser) parseRelDetail(rel *ast.RelPattern) error {
 				rel.MaxHops = int(p.advance().val.(int64))
 			}
 		} else if rel.MinHops != -1 {
-			rel.MaxHops = rel.MinHops // *n = esattamente n
+			rel.MaxHops = rel.MinHops // *n = exactly n
 		}
 	}
 	if p.at(tLBrace) {
@@ -642,9 +642,9 @@ func (p *parser) parsePropertyMap() (map[string]ast.Expr, error) {
 	return m, nil
 }
 
-// --- Espressioni (Pratt) ---
+// --- Expressions (Pratt) ---
 
-// infixBP restituisce il binding power dell'operatore infisso, 0 se non lo è.
+// infixBP returns the binding power of the infix operator, 0 if it is not one.
 func (p *parser) infixBP() (int, string) {
 	switch p.cur().typ {
 	case tStar:
@@ -681,8 +681,8 @@ func (p *parser) infixBP() (int, string) {
 }
 
 const (
-	bpNot        = 3 // NOT (prefisso): più lasco dei confronti, più stretto di AND
-	bpUnaryMinus = 7 // - (prefisso): più stretto di tutti gli infissi
+	bpNot        = 3 // NOT (prefix): looser than comparisons, tighter than AND
+	bpUnaryMinus = 7 // - (prefix): tighter than all infix operators
 )
 
 func (p *parser) parseExpr(minBP int) (ast.Expr, error) {
@@ -729,7 +729,7 @@ func (p *parser) parsePrefix() (ast.Expr, error) {
 	return p.parsePostfix(prim)
 }
 
-// parsePostfix applica accesso a proprietà (.key) e predicato di label (:Label).
+// parsePostfix applies property access (.key) and the label predicate (:Label).
 func (p *parser) parsePostfix(left ast.Expr) (ast.Expr, error) {
 	for {
 		switch {
@@ -800,7 +800,7 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		p.advance()
 		return &ast.Variable{Name: t.text, Pos: t.pos}, nil
 	default:
-		return nil, p.errf(t.pos, "espressione attesa, trovato %s", p.describe(t))
+		return nil, p.errf(t.pos, "expression expected, found %s", p.describe(t))
 	}
 }
 
@@ -814,7 +814,7 @@ func (p *parser) paramName() (string, error) {
 		p.advance()
 		return t.text, nil
 	default:
-		return "", p.errf(t.pos, "atteso nome di parametro dopo $")
+		return "", p.errf(t.pos, "expected parameter name after $")
 	}
 }
 

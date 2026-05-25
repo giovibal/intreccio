@@ -1,15 +1,15 @@
-// Package catalog gestisce dizionari name↔id, contatori ID e registry indici.
+// Package catalog manages name↔id dictionaries, ID counters and the index registry.
 //
-// Keyspace (primo byte della chiave), disgiunti dai tag del grafo (n/e/o/i/l/p):
+// Keyspace (first byte of the key), disjoint from the graph tags (n/e/o/i/l/p):
 //
-//	c + kind(1)                  -> uint64   contatore (kind: n,e,L,T,K)
-//	L + name                     -> id(4)    dizionario label (name→id)
-//	T + name                     -> id(4)    dizionario tipi
-//	K + name                     -> id(4)    dizionario chiavi-proprietà
-//	R + kind(1) + id(4)          -> name     reverse dei dizionari
-//	X + label(4) + propKey(4)    -> {}       registry indici `p` attivi
+//	c + kind(1)                  -> uint64   counter (kind: n,e,L,T,K)
+//	L + name                     -> id(4)    label dictionary (name→id)
+//	T + name                     -> id(4)    type dictionary
+//	K + name                     -> id(4)    property-key dictionary
+//	R + kind(1) + id(4)          -> name     dictionary reverse
+//	X + label(4) + propKey(4)    -> {}       registry of active `p` indexes
 //
-// Gli ID partono da 1; l'ID 0 è riservato come "nessuno".
+// IDs start at 1; ID 0 is reserved as "none".
 package catalog
 
 import (
@@ -29,7 +29,7 @@ const (
 	tagIndexReg byte = 'X'
 )
 
-// kind dei dizionari, usato per contatore e reverse.
+// Dictionary kinds, used for the counter and the reverse mapping.
 const (
 	kindLabel byte = 'L'
 	kindType  byte = 'T'
@@ -38,33 +38,33 @@ const (
 	kindEdge  byte = 'e'
 )
 
-// InternLabel restituisce l'ID della label, allocandolo se nuovo (idempotente).
+// InternLabel returns the label ID, allocating it if new (idempotent).
 func InternLabel(txn storage.Txn, name string) (uint32, error) {
 	return internDict(txn, tagLabelFwd, kindLabel, name)
 }
 
-// InternType restituisce l'ID del tipo di relazione, allocandolo se nuovo.
+// InternType returns the relationship type ID, allocating it if new.
 func InternType(txn storage.Txn, name string) (uint32, error) {
 	return internDict(txn, tagTypeFwd, kindType, name)
 }
 
-// InternKey restituisce l'ID della chiave-proprietà, allocandolo se nuovo.
+// InternKey returns the property-key ID, allocating it if new.
 func InternKey(txn storage.Txn, name string) (uint32, error) {
 	return internDict(txn, tagKeyFwd, kindKey, name)
 }
 
-// LookupLabel risolve un nome di label nel suo ID senza allocarlo. found è false
-// se la label non esiste (utile nel read path dentro una View).
+// LookupLabel resolves a label name to its ID without allocating it. found is
+// false if the label does not exist (useful in the read path inside a View).
 func LookupLabel(txn storage.Txn, name string) (id uint32, found bool, err error) {
 	return lookupDict(txn, tagLabelFwd, name)
 }
 
-// LookupType risolve un nome di tipo nel suo ID senza allocarlo.
+// LookupType resolves a type name to its ID without allocating it.
 func LookupType(txn storage.Txn, name string) (id uint32, found bool, err error) {
 	return lookupDict(txn, tagTypeFwd, name)
 }
 
-// LookupKey risolve un nome di chiave-proprietà nel suo ID senza allocarlo.
+// LookupKey resolves a property-key name to its ID without allocating it.
 func LookupKey(txn storage.Txn, name string) (id uint32, found bool, err error) {
 	return lookupDict(txn, tagKeyFwd, name)
 }
@@ -81,19 +81,19 @@ func lookupDict(txn storage.Txn, fwdTag byte, name string) (uint32, bool, error)
 	}
 }
 
-// LabelName risolve l'ID di una label nel suo nome.
+// LabelName resolves a label ID to its name.
 func LabelName(txn storage.Txn, id uint32) (string, error) { return revName(txn, kindLabel, id) }
 
-// TypeName risolve l'ID di un tipo nel suo nome.
+// TypeName resolves a type ID to its name.
 func TypeName(txn storage.Txn, id uint32) (string, error) { return revName(txn, kindType, id) }
 
-// KeyName risolve l'ID di una chiave-proprietà nel suo nome.
+// KeyName resolves a property-key ID to its name.
 func KeyName(txn storage.Txn, id uint32) (string, error) { return revName(txn, kindKey, id) }
 
-// NextNodeID alloca un nuovo ID nodo monotòno.
+// NextNodeID allocates a new monotonic node ID.
 func NextNodeID(txn storage.Txn) (uint64, error) { return nextCounter(txn, kindNode) }
 
-// NextEdgeID alloca un nuovo ID arco monotòno.
+// NextEdgeID allocates a new monotonic edge ID.
 func NextEdgeID(txn storage.Txn) (uint64, error) { return nextCounter(txn, kindEdge) }
 
 func internDict(txn storage.Txn, fwdTag, kind byte, name string) (uint32, error) {
@@ -110,7 +110,7 @@ func internDict(txn storage.Txn, fwdTag, kind byte, name string) (uint32, error)
 		return 0, err
 	}
 	if id64 > 0xFFFFFFFF {
-		return 0, fmt.Errorf("catalog: esauriti gli ID per il dizionario %c", kind)
+		return 0, fmt.Errorf("catalog: ran out of IDs for dictionary %c", kind)
 	}
 	id := uint32(id64)
 
@@ -137,8 +137,8 @@ func revName(txn storage.Txn, kind byte, id uint32) (string, error) {
 	return string(v), nil
 }
 
-// nextCounter incrementa il contatore di tipo kind e restituisce il nuovo valore
-// (pre-incremento: 1, 2, 3, ...).
+// nextCounter increments the counter of the given kind and returns the new value
+// (pre-increment: 1, 2, 3, ...).
 func nextCounter(txn storage.Txn, kind byte) (uint64, error) {
 	key := []byte{tagCounter, kind}
 	var cur uint64
@@ -157,7 +157,7 @@ func nextCounter(txn storage.Txn, kind byte) (uint64, error) {
 	return next, nil
 }
 
-// IndexDef identifica un indice secondario `p` su (label, propKey).
+// IndexDef identifies a secondary `p` index on (label, propKey).
 type IndexDef struct {
 	Label   uint32
 	PropKey uint32
@@ -171,12 +171,12 @@ func indexKey(label, propKey uint32) []byte {
 	return b
 }
 
-// AddIndex registra un indice `p` attivo (idempotente).
+// AddIndex registers an active `p` index (idempotent).
 func AddIndex(txn storage.Txn, label, propKey uint32) error {
 	return txn.Set(indexKey(label, propKey), []byte{})
 }
 
-// HasIndex indica se esiste un indice `p` su (label, propKey).
+// HasIndex reports whether a `p` index exists on (label, propKey).
 func HasIndex(txn storage.Txn, label, propKey uint32) (bool, error) {
 	switch _, err := txn.Get(indexKey(label, propKey)); {
 	case err == nil:
@@ -188,7 +188,7 @@ func HasIndex(txn storage.Txn, label, propKey uint32) (bool, error) {
 	}
 }
 
-// ListIndexes elenca gli indici `p` registrati.
+// ListIndexes lists the registered `p` indexes.
 func ListIndexes(txn storage.Txn) ([]IndexDef, error) {
 	var out []IndexDef
 	it := txn.Scan([]byte{tagIndexReg})
@@ -196,7 +196,7 @@ func ListIndexes(txn storage.Txn) ([]IndexDef, error) {
 	for ; it.Valid(); it.Next() {
 		k := it.Key()
 		if len(k) != 1+4+4 {
-			return nil, fmt.Errorf("catalog: chiave registry indici malformata (len=%d)", len(k))
+			return nil, fmt.Errorf("catalog: malformed index registry key (len=%d)", len(k))
 		}
 		out = append(out, IndexDef{
 			Label:   binary.BigEndian.Uint32(k[1:5]),

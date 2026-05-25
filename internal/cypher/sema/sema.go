@@ -1,7 +1,7 @@
-// Package sema esegue l'analisi semantica dell'AST Cypher: risoluzione dello
-// scope delle variabili (con reset su WITH), validazioni di base e calcolo delle
-// colonne di output. Il binding di label/tipi/proprietà agli ID di dizionario è
-// deferito a plan/exec, dove è disponibile una transazione (vedi ADR 0004).
+// Package sema performs semantic analysis of the Cypher AST: variable scope
+// resolution (with reset on WITH), basic validations and computation of the
+// output columns. Binding of labels/types/properties to dictionary IDs is
+// deferred to plan/exec, where a transaction is available (see ADR 0004).
 package sema
 
 import (
@@ -11,23 +11,23 @@ import (
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 )
 
-// SemaError è un errore semantico con posizione nel sorgente.
+// SemaError is a semantic error with a position in the source.
 type SemaError struct {
 	Pos ast.Pos
 	Msg string
 }
 
 func (e *SemaError) Error() string {
-	return fmt.Sprintf("riga %d:%d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
+	return fmt.Sprintf("line %d:%d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
 }
 
-// Result è l'esito dell'analisi: le colonne prodotte dalla query (vuoto per
-// query di sola scrittura senza RETURN).
+// Result is the outcome of the analysis: the columns produced by the query
+// (empty for write-only queries without RETURN).
 type Result struct {
 	Columns []string
 }
 
-// Analyze valida la query e ne calcola le colonne di output.
+// Analyze validates the query and computes its output columns.
 func Analyze(q *ast.Query) (*Result, error) {
 	a := &analyzer{}
 	return a.run(q)
@@ -43,17 +43,17 @@ func (a *analyzer) errf(pos ast.Pos, format string, args ...any) *SemaError {
 
 func (a *analyzer) run(q *ast.Query) (*Result, error) {
 	if len(q.Clauses) == 0 {
-		return nil, &SemaError{Msg: "query vuota"}
+		return nil, &SemaError{Msg: "empty query"}
 	}
 	if hasCreateIndex(q) && len(q.Clauses) != 1 {
-		return nil, a.errf(clausePos(q.Clauses[0]), "CREATE INDEX dev'essere l'unica clausola")
+		return nil, a.errf(clausePos(q.Clauses[0]), "CREATE INDEX must be the only clause")
 	}
 
 	sc := newScope()
 	for i, clause := range q.Clauses {
 		last := i == len(q.Clauses)-1
 		if _, ok := clause.(*ast.Return); ok && !last {
-			return nil, a.errf(clausePos(clause), "RETURN dev'essere l'ultima clausola")
+			return nil, a.errf(clausePos(clause), "RETURN must be the last clause")
 		}
 		if err := a.clause(sc, clause); err != nil {
 			return nil, err
@@ -62,7 +62,7 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 
 	if !endsQuery(q.Clauses[len(q.Clauses)-1]) {
 		return nil, a.errf(clausePos(q.Clauses[len(q.Clauses)-1]),
-			"query incompleta: serve RETURN o una clausola di scrittura")
+			"incomplete query: a RETURN or a writing clause is required")
 	}
 	return &a.result, nil
 }
@@ -84,9 +84,9 @@ func (a *analyzer) clause(sc *scope, c ast.Clause) error {
 	case *ast.Return:
 		return a.ret(sc, cl)
 	case *ast.CreateIndex:
-		return nil // nessuna variabile in gioco
+		return nil // no variables involved
 	default:
-		return a.errf(clausePos(c), "clausola non supportata")
+		return a.errf(clausePos(c), "unsupported clause")
 	}
 }
 
@@ -125,8 +125,9 @@ func (a *analyzer) delete(sc *scope, d *ast.Delete) error {
 	return nil
 }
 
-// introducePattern aggiunge allo scope le variabili del pattern (nodi, relazioni,
-// path) e valida le espressioni nelle mappe di proprietà contro lo scope risultante.
+// introducePattern adds the pattern variables (nodes, relationships, path) to the
+// scope and validates the expressions in the property maps against the resulting
+// scope.
 func (a *analyzer) introducePattern(sc *scope, parts []ast.PatternPart) error {
 	for _, part := range parts {
 		if part.Variable != "" {
@@ -140,7 +141,7 @@ func (a *analyzer) introducePattern(sc *scope, parts []ast.PatternPart) error {
 			a.defineNode(sc, ch.Node)
 		}
 	}
-	// Seconda passata: le mappe di proprietà possono riferire variabili del pattern.
+	// Second pass: property maps may reference pattern variables.
 	for _, part := range parts {
 		if err := a.checkProps(sc, part.Start.Props); err != nil {
 			return err
@@ -173,7 +174,7 @@ func (a *analyzer) checkProps(sc *scope, props map[string]ast.Expr) error {
 }
 
 func (a *analyzer) with(sc *scope, w *ast.With) error {
-	// Gli item sono valutati nello scope corrente (pre-WITH).
+	// Items are evaluated in the current (pre-WITH) scope.
 	for _, item := range w.Items {
 		if err := a.checkExpr(sc, item.Expr, false); err != nil {
 			return err
@@ -189,14 +190,14 @@ func (a *analyzer) with(sc *scope, w *ast.With) error {
 		if name == "" {
 			v, ok := item.Expr.(*ast.Variable)
 			if !ok {
-				return a.errf(exprPos(item.Expr), "le espressioni in WITH devono avere un alias (AS)")
+				return a.errf(exprPos(item.Expr), "expressions in WITH must have an alias (AS)")
 			}
 			name = v.Name
 		}
 		next.define(name, exprPos(item.Expr))
 	}
 
-	// ORDER BY/SKIP/LIMIT/WHERE riferiscono le colonne proiettate.
+	// ORDER BY/SKIP/LIMIT/WHERE reference the projected columns.
 	if err := a.checkProjectionTail(next, w.OrderBy, w.Skip, w.Limit); err != nil {
 		return err
 	}
@@ -217,10 +218,10 @@ func (a *analyzer) ret(sc *scope, r *ast.Return) error {
 		}
 	}
 	if r.Star && sc.empty() && len(r.Items) == 0 {
-		return a.errf(r.Pos, "RETURN * non è ammesso senza variabili in scope")
+		return a.errf(r.Pos, "RETURN * is not allowed with no variables in scope")
 	}
 
-	// ORDER BY in RETURN può riferire sia le variabili in scope sia gli alias proiettati.
+	// ORDER BY in RETURN may reference both the in-scope variables and the projected aliases.
 	tail := newScope()
 	tail.merge(sc)
 	cols := a.columns(sc, r.Star, r.Items, tail)
@@ -231,8 +232,8 @@ func (a *analyzer) ret(sc *scope, r *ast.Return) error {
 	return nil
 }
 
-// columns calcola i nomi delle colonne di output e li registra anche in tail
-// (così ORDER BY può riferirle).
+// columns computes the output column names and also registers them in tail (so
+// ORDER BY can reference them).
 func (a *analyzer) columns(sc *scope, star bool, items []ast.ReturnItem, tail *scope) []string {
 	var cols []string
 	if star {
@@ -268,14 +269,14 @@ func (a *analyzer) checkProjectionTail(sc *scope, orderBy []ast.SortItem, skip, 
 	return nil
 }
 
-// checkExpr valida i riferimenti a variabile e l'uso delle aggregazioni.
+// checkExpr validates variable references and the use of aggregations.
 func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 	switch ex := e.(type) {
 	case *ast.Literal, *ast.Param:
 		return nil
 	case *ast.Variable:
 		if !sc.has(ex.Name) {
-			return a.errf(ex.Pos, "variabile non definita: %s", ex.Name)
+			return a.errf(ex.Pos, "undefined variable: %s", ex.Name)
 		}
 		return nil
 	case *ast.PropertyAccess:
@@ -292,7 +293,7 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 	case *ast.FunctionCall:
 		agg := isAggregate(ex.Name)
 		if agg && inAgg {
-			return a.errf(ex.Pos, "aggregazione annidata in un'altra aggregazione")
+			return a.errf(ex.Pos, "aggregation nested inside another aggregation")
 		}
 		childAgg := inAgg || agg
 		for _, arg := range ex.Args {
@@ -302,7 +303,7 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 		}
 		return nil
 	default:
-		return a.errf(exprPos(e), "espressione non supportata")
+		return a.errf(exprPos(e), "unsupported expression")
 	}
 }
 
@@ -321,7 +322,7 @@ func hasCreateIndex(q *ast.Query) bool {
 	return false
 }
 
-// endsQuery indica se la clausola può chiudere una query.
+// endsQuery reports whether the clause can terminate a query.
 func endsQuery(c ast.Clause) bool {
 	switch c.(type) {
 	case *ast.Return, *ast.Create, *ast.Merge, *ast.Set, *ast.Delete, *ast.CreateIndex:

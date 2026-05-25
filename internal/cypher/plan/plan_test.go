@@ -67,7 +67,7 @@ func scanOf(t *testing.T, root Op) Op {
 			return o
 		}
 	}
-	t.Fatal("nessun access method trovato")
+	t.Fatal("no access method found")
 	return nil
 }
 
@@ -94,42 +94,42 @@ func TestAnchorSelection(t *testing.T) {
 		root := mustPlan(t, "MATCH (p:Person) WHERE p.email = $e RETURN p", withIndex("Person.email"))
 		np, ok := scanOf(t, root).(*NodeByProperty)
 		if !ok {
-			t.Fatalf("atteso NodeByProperty, got %T", scanOf(t, root))
+			t.Fatalf("expected NodeByProperty, got %T", scanOf(t, root))
 		}
 		if np.Label != "Person" || np.Key != "email" {
-			t.Errorf("NodeByProperty errato: %+v", np)
+			t.Errorf("wrong NodeByProperty: %+v", np)
 		}
-		// La equality è consumata dall'anchor: niente Filter residuo.
+		// The equality is consumed by the anchor: no residual Filter.
 		if f := firstFilter(root); f != nil {
-			t.Errorf("Filter inatteso: %s", exprString(f.Pred))
+			t.Errorf("unexpected Filter: %s", exprString(f.Pred))
 		}
 	})
 
 	t.Run("indexed-property-inline", func(t *testing.T) {
 		root := mustPlan(t, "MATCH (p:Person {email: $e}) RETURN p", withIndex("Person.email"))
 		if _, ok := scanOf(t, root).(*NodeByProperty); !ok {
-			t.Fatalf("atteso NodeByProperty, got %T", scanOf(t, root))
+			t.Fatalf("expected NodeByProperty, got %T", scanOf(t, root))
 		}
 		if f := firstFilter(root); f != nil {
-			t.Errorf("Filter inatteso: %s", exprString(f.Pred))
+			t.Errorf("unexpected Filter: %s", exprString(f.Pred))
 		}
 	})
 
 	t.Run("label-scan-when-not-indexed", func(t *testing.T) {
 		root := mustPlan(t, "MATCH (p:Person) WHERE p.email = $e RETURN p", withIndex())
 		if _, ok := scanOf(t, root).(*NodeByLabelScan); !ok {
-			t.Fatalf("atteso NodeByLabelScan, got %T", scanOf(t, root))
+			t.Fatalf("expected NodeByLabelScan, got %T", scanOf(t, root))
 		}
 		f := firstFilter(root)
 		if f == nil || exprString(f.Pred) != "p.email = $e" {
-			t.Errorf("atteso Filter(p.email = $e), got %v", f)
+			t.Errorf("expected Filter(p.email = $e), got %v", f)
 		}
 	})
 
 	t.Run("all-nodes-scan", func(t *testing.T) {
 		root := mustPlan(t, "MATCH (n) RETURN n", withIndex())
 		if _, ok := scanOf(t, root).(*AllNodesScan); !ok {
-			t.Fatalf("atteso AllNodesScan, got %T", scanOf(t, root))
+			t.Fatalf("expected AllNodesScan, got %T", scanOf(t, root))
 		}
 	})
 
@@ -137,7 +137,7 @@ func TestAnchorSelection(t *testing.T) {
 		root := mustPlan(t, "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.email = $e RETURN a", withIndex("Person.email"))
 		np, ok := scanOf(t, root).(*NodeByProperty)
 		if !ok || np.Var != "b" {
-			t.Fatalf("atteso anchor NodeByProperty su b, got %T %+v", scanOf(t, root), scanOf(t, root))
+			t.Fatalf("expected anchor NodeByProperty on b, got %T %+v", scanOf(t, root), scanOf(t, root))
 		}
 	})
 }
@@ -147,16 +147,16 @@ func TestExpandDirection(t *testing.T) {
 		root := mustPlan(t, "MATCH (a:Person)-[:KNOWS]->(b) RETURN b", withIndex())
 		e := firstExpand(root)
 		if e == nil || e.From != "a" || e.To != "b" || e.Dir != ast.DirOut {
-			t.Fatalf("Expand errato: %+v", e)
+			t.Fatalf("wrong Expand: %+v", e)
 		}
 	})
 
 	t.Run("reversed-when-anchor-is-dst", func(t *testing.T) {
-		// b ha la label (anchor), a no: si espande da b verso a invertendo la direzione.
+		// b has the label (anchor), a does not: expand from b to a, flipping the direction.
 		root := mustPlan(t, "MATCH (a)-[:KNOWS]->(b:Person) RETURN a", withIndex())
 		e := firstExpand(root)
 		if e == nil || e.From != "b" || e.To != "a" || e.Dir != ast.DirIn {
-			t.Fatalf("Expand invertito errato: %+v", e)
+			t.Fatalf("wrong reversed Expand: %+v", e)
 		}
 	})
 }
@@ -174,31 +174,31 @@ func TestExplain(t *testing.T) {
 }
 
 func TestLabelOnExpandedNodeBecomesFilter(t *testing.T) {
-	// b è raggiunto via Expand: la sua label dev'essere verificata in un Filter.
+	// b is reached via Expand: its label must be checked in a Filter.
 	root := mustPlan(t, "MATCH (a:Person)-[:KNOWS]->(b:Admin) RETURN b", withIndex())
 	f := firstFilter(root)
 	if f == nil || exprString(f.Pred) != "b:Admin" {
-		t.Errorf("atteso Filter(b:Admin), got %v", f)
+		t.Errorf("expected Filter(b:Admin), got %v", f)
 	}
 }
 
 func TestProjectionTail(t *testing.T) {
 	root := mustPlan(t, "MATCH (a) RETURN a.name AS name ORDER BY name DESC SKIP 2 LIMIT 10", withIndex())
-	// Dall'alto: Limit -> Skip -> Sort -> Project.
+	// From the top: Limit -> Skip -> Sort -> Project.
 	lim, ok := root.(*Limit)
 	if !ok {
-		t.Fatalf("radice attesa Limit, got %T", root)
+		t.Fatalf("expected root Limit, got %T", root)
 	}
 	skip, ok := lim.Input.(*Skip)
 	if !ok {
-		t.Fatalf("atteso Skip, got %T", lim.Input)
+		t.Fatalf("expected Skip, got %T", lim.Input)
 	}
 	sort, ok := skip.Input.(*Sort)
 	if !ok {
-		t.Fatalf("atteso Sort, got %T", skip.Input)
+		t.Fatalf("expected Sort, got %T", skip.Input)
 	}
 	if _, ok := sort.Input.(*Project); !ok {
-		t.Fatalf("atteso Project, got %T", sort.Input)
+		t.Fatalf("expected Project, got %T", sort.Input)
 	}
 }
 
@@ -211,12 +211,12 @@ func TestAggregatePlan(t *testing.T) {
 		}
 	}
 	if agg == nil {
-		t.Fatal("atteso un operatore Aggregate")
+		t.Fatal("expected an Aggregate operator")
 	}
 	if len(agg.GroupKeys) != 1 || agg.GroupKeys[0].Column != "p" {
-		t.Errorf("group keys errate: %+v", agg.GroupKeys)
+		t.Errorf("wrong group keys: %+v", agg.GroupKeys)
 	}
 	if len(agg.Aggs) != 1 || agg.Aggs[0].Column != "c" {
-		t.Errorf("aggs errate: %+v", agg.Aggs)
+		t.Errorf("wrong aggs: %+v", agg.Aggs)
 	}
 }

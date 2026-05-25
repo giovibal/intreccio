@@ -16,10 +16,10 @@ func TestOutKeyRoundTrip(t *testing.T) {
 		t.Errorf("got (%d,%d,%d,%d), want (%d,%d,%d,%d)", gs, gt, gd, ge, src, typ, dst, edge)
 	}
 	if !bytes.HasPrefix(k, OutPrefix(src, typ)) {
-		t.Error("OutKey deve avere OutPrefix come prefisso")
+		t.Error("OutKey must have OutPrefix as a prefix")
 	}
 	if !bytes.HasPrefix(k, OutPrefixAll(src)) {
-		t.Error("OutKey deve avere OutPrefixAll come prefisso")
+		t.Error("OutKey must have OutPrefixAll as a prefix")
 	}
 }
 
@@ -34,7 +34,7 @@ func TestInKeyRoundTrip(t *testing.T) {
 		t.Errorf("got (%d,%d,%d,%d), want (%d,%d,%d,%d)", gd, gt, gs, ge, dst, typ, src, edge)
 	}
 	if !bytes.HasPrefix(k, InPrefix(dst, typ)) {
-		t.Error("InKey deve avere InPrefix come prefisso")
+		t.Error("InKey must have InPrefix as a prefix")
 	}
 }
 
@@ -49,7 +49,7 @@ func TestLabelKeyRoundTrip(t *testing.T) {
 		t.Errorf("got (%d,%d), want (%d,%d)", gl, gn, label, node)
 	}
 	if !bytes.HasPrefix(k, LabelPrefix(label)) {
-		t.Error("LabelKey deve avere LabelPrefix come prefisso")
+		t.Error("LabelKey must have LabelPrefix as a prefix")
 	}
 }
 
@@ -66,21 +66,21 @@ func TestNodeKeyRoundTrip(t *testing.T) {
 
 func TestPropKeyOrdering(t *testing.T) {
 	const label, propKey = uint32(1), uint32(2)
-	// Stesso valore, nodeID diverso: ordina per nodeID.
+	// Same value, different nodeID: orders by nodeID.
 	a, _ := PropKey(label, propKey, int64(10), 1)
 	b, _ := PropKey(label, propKey, int64(10), 2)
 	if bytes.Compare(a, b) >= 0 {
-		t.Error("a parità di valore, nodeID minore deve ordinare prima")
+		t.Error("with equal value, the smaller nodeID must order first")
 	}
-	// Valore diverso domina sul nodeID.
+	// A different value dominates over the nodeID.
 	c, _ := PropKey(label, propKey, int64(5), 999)
 	if bytes.Compare(c, a) >= 0 {
-		t.Error("valore minore deve ordinare prima a prescindere dal nodeID")
+		t.Error("a smaller value must order first regardless of the nodeID")
 	}
-	// Tutte le chiavi condividono PropPrefix per (label, propKey, valore).
+	// All keys share PropPrefix for (label, propKey, value).
 	pfx, _ := PropPrefix(label, propKey, int64(10))
 	if !bytes.HasPrefix(a, pfx) || !bytes.HasPrefix(b, pfx) {
-		t.Error("PropKey deve avere PropPrefix come prefisso")
+		t.Error("PropKey must have PropPrefix as a prefix")
 	}
 	if node, err := ParsePropKeyNode(a); err != nil || node != 1 {
 		t.Errorf("ParsePropKeyNode(a) = (%d, %v)", node, err)

@@ -53,8 +53,8 @@ func exprPos(e ast.Expr) ast.Pos {
 	}
 }
 
-// exprString rende un'espressione in forma testuale, usata per nominare gli item
-// di proiezione privi di alias (es. RETURN a.b -> colonna "a.b").
+// exprString renders an expression as text, used to name projection items that
+// lack an alias (e.g. RETURN a.b -> column "a.b").
 func exprString(e ast.Expr) string {
 	switch ex := e.(type) {
 	case *ast.Variable:

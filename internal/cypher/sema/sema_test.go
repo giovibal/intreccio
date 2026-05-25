@@ -39,7 +39,7 @@ func TestValidQueries(t *testing.T) {
 				t.Fatalf("Analyze(%q): %v", tc.src, err)
 			}
 			if !reflect.DeepEqual(res.Columns, tc.cols) {
-				t.Errorf("colonne = %v, want %v", res.Columns, tc.cols)
+				t.Errorf("columns = %v, want %v", res.Columns, tc.cols)
 			}
 		})
 	}
@@ -67,7 +67,7 @@ func TestUndefinedVariable(t *testing.T) {
 		name string
 		src  string
 		line int
-		col  int // 0 = non verificato
+		col  int // 0 = not checked
 	}{
 		{"return", "MATCH (n) RETURN m", 1, 18},
 		{"dropped-by-with", "MATCH (a)-[]->(b) WITH a RETURN b", 1, 0},
@@ -80,10 +80,10 @@ func TestUndefinedVariable(t *testing.T) {
 			_, err := analyze(t, tc.src)
 			se := wantSemaError(t, err)
 			if se.Pos.Line != tc.line {
-				t.Errorf("riga = %d, want %d (%v)", se.Pos.Line, tc.line, se)
+				t.Errorf("line = %d, want %d (%v)", se.Pos.Line, tc.line, se)
 			}
 			if tc.col != 0 && se.Pos.Col != tc.col {
-				t.Errorf("colonna = %d, want %d (%v)", se.Pos.Col, tc.col, se)
+				t.Errorf("column = %d, want %d (%v)", se.Pos.Col, tc.col, se)
 			}
 		})
 	}
@@ -91,40 +91,40 @@ func TestUndefinedVariable(t *testing.T) {
 
 func TestOtherSemanticErrors(t *testing.T) {
 	for _, src := range []string{
-		"MATCH (p) WITH p.name RETURN p",                    // WITH senza alias
-		"RETURN *",                                          // RETURN * senza scope
-		"MATCH (a) RETURN count(sum(a.x))",                  // aggregazione annidata
-		"CREATE INDEX FOR (p:Person) ON (p.email) RETURN p", // CREATE INDEX non da solo
-		"MATCH (n)",                                         // query incompleta
-		"MATCH (a) WHERE a.x = 1",                           // incompleta (manca RETURN)
+		"MATCH (p) WITH p.name RETURN p",                    // WITH without alias
+		"RETURN *",                                          // RETURN * with no scope
+		"MATCH (a) RETURN count(sum(a.x))",                  // nested aggregation
+		"CREATE INDEX FOR (p:Person) ON (p.email) RETURN p", // CREATE INDEX not standalone
+		"MATCH (n)",                                         // incomplete query
+		"MATCH (a) WHERE a.x = 1",                           // incomplete (missing RETURN)
 	} {
 		t.Run(src, func(t *testing.T) {
 			if _, err := analyze(t, src); err == nil {
-				t.Errorf("Analyze(%q): atteso errore", src)
+				t.Errorf("Analyze(%q): expected an error", src)
 			} else if _, ok := err.(*SemaError); !ok {
-				t.Errorf("atteso *SemaError, got %T: %v", err, err)
+				t.Errorf("expected *SemaError, got %T: %v", err, err)
 			}
 		})
 	}
 }
 
 func TestReturnNotLast(t *testing.T) {
-	// RETURN seguito da altre clausole.
+	// RETURN followed by more clauses.
 	_, err := analyze(t, "MATCH (n) RETURN n WITH n AS m RETURN m")
 	se := wantSemaError(t, err)
 	if se.Pos.Line != 1 {
-		t.Errorf("riga = %d (%v)", se.Pos.Line, se)
+		t.Errorf("line = %d (%v)", se.Pos.Line, se)
 	}
 }
 
 func wantSemaError(t *testing.T, err error) *SemaError {
 	t.Helper()
 	if err == nil {
-		t.Fatal("atteso errore, nessuno")
+		t.Fatal("expected an error, got none")
 	}
 	se, ok := err.(*SemaError)
 	if !ok {
-		t.Fatalf("atteso *SemaError, got %T: %v", err, err)
+		t.Fatalf("expected *SemaError, got %T: %v", err, err)
 	}
 	return se
 }

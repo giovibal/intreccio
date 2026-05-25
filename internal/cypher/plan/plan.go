@@ -8,14 +8,14 @@ import (
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 )
 
-// Catalog fornisce al planner le informazioni sugli indici disponibili. In
-// produzione è backed dalla transazione (risolve i nomi e interroga il registry);
-// nei test si usa un fake. Vedi ADR 0004.
+// Catalog provides the planner with information about the available indexes. In
+// production it is backed by the transaction (it resolves names and queries the
+// registry); tests use a fake. See ADR 0004.
 type Catalog interface {
 	HasIndex(label, propKey string) bool
 }
 
-// Plan costruisce il piano fisico per la query (read path; la scrittura è Fase 7).
+// Plan builds the physical plan for the query (read path; writing is Phase 7).
 func Plan(q *ast.Query, cat Catalog) (Op, error) {
 	pl := &planner{cat: cat, bound: map[string]bool{}}
 	for _, c := range q.Clauses {
@@ -24,7 +24,7 @@ func Plan(q *ast.Query, cat Catalog) (Op, error) {
 		}
 	}
 	if pl.plan == nil {
-		return nil, fmt.Errorf("plan: nessun piano prodotto")
+		return nil, fmt.Errorf("plan: no plan produced")
 	}
 	return pl.plan, nil
 }
@@ -62,11 +62,11 @@ func (pl *planner) clause(c ast.Clause) error {
 	case *ast.Return:
 		return pl.planReturn(cl)
 	case *ast.Create, *ast.Merge, *ast.Set, *ast.Delete:
-		return fmt.Errorf("plan: pianificazione della scrittura non ancora supportata (Fase 7)")
+		return fmt.Errorf("plan: write planning not yet supported (Phase 7)")
 	case *ast.CreateIndex:
-		return fmt.Errorf("plan: CREATE INDEX non ancora pianificato (Fase 9)")
+		return fmt.Errorf("plan: CREATE INDEX not yet planned (Phase 9)")
 	default:
-		return fmt.Errorf("plan: clausola non supportata")
+		return fmt.Errorf("plan: unsupported clause")
 	}
 }
 
@@ -78,7 +78,7 @@ type pnode struct {
 	props          map[string]ast.Expr
 	reachedByScan  bool
 	scanLabel      string
-	consumedInline string // chiave di proprietà inline consumata dall'anchor
+	consumedInline string // inline property key consumed by the anchor
 }
 
 type prel struct {
@@ -95,7 +95,7 @@ type equality struct {
 	variable string
 	key      string
 	value    ast.Expr
-	conjIdx  int // indice nel WHERE conjunct, -1 se inline
+	conjIdx  int // index in the WHERE conjuncts, -1 if inline
 }
 
 func (pl *planner) planMatch(m *ast.Match) error {
@@ -162,7 +162,7 @@ func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality
 		startIdx = idx
 	}
 
-	// Espansione verso destra e verso sinistra a partire dall'anchor.
+	// Expand rightward and leftward starting from the anchor.
 	for i := startIdx; i < len(rels); i++ {
 		pl.emitExpand(nodes[i], rels[i], nodes[i+1], false)
 	}
@@ -201,7 +201,7 @@ func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality) (
 			bestIdx, bestScore, bestScan, bestEq = i, score, scan, eq
 		}
 	}
-	if bestScan == nil { // tutti i nodi già legati: fallback (non dovrebbe capitare qui)
+	if bestScan == nil { // all nodes already bound: fallback (should not happen here)
 		bestScan = &AllNodesScan{Var: nodes[0].name}
 	}
 	return bestIdx, bestScan, bestEq
@@ -254,9 +254,9 @@ func (pl *planner) makeRel(r *ast.RelPattern) prel {
 	return prel{name: name, types: r.Types, dir: r.Direction, props: r.Props, varLen: r.VarLength, min: r.MinHops, max: r.MaxHops}
 }
 
-// residualPredicates raccoglie i predicati da applicare in Filter dopo scan/expand:
-// label non garantite dall'access method, proprietà inline (escluse quelle
-// consumate dall'anchor) e proprietà delle relazioni.
+// residualPredicates collects the predicates to apply in a Filter after
+// scan/expand: labels not guaranteed by the access method, inline properties
+// (excluding those consumed by the anchor) and relationship properties.
 func residualPredicates(nodes []pnode, rels []prel) []ast.Expr {
 	var out []ast.Expr
 	for _, nd := range nodes {
@@ -288,7 +288,7 @@ func residualPredicates(nodes []pnode, rels []prel) []ast.Expr {
 	return out
 }
 
-// --- Proiezione ---
+// --- Projection ---
 
 func (pl *planner) planReturn(r *ast.Return) error {
 	pl.projectOrAggregate(r.Star, r.Items, r.Distinct)
@@ -324,7 +324,7 @@ func (pl *planner) projectOrAggregate(star bool, items []ast.ReturnItem, distinc
 		pl.plan = &Project{Input: pl.plan, Items: projItems, Distinct: distinct}
 	}
 
-	// Reset dello scope alle colonne proiettate (semantica di WITH/RETURN).
+	// Reset the scope to the projected columns (WITH/RETURN semantics).
 	pl.bound = map[string]bool{}
 	pl.boundOrder = nil
 	for _, pi := range projItems {
@@ -365,7 +365,7 @@ func (pl *planner) applyTail(orderBy []ast.SortItem, skip, limit ast.Expr) {
 	}
 }
 
-// --- Helper su espressioni ---
+// --- Expression helpers ---
 
 func conjuncts(e ast.Expr) []ast.Expr {
 	if b, ok := e.(*ast.Binary); ok && b.Op == "AND" {

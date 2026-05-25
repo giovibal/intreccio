@@ -7,9 +7,9 @@ import (
 	"sort"
 )
 
-// Tag di tipo per i valori dentro i record `n`/`e`. A differenza dei valori
-// indicizzati (`valEnc`), qui conta solo il round-trip, non l'ordine: si usa un
-// formato self-describing length-prefixed che supporta anche list e map.
+// Type tags for the values inside `n`/`e` records. Unlike indexed values
+// (`valEnc`), here only round-trip matters, not order: a self-describing
+// length-prefixed format is used, which also supports lists and maps.
 const (
 	recNull  byte = 0
 	recBool  byte = 1
@@ -20,13 +20,13 @@ const (
 	recMap   byte = 6
 )
 
-// NodeRecord è il valore serializzato della chiave `n`.
+// NodeRecord is the serialized value of an `n` key.
 type NodeRecord struct {
-	Labels []uint32       // ID di label, ordinati ascendenti
-	Props  map[uint32]any // propKeyID -> valore
+	Labels []uint32       // label IDs, sorted ascending
+	Props  map[uint32]any // propKeyID -> value
 }
 
-// EdgeRecord è il valore serializzato della chiave `e`.
+// EdgeRecord is the serialized value of an `e` key.
 type EdgeRecord struct {
 	Type  uint32
 	Src   uint64
@@ -34,7 +34,7 @@ type EdgeRecord struct {
 	Props map[uint32]any
 }
 
-// EncodeNode serializza un record nodo.
+// EncodeNode serializes a node record.
 func EncodeNode(rec NodeRecord) ([]byte, error) {
 	labels := append([]uint32(nil), rec.Labels...)
 	sort.Slice(labels, func(i, j int) bool { return labels[i] < labels[j] })
@@ -47,19 +47,19 @@ func EncodeNode(rec NodeRecord) ([]byte, error) {
 	return appendProps(dst, rec.Props)
 }
 
-// DecodeNode deserializza un record nodo. Props è sempre non-nil.
+// DecodeNode deserializes a node record. Props is always non-nil.
 func DecodeNode(b []byte) (NodeRecord, error) {
 	var rec NodeRecord
 	r := &reader{b: b}
 	n, err := r.uvarint()
 	if err != nil {
-		return rec, fmt.Errorf("codec: record nodo, numero label: %w", err)
+		return rec, fmt.Errorf("codec: node record, label count: %w", err)
 	}
 	rec.Labels = make([]uint32, n)
 	for i := range rec.Labels {
 		l, err := r.uvarint()
 		if err != nil {
-			return rec, fmt.Errorf("codec: record nodo, label %d: %w", i, err)
+			return rec, fmt.Errorf("codec: node record, label %d: %w", i, err)
 		}
 		rec.Labels[i] = uint32(l)
 	}
@@ -70,7 +70,7 @@ func DecodeNode(b []byte) (NodeRecord, error) {
 	return rec, nil
 }
 
-// EncodeEdge serializza un record arco.
+// EncodeEdge serializes an edge record.
 func EncodeEdge(rec EdgeRecord) ([]byte, error) {
 	dst := make([]byte, 0, 32)
 	dst = binary.AppendUvarint(dst, uint64(rec.Type))
@@ -79,20 +79,20 @@ func EncodeEdge(rec EdgeRecord) ([]byte, error) {
 	return appendProps(dst, rec.Props)
 }
 
-// DecodeEdge deserializza un record arco. Props è sempre non-nil.
+// DecodeEdge deserializes an edge record. Props is always non-nil.
 func DecodeEdge(b []byte) (EdgeRecord, error) {
 	var rec EdgeRecord
 	r := &reader{b: b}
 	typ, err := r.uvarint()
 	if err != nil {
-		return rec, fmt.Errorf("codec: record arco, type: %w", err)
+		return rec, fmt.Errorf("codec: edge record, type: %w", err)
 	}
 	rec.Type = uint32(typ)
 	if rec.Src, err = r.uvarint(); err != nil {
-		return rec, fmt.Errorf("codec: record arco, src: %w", err)
+		return rec, fmt.Errorf("codec: edge record, src: %w", err)
 	}
 	if rec.Dst, err = r.uvarint(); err != nil {
-		return rec, fmt.Errorf("codec: record arco, dst: %w", err)
+		return rec, fmt.Errorf("codec: edge record, dst: %w", err)
 	}
 	rec.Props, err = r.props()
 	if err != nil {
@@ -101,8 +101,8 @@ func DecodeEdge(b []byte) (EdgeRecord, error) {
 	return rec, nil
 }
 
-// appendProps serializza la mappa di proprietà con chiavi ordinate (encoding
-// deterministico).
+// appendProps serializes the property map with sorted keys (deterministic
+// encoding).
 func appendProps(dst []byte, props map[uint32]any) ([]byte, error) {
 	keys := make([]uint32, 0, len(props))
 	for k := range props {
@@ -172,7 +172,7 @@ func appendRecValue(dst []byte, v any) ([]byte, error) {
 		}
 		return dst, nil
 	default:
-		return nil, fmt.Errorf("codec: tipo proprietà non supportato %T", v)
+		return nil, fmt.Errorf("codec: unsupported property type %T", v)
 	}
 }
 
@@ -180,7 +180,7 @@ func appendInt(dst []byte, v int64) []byte {
 	return binary.AppendVarint(append(dst, recInt), v)
 }
 
-// reader consuma un buffer in sequenza.
+// reader consumes a buffer sequentially.
 type reader struct {
 	b []byte
 	i int
@@ -225,17 +225,17 @@ func (r *reader) bytes(n int) ([]byte, error) {
 func (r *reader) props() (map[uint32]any, error) {
 	n, err := r.uvarint()
 	if err != nil {
-		return nil, fmt.Errorf("codec: numero proprietà: %w", err)
+		return nil, fmt.Errorf("codec: property count: %w", err)
 	}
 	props := make(map[uint32]any, n)
 	for i := uint64(0); i < n; i++ {
 		k, err := r.uvarint()
 		if err != nil {
-			return nil, fmt.Errorf("codec: chiave proprietà: %w", err)
+			return nil, fmt.Errorf("codec: property key: %w", err)
 		}
 		v, err := r.value()
 		if err != nil {
-			return nil, fmt.Errorf("codec: valore proprietà %d: %w", k, err)
+			return nil, fmt.Errorf("codec: property value %d: %w", k, err)
 		}
 		props[uint32(k)] = v
 	}
@@ -309,6 +309,6 @@ func (r *reader) value() (any, error) {
 		}
 		return m, nil
 	default:
-		return nil, fmt.Errorf("codec: tag record sconosciuto 0x%02x", tag)
+		return nil, fmt.Errorf("codec: unknown record tag 0x%02x", tag)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 )
 
-// --- helper costruttori AST ---
+// --- AST constructor helpers ---
 
 func lit(v any) *ast.Literal                      { return &ast.Literal{Value: v} }
 func vr(n string) *ast.Variable                   { return &ast.Variable{Name: n} }
@@ -187,7 +187,7 @@ func TestParseInvalid(t *testing.T) {
 		name string
 		src  string
 		line int
-		col  int // 0 = non verificato
+		col  int // 0 = not checked
 	}{
 		{"unclosed-node", "MATCH (n:Person", 1, 16},
 		{"return-without-expr", "MATCH (n) RETURN", 1, 0},
@@ -201,24 +201,24 @@ func TestParseInvalid(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse(tc.src)
 			if err == nil {
-				t.Fatalf("Parse(%q) atteso errore", tc.src)
+				t.Fatalf("Parse(%q) expected an error", tc.src)
 			}
 			pe, ok := err.(*ParseError)
 			if !ok {
-				t.Fatalf("atteso *ParseError, got %T: %v", err, err)
+				t.Fatalf("expected *ParseError, got %T: %v", err, err)
 			}
 			if pe.Pos.Line != tc.line {
-				t.Errorf("riga = %d, want %d (%v)", pe.Pos.Line, tc.line, pe)
+				t.Errorf("line = %d, want %d (%v)", pe.Pos.Line, tc.line, pe)
 			}
 			if tc.col != 0 && pe.Pos.Col != tc.col {
-				t.Errorf("colonna = %d, want %d (%v)", pe.Pos.Col, tc.col, pe)
+				t.Errorf("column = %d, want %d (%v)", pe.Pos.Col, tc.col, pe)
 			}
 		})
 	}
 }
 
-// zeroPos azzera ricorsivamente tutti i campi ast.Pos, così il confronto con
-// l'AST atteso ignora le posizioni nel sorgente.
+// zeroPos recursively zeroes all ast.Pos fields, so the comparison with the
+// expected AST ignores source positions.
 func zeroPos(v any) { zeroPosValue(reflect.ValueOf(v)) }
 
 var posType = reflect.TypeOf(ast.Pos{})
@@ -250,7 +250,7 @@ func zeroPosValue(rv reflect.Value) {
 	}
 }
 
-// dump rende l'AST in modo leggibile per i messaggi di errore dei test.
+// dump renders the AST readably for the test error messages.
 func dump(v any) string {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

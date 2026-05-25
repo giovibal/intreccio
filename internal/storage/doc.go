@@ -1,2 +1,2 @@
-// Package storage definisce l'interfaccia Store/Txn/Iterator e gli adapter di engine.
+// Package storage defines the Store/Txn/Iterator interface and engine adapters.
 package storage

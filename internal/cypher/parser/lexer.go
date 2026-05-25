@@ -10,19 +10,19 @@ import (
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 )
 
-// ParseError è un errore di parsing con posizione nel sorgente.
+// ParseError is a parsing error with a position in the source.
 type ParseError struct {
 	Pos ast.Pos
 	Msg string
 }
 
 func (e *ParseError) Error() string {
-	return fmt.Sprintf("riga %d:%d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
+	return fmt.Sprintf("line %d:%d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
 }
 
 type lexer struct {
 	src  string
-	pos  int // offset in byte
+	pos  int // byte offset
 	line int
 	col  int
 }
@@ -39,7 +39,7 @@ func (l *lexer) errf(pos ast.Pos, format string, args ...any) *ParseError {
 	return &ParseError{Pos: pos, Msg: fmt.Sprintf(format, args...)}
 }
 
-// peekRune restituisce la rune corrente senza consumarla.
+// peekRune returns the current rune without consuming it.
 func (l *lexer) peekRune() (rune, int) {
 	if l.pos >= len(l.src) {
 		return 0, 0
@@ -47,7 +47,7 @@ func (l *lexer) peekRune() (rune, int) {
 	return utf8.DecodeRuneInString(l.src[l.pos:])
 }
 
-// advance consuma una rune aggiornando riga/colonna.
+// advance consumes one rune, updating line/column.
 func (l *lexer) advance() rune {
 	r, size := utf8.DecodeRuneInString(l.src[l.pos:])
 	l.pos += size
@@ -60,7 +60,7 @@ func (l *lexer) advance() rune {
 	return r
 }
 
-// tokenize produce tutti i token fino a EOF (incluso).
+// tokenize produces all tokens up to and including EOF.
 func (l *lexer) tokenize() ([]token, error) {
 	var toks []token
 	for {
@@ -129,7 +129,7 @@ func (l *lexer) skipTrivia() error {
 				l.advance()
 			}
 			if !closed {
-				return l.errf(start, "commento a blocco non terminato")
+				return l.errf(start, "unterminated block comment")
 			}
 		default:
 			return nil
@@ -138,7 +138,7 @@ func (l *lexer) skipTrivia() error {
 	return nil
 }
 
-// peekAhead restituisce il byte a distanza n (ASCII), o 0.
+// peekAhead returns the byte at distance n (ASCII), or 0.
 func (l *lexer) peekAhead(n int) byte {
 	if l.pos+n < len(l.src) {
 		return l.src[l.pos+n]
@@ -163,7 +163,7 @@ func (l *lexer) lexBacktickIdent(start ast.Pos) (token, error) {
 	var sb strings.Builder
 	for {
 		if l.pos >= len(l.src) {
-			return token{}, l.errf(start, "identificatore con backtick non terminato")
+			return token{}, l.errf(start, "unterminated backtick identifier")
 		}
 		r := l.advance()
 		if r == '`' {
@@ -182,7 +182,7 @@ func (l *lexer) lexNumber(start ast.Pos) (token, error) {
 		switch {
 		case unicode.IsDigit(r):
 			l.advance()
-		case r == '.' && l.peekAhead(1) != '.': // evita di ingoiare ".." (range)
+		case r == '.' && l.peekAhead(1) != '.': // avoid swallowing ".." (range)
 			isFloat = true
 			l.advance()
 		case r == 'e' || r == 'E':
@@ -200,13 +200,13 @@ done:
 	if isFloat {
 		f, err := strconv.ParseFloat(text, 64)
 		if err != nil {
-			return token{}, l.errf(start, "float non valido %q", text)
+			return token{}, l.errf(start, "invalid float %q", text)
 		}
 		return token{typ: tFloat, text: text, val: f, pos: start}, nil
 	}
 	n, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
-		return token{}, l.errf(start, "intero non valido %q", text)
+		return token{}, l.errf(start, "invalid integer %q", text)
 	}
 	return token{typ: tInt, text: text, val: n, pos: start}, nil
 }
@@ -229,7 +229,7 @@ func (l *lexer) lexString(start ast.Pos) (token, error) {
 	var sb strings.Builder
 	for {
 		if l.pos >= len(l.src) {
-			return token{}, l.errf(start, "stringa non terminata")
+			return token{}, l.errf(start, "unterminated string")
 		}
 		r := l.advance()
 		if r == quote {
@@ -237,7 +237,7 @@ func (l *lexer) lexString(start ast.Pos) (token, error) {
 		}
 		if r == '\\' {
 			if l.pos >= len(l.src) {
-				return token{}, l.errf(start, "stringa non terminata")
+				return token{}, l.errf(start, "unterminated string")
 			}
 			esc := l.advance()
 			switch esc {
@@ -256,7 +256,7 @@ func (l *lexer) lexString(start ast.Pos) (token, error) {
 			case '0':
 				sb.WriteByte(0)
 			default:
-				return token{}, l.errf(start, "sequenza di escape non valida \\%c", esc)
+				return token{}, l.errf(start, "invalid escape sequence \\%c", esc)
 			}
 			continue
 		}
@@ -318,7 +318,7 @@ func (l *lexer) lexOperator(start ast.Pos) (token, error) {
 		}
 		return token{typ: tGt, pos: start}, nil
 	default:
-		return token{}, l.errf(start, "carattere inatteso %q", r)
+		return token{}, l.errf(start, "unexpected character %q", r)
 	}
 }
 

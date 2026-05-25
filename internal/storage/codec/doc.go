@@ -1,2 +1,2 @@
-// Package codec implementa il key & value encoding order-preserving.
+// Package codec implements the order-preserving key & value encoding.
 package codec

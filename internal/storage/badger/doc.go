@@ -1,2 +1,2 @@
-// Package badger è l'adapter Store su BadgerDB (engine di default).
+// Package badger is the Store adapter over BadgerDB (the default engine).
 package badger

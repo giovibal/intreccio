@@ -7,7 +7,7 @@ import (
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 )
 
-// Explain rende il piano come albero testuale indentato (radice in alto).
+// Explain renders the plan as an indented text tree (root at the top).
 func Explain(root Op) string {
 	var b strings.Builder
 	explain(&b, root, 0)
@@ -27,7 +27,7 @@ func explain(b *strings.Builder, o Op, depth int) {
 	}
 }
 
-// describe restituisce la riga di descrizione di un operatore e i suoi figli.
+// describe returns the description line of an operator and its children.
 func describe(o Op) (string, []Op) {
 	switch x := o.(type) {
 	case *AllNodesScan:
@@ -120,7 +120,7 @@ func sortList(keys []SortKey) string {
 	return strings.Join(parts, ", ")
 }
 
-// exprString rende un'espressione AST in forma testuale leggibile.
+// exprString renders an AST expression as readable text.
 func exprString(e ast.Expr) string {
 	switch ex := e.(type) {
 	case nil:

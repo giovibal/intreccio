@@ -41,8 +41,8 @@ const (
 
 type token struct {
 	typ  tokenType
-	text string // testo grezzo (identificatori, keyword)
-	val  any    // valore decodificato per tInt/tFloat/tString
+	text string // raw text (identifiers, keywords)
+	val  any    // decoded value for tInt/tFloat/tString
 	pos  ast.Pos
 }
 
@@ -51,13 +51,13 @@ func (t tokenType) String() string {
 	case tEOF:
 		return "EOF"
 	case tIdent:
-		return "identificatore"
+		return "identifier"
 	case tInt:
-		return "intero"
+		return "integer"
 	case tFloat:
 		return "float"
 	case tString:
-		return "stringa"
+		return "string"
 	case tLParen:
 		return "("
 	case tRParen:
@@ -107,6 +107,6 @@ func (t tokenType) String() string {
 	case tGe:
 		return ">="
 	default:
-		return "token sconosciuto"
+		return "unknown token"
 	}
 }

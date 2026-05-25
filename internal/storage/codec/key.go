@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Tag delle tabelle (primo byte della chiave), DESIGN §5.
+// Table tags (first byte of the key), DESIGN §5.
 const (
 	KeyNode  byte = 'n' // n + nodeID(8)
 	KeyEdge  byte = 'e' // e + edgeID(8)
@@ -27,16 +27,16 @@ func appendU64(dst []byte, v uint64) []byte {
 	return append(dst, b[:]...)
 }
 
-// NodeKey: record nodo.
+// NodeKey: node record.
 func NodeKey(id uint64) []byte { return appendU64([]byte{KeyNode}, id) }
 
-// EdgeKey: record arco.
+// EdgeKey: edge record.
 func EdgeKey(id uint64) []byte { return appendU64([]byte{KeyEdge}, id) }
 
-// NodePrefix: scan di tutti i nodi (fallback).
+// NodePrefix: scan of all nodes (fallback).
 func NodePrefix() []byte { return []byte{KeyNode} }
 
-// OutKey: arco uscente da src.
+// OutKey: outgoing edge from src.
 func OutKey(src uint64, typeID uint32, dst, edge uint64) []byte {
 	k := make([]byte, 0, 1+8+4+8+8)
 	k = append(k, KeyOut)
@@ -47,7 +47,7 @@ func OutKey(src uint64, typeID uint32, dst, edge uint64) []byte {
 	return k
 }
 
-// InKey: arco entrante in dst.
+// InKey: incoming edge into dst.
 func InKey(dst uint64, typeID uint32, src, edge uint64) []byte {
 	k := make([]byte, 0, 1+8+4+8+8)
 	k = append(k, KeyIn)
@@ -58,31 +58,31 @@ func InKey(dst uint64, typeID uint32, src, edge uint64) []byte {
 	return k
 }
 
-// OutPrefix: scan degli archi uscenti da src di un dato tipo.
+// OutPrefix: scan of the outgoing edges from src of a given type.
 func OutPrefix(src uint64, typeID uint32) []byte {
 	return appendU32(appendU64([]byte{KeyOut}, src), typeID)
 }
 
-// OutPrefixAll: scan di tutti gli archi uscenti da src (qualsiasi tipo).
+// OutPrefixAll: scan of all outgoing edges from src (any type).
 func OutPrefixAll(src uint64) []byte { return appendU64([]byte{KeyOut}, src) }
 
-// InPrefix: scan degli archi entranti in dst di un dato tipo.
+// InPrefix: scan of the incoming edges into dst of a given type.
 func InPrefix(dst uint64, typeID uint32) []byte {
 	return appendU32(appendU64([]byte{KeyIn}, dst), typeID)
 }
 
-// InPrefixAll: scan di tutti gli archi entranti in dst (qualsiasi tipo).
+// InPrefixAll: scan of all incoming edges into dst (any type).
 func InPrefixAll(dst uint64) []byte { return appendU64([]byte{KeyIn}, dst) }
 
-// LabelKey: entry dell'indice per label.
+// LabelKey: entry of the label index.
 func LabelKey(label uint32, node uint64) []byte {
 	return appendU64(appendU32([]byte{KeyLabel}, label), node)
 }
 
-// LabelPrefix: scan dei nodi con una data label.
+// LabelPrefix: scan of the nodes with a given label.
 func LabelPrefix(label uint32) []byte { return appendU32([]byte{KeyLabel}, label) }
 
-// PropKey: entry dell'indice secondario su proprietà.
+// PropKey: entry of the secondary property index.
 func PropKey(label, propKey uint32, value any, node uint64) ([]byte, error) {
 	k := make([]byte, 0, 1+4+4+16+8)
 	k = append(k, KeyProp)
@@ -95,7 +95,7 @@ func PropKey(label, propKey uint32, value any, node uint64) ([]byte, error) {
 	return appendU64(k, node), nil
 }
 
-// PropPrefix: scan delle entry dell'indice con equality su un valore.
+// PropPrefix: scan of the index entries with equality on a value.
 func PropPrefix(label, propKey uint32, value any) ([]byte, error) {
 	k := make([]byte, 0, 1+4+4+16)
 	k = append(k, KeyProp)
@@ -104,10 +104,10 @@ func PropPrefix(label, propKey uint32, value any) ([]byte, error) {
 	return AppendIndexValue(k, value)
 }
 
-// ParseOutKey estrae i componenti da una chiave `o`.
+// ParseOutKey extracts the components from an `o` key.
 func ParseOutKey(key []byte) (src uint64, typeID uint32, dst, edge uint64, err error) {
 	if len(key) != 1+8+4+8+8 || key[0] != KeyOut {
-		return 0, 0, 0, 0, fmt.Errorf("codec: chiave `o` malformata (len=%d)", len(key))
+		return 0, 0, 0, 0, fmt.Errorf("codec: malformed `o` key (len=%d)", len(key))
 	}
 	src = binary.BigEndian.Uint64(key[1:9])
 	typeID = binary.BigEndian.Uint32(key[9:13])
@@ -116,10 +116,10 @@ func ParseOutKey(key []byte) (src uint64, typeID uint32, dst, edge uint64, err e
 	return src, typeID, dst, edge, nil
 }
 
-// ParseInKey estrae i componenti da una chiave `i`.
+// ParseInKey extracts the components from an `i` key.
 func ParseInKey(key []byte) (dst uint64, typeID uint32, src, edge uint64, err error) {
 	if len(key) != 1+8+4+8+8 || key[0] != KeyIn {
-		return 0, 0, 0, 0, fmt.Errorf("codec: chiave `i` malformata (len=%d)", len(key))
+		return 0, 0, 0, 0, fmt.Errorf("codec: malformed `i` key (len=%d)", len(key))
 	}
 	dst = binary.BigEndian.Uint64(key[1:9])
 	typeID = binary.BigEndian.Uint32(key[9:13])
@@ -128,28 +128,28 @@ func ParseInKey(key []byte) (dst uint64, typeID uint32, src, edge uint64, err er
 	return dst, typeID, src, edge, nil
 }
 
-// ParseLabelKey estrae label e nodeID da una chiave `l`.
+// ParseLabelKey extracts label and nodeID from an `l` key.
 func ParseLabelKey(key []byte) (label uint32, node uint64, err error) {
 	if len(key) != 1+4+8 || key[0] != KeyLabel {
-		return 0, 0, fmt.Errorf("codec: chiave `l` malformata (len=%d)", len(key))
+		return 0, 0, fmt.Errorf("codec: malformed `l` key (len=%d)", len(key))
 	}
 	label = binary.BigEndian.Uint32(key[1:5])
 	node = binary.BigEndian.Uint64(key[5:13])
 	return label, node, nil
 }
 
-// ParsePropKeyNode estrae il nodeID (ultimi 8 byte) da una chiave `p`.
+// ParsePropKeyNode extracts the nodeID (last 8 bytes) from a `p` key.
 func ParsePropKeyNode(key []byte) (uint64, error) {
 	if len(key) < 1+4+4+1+8 || key[0] != KeyProp {
-		return 0, fmt.Errorf("codec: chiave `p` malformata (len=%d)", len(key))
+		return 0, fmt.Errorf("codec: malformed `p` key (len=%d)", len(key))
 	}
 	return binary.BigEndian.Uint64(key[len(key)-8:]), nil
 }
 
-// NodeIDFromKey estrae l'ID da una chiave `n`.
+// NodeIDFromKey extracts the ID from an `n` key.
 func NodeIDFromKey(key []byte) (uint64, error) {
 	if len(key) != 1+8 || key[0] != KeyNode {
-		return 0, fmt.Errorf("codec: chiave `n` malformata (len=%d)", len(key))
+		return 0, fmt.Errorf("codec: malformed `n` key (len=%d)", len(key))
 	}
 	return binary.BigEndian.Uint64(key[1:9]), nil
 }

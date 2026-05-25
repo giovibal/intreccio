@@ -1,2 +1,2 @@
-// Package bolt è l'adapter Store su bbolt (opzionale).
+// Package bolt is the Store adapter over bbolt (optional).
 package bolt

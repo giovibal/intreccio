@@ -15,26 +15,26 @@ func TestNodeRecordRoundTrip(t *testing.T) {
 			12: true,
 			13: 1.5,
 			14: nil,
-			15: []any{int64(1), "due", 3.0},
-			16: map[string]any{"city": "Roma", "zip": int64(100)},
+			15: []any{int64(1), "two", 3.0},
+			16: map[string]any{"city": "Rome", "zip": int64(100)},
 		}},
 	}
 	for i, in := range cases {
 		b, err := EncodeNode(in)
 		if err != nil {
-			t.Fatalf("caso %d: EncodeNode: %v", i, err)
+			t.Fatalf("case %d: EncodeNode: %v", i, err)
 		}
 		got, err := DecodeNode(b)
 		if err != nil {
-			t.Fatalf("caso %d: DecodeNode: %v", i, err)
+			t.Fatalf("case %d: DecodeNode: %v", i, err)
 		}
-		// Le label vengono ordinate ascendenti in encode.
+		// Labels are sorted ascending during encode.
 		wantLabels := sortedCopy(in.Labels)
 		if !reflect.DeepEqual(got.Labels, wantLabels) {
-			t.Errorf("caso %d: label got %v want %v", i, got.Labels, wantLabels)
+			t.Errorf("case %d: labels got %v want %v", i, got.Labels, wantLabels)
 		}
 		if !reflect.DeepEqual(got.Props, in.Props) {
-			t.Errorf("caso %d: props got %#v want %#v", i, got.Props, in.Props)
+			t.Errorf("case %d: props got %#v want %#v", i, got.Props, in.Props)
 		}
 	}
 }
@@ -65,8 +65,8 @@ func TestEdgeRecordRoundTrip(t *testing.T) {
 	}
 }
 
-// L'encoding deve essere deterministico (chiavi ordinate) a prescindere
-// dall'ordine di iterazione delle mappe.
+// The encoding must be deterministic (sorted keys) regardless of the map
+// iteration order.
 func TestEncodeDeterministic(t *testing.T) {
 	rec := NodeRecord{Labels: []uint32{2, 1}, Props: map[uint32]any{
 		5: "x", 1: int64(1), 9: true, 3: 2.0,
@@ -81,7 +81,7 @@ func TestEncodeDeterministic(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(first, b) {
-			t.Fatal("encoding non deterministico")
+			t.Fatal("non-deterministic encoding")
 		}
 	}
 }

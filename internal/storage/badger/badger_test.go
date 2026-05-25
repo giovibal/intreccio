@@ -46,7 +46,7 @@ func TestSetGetDelete(t *testing.T) {
 	if err := s.View(func(tx storage.Txn) error {
 		_, err := tx.Get(key)
 		if !errors.Is(err, storage.ErrNotFound) {
-			t.Errorf("dopo delete atteso ErrNotFound, got %v", err)
+			t.Errorf("after delete expected ErrNotFound, got %v", err)
 		}
 		return nil
 	}); err != nil {
@@ -57,11 +57,11 @@ func TestSetGetDelete(t *testing.T) {
 func TestGetNotFound(t *testing.T) {
 	s := newStore(t)
 	err := s.View(func(tx storage.Txn) error {
-		_, err := tx.Get([]byte("assente"))
+		_, err := tx.Get([]byte("missing"))
 		return err
 	})
 	if !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("atteso ErrNotFound, got %v", err)
+		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestScanOrderAndPrefix(t *testing.T) {
 	}
 }
 
-// L'Update deve ritentare in caso di conflitto SSI: N goroutine che incrementano
-// lo stesso contatore devono convergere a N senza perdere aggiornamenti.
+// Update must retry on an SSI conflict: N goroutines incrementing the same
+// counter must converge to N without losing updates.
 func TestUpdateRetriesOnConflict(t *testing.T) {
 	s := newStore(t)
 	key := []byte("counter")
@@ -129,7 +129,7 @@ func TestUpdateRetriesOnConflict(t *testing.T) {
 			return err
 		}
 		if string(v) != fmt.Sprintf("%d", n) {
-			t.Errorf("contatore = %s, atteso %d", v, n)
+			t.Errorf("counter = %s, expected %d", v, n)
 		}
 		return nil
 	}); err != nil {

@@ -25,7 +25,7 @@ func TestIndexValueRoundTrip(t *testing.T) {
 		int64(math.MaxInt64), int64(math.MinInt64),
 		float64(0), math.Copysign(0, -1), 1.5, -1.5,
 		math.MaxFloat64, -math.MaxFloat64, math.SmallestNonzeroFloat64,
-		"", "a", "hello", "con\x00zero", "\x00\x00\xff",
+		"", "a", "hello", "with\x00zero", "\x00\x00\xff",
 	}
 	for _, want := range cases {
 		enc := encodeIndex(t, want)
@@ -34,7 +34,7 @@ func TestIndexValueRoundTrip(t *testing.T) {
 			t.Fatalf("DecodeIndexValue(%v): %v", want, err)
 		}
 		if n != len(enc) {
-			t.Errorf("%v: consumati %d byte, attesi %d", want, n, len(enc))
+			t.Errorf("%v: consumed %d bytes, expected %d", want, n, len(enc))
 		}
 		if !valueEqual(got, want) {
 			t.Errorf("round-trip: got %v (%T), want %v (%T)", got, got, want, want)
@@ -42,8 +42,8 @@ func TestIndexValueRoundTrip(t *testing.T) {
 	}
 }
 
-// Il valore nelle chiavi `p` è seguito dal nodeID: il decode deve consumare
-// esattamente la porzione del valore e lasciare il resto.
+// The value in `p` keys is followed by the nodeID: decoding must consume exactly
+// the value portion and leave the rest.
 func TestIndexValueBoundaryWithSuffix(t *testing.T) {
 	suffix := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03}
 	for _, v := range []any{nil, true, int64(-42), 3.14, "edge\x00case"} {
@@ -54,13 +54,13 @@ func TestIndexValueBoundaryWithSuffix(t *testing.T) {
 			t.Fatalf("decode %v: %v", v, err)
 		}
 		if n != len(enc) {
-			t.Errorf("%v: consumati %d, attesi %d", v, n, len(enc))
+			t.Errorf("%v: consumed %d, expected %d", v, n, len(enc))
 		}
 		if !valueEqual(got, v) {
 			t.Errorf("%v: got %v", v, got)
 		}
 		if !bytes.Equal(full[n:], suffix) {
-			t.Errorf("%v: suffisso residuo errato: %x", v, full[n:])
+			t.Errorf("%v: wrong leftover suffix: %x", v, full[n:])
 		}
 	}
 }
@@ -94,7 +94,7 @@ func TestIndexValueOrderingString(t *testing.T) {
 		n := r.Intn(12)
 		b := make([]byte, n)
 		for j := range b {
-			b[j] = byte(r.Intn(256)) // include 0x00 per esercitare l'escape
+			b[j] = byte(r.Intn(256)) // include 0x00 to exercise the escape
 		}
 		vals[i] = string(b)
 	}
@@ -105,24 +105,24 @@ func TestIndexValueOrderingString(t *testing.T) {
 
 func TestIndexValueOrderingBool(t *testing.T) {
 	if bytes.Compare(encodeIndex(t, false), encodeIndex(t, true)) >= 0 {
-		t.Error("false deve ordinare prima di true")
+		t.Error("false must order before true")
 	}
 }
 
-// L'ordine per banda di tipo: NULL < BOOL < INT < FLOAT < STRING.
+// Order by type band: NULL < BOOL < INT < FLOAT < STRING.
 func TestIndexValueOrderingCrossType(t *testing.T) {
 	ordered := []any{nil, false, true, int64(math.MaxInt64), -math.MaxFloat64, math.MaxFloat64, "", "zzz"}
 	for i := 0; i+1 < len(ordered); i++ {
 		a := encodeIndex(t, ordered[i])
 		b := encodeIndex(t, ordered[i+1])
 		if bytes.Compare(a, b) >= 0 {
-			t.Errorf("atteso enc(%v) < enc(%v)", ordered[i], ordered[i+1])
+			t.Errorf("expected enc(%v) < enc(%v)", ordered[i], ordered[i+1])
 		}
 	}
 }
 
-// checkOrdering verifica che ordinare per byte coincida con l'ordine logico,
-// confrontando ogni coppia.
+// checkOrdering verifies that sorting by bytes matches the logical order,
+// comparing every pair.
 func checkOrdering(t *testing.T, n int, val func(int) any, cmp func(i, j int) int) {
 	t.Helper()
 	enc := make([][]byte, n)
@@ -137,7 +137,7 @@ func checkOrdering(t *testing.T, n int, val func(int) any, cmp func(i, j int) in
 	for k := 0; k+1 < len(idx); k++ {
 		i, j := idx[k], idx[k+1]
 		if cmp(i, j) > 0 {
-			t.Fatalf("ordine byte non coerente con l'ordine logico tra %v e %v", val(i), val(j))
+			t.Fatalf("byte order inconsistent with logical order between %v and %v", val(i), val(j))
 		}
 	}
 }

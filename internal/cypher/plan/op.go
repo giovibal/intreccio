@@ -1,25 +1,26 @@
-// Package plan traduce l'AST risolto in un piano fisico di operatori (modello
-// iterator/Volcano) con un planner a regole (DESIGN §9). In v1 non c'è cost-based:
-// le regole producono direttamente operatori legati agli access method.
+// Package plan translates the resolved AST into a physical operator plan
+// (iterator/Volcano model) using a rule-based planner (DESIGN §9). In v1 there is
+// no cost-based planning: the rules produce operators bound to access methods
+// directly.
 package plan
 
 import "github.com/giovibal/mycypher/internal/cypher/ast"
 
-// Op è un operatore del piano.
+// Op is a plan operator.
 type Op interface{ op() }
 
-// --- Access method (foglie) ---
+// --- Access methods (leaves) ---
 
-// AllNodesScan: scan di tutti i nodi (fallback, `n`).
+// AllNodesScan: scan of all nodes (fallback, `n`).
 type AllNodesScan struct{ Var string }
 
-// NodeByLabelScan: scan dei nodi con una label (`l`).
+// NodeByLabelScan: scan of the nodes with a label (`l`).
 type NodeByLabelScan struct {
 	Var   string
 	Label string
 }
 
-// NodeByProperty: scan via indice secondario su equality (`p`).
+// NodeByProperty: scan via the secondary index on equality (`p`).
 type NodeByProperty struct {
 	Var   string
 	Label string
@@ -27,43 +28,43 @@ type NodeByProperty struct {
 	Value ast.Expr
 }
 
-// --- Operatori interni ---
+// --- Internal operators ---
 
-// Expand: a partire dai nodi From, segue gli archi e produce i nodi To.
+// Expand: starting from the From nodes, follows the edges and produces the To nodes.
 type Expand struct {
 	Input     Op
 	From      string
-	Rel       string // variabile della relazione (può essere sintetica)
+	Rel       string // relationship variable (may be synthetic)
 	To        string
 	Types     []string
 	Dir       ast.Direction
 	VarLength bool
 	MinHops   int
 	MaxHops   int
-	ToBound   bool // true se To è già legato: l'expand verifica l'uguaglianza
+	ToBound   bool // true if To is already bound: the expand checks the equality
 }
 
-// Filter: applica un predicato allo stream.
+// Filter: applies a predicate to the stream.
 type Filter struct {
 	Input Op
 	Pred  ast.Expr
 }
 
-// Project: proiezione (RETURN/WITH senza aggregazioni).
+// Project: projection (RETURN/WITH without aggregations).
 type Project struct {
 	Input    Op
 	Items    []ProjItem
 	Distinct bool
 }
 
-// ProjItem è un item di proiezione con il nome di colonna risolto.
+// ProjItem is a projection item with the resolved column name.
 type ProjItem struct {
 	Expr   ast.Expr
 	Column string
 }
 
-// Aggregate: raggruppamento implicito (chiavi = item non aggregati). L'esecuzione
-// completa è Fase 8; qui il planner lo produce per renderlo ispezionabile.
+// Aggregate: implicit grouping (keys = non-aggregated items). Full execution is
+// Phase 8; here the planner produces it to make it inspectable.
 type Aggregate struct {
 	Input     Op
 	GroupKeys []ProjItem
@@ -77,25 +78,25 @@ type Sort struct {
 	Keys  []SortKey
 }
 
-// SortKey è un criterio di ordinamento.
+// SortKey is a sort criterion.
 type SortKey struct {
 	Expr ast.Expr
 	Desc bool
 }
 
-// Skip: salta le prime N righe.
+// Skip: skips the first N rows.
 type Skip struct {
 	Input Op
 	Count ast.Expr
 }
 
-// Limit: limita a N righe.
+// Limit: limits to N rows.
 type Limit struct {
 	Input Op
 	Count ast.Expr
 }
 
-// CartesianProduct: prodotto cartesiano tra due sottopiani non connessi.
+// CartesianProduct: cartesian product between two disconnected subplans.
 type CartesianProduct struct {
 	Left  Op
 	Right Op

@@ -1,8 +1,8 @@
 package graph
 
-// normalize porta i valori di proprietà alla forma canonica usata internamente:
-// gli int Go diventano int64 (come li produce il decode dei record), così record
-// e indici vedono lo stesso valore.
+// normalize brings property values to the canonical form used internally:
+// Go ints become int64 (as produced by record decoding), so records and indexes
+// see the same value.
 func normalize(v any) any {
 	if i, ok := v.(int); ok {
 		return int64(i)
@@ -10,8 +10,8 @@ func normalize(v any) any {
 	return v
 }
 
-// isIndexable indica se un valore può finire in un indice `p` (solo scalari;
-// list e map non sono indicizzabili in v1, DESIGN §4).
+// isIndexable reports whether a value can go into a `p` index (scalars only;
+// lists and maps are not indexable in v1, DESIGN §4).
 func isIndexable(v any) bool {
 	switch v.(type) {
 	case nil, bool, int64, float64, string:
@@ -21,8 +21,8 @@ func isIndexable(v any) bool {
 	}
 }
 
-// scalarEqual confronta due valori scalari per l'uguaglianza (fallback di
-// NodesByProperty senza indice).
+// scalarEqual compares two scalar values for equality (fallback of
+// NodesByProperty without an index).
 func scalarEqual(a, b any) bool {
 	a, b = normalize(a), normalize(b)
 	switch x := a.(type) {

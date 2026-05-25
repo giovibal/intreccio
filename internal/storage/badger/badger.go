@@ -8,28 +8,28 @@ import (
 	"github.com/giovibal/mycypher/internal/storage"
 )
 
-// maxRetries limita i tentativi di Update in caso di conflitto SSI.
+// maxRetries bounds the Update attempts on an SSI conflict.
 const maxRetries = 100
 
-// Store è l'adapter storage.Store su BadgerDB.
+// Store is the storage.Store adapter over BadgerDB.
 type Store struct {
 	db *badger.DB
 }
 
 var _ storage.Store = (*Store)(nil)
 
-// Open apre (o crea) un database Badger nella directory indicata.
+// Open opens (or creates) a Badger database in the given directory.
 func Open(path string) (*Store, error) {
 	return open(badger.DefaultOptions(path))
 }
 
-// OpenInMemory apre un database Badger interamente in RAM (utile nei test).
+// OpenInMemory opens a fully in-RAM Badger database (useful in tests).
 func OpenInMemory() (*Store, error) {
 	return open(badger.DefaultOptions("").WithInMemory(true))
 }
 
 func open(opts badger.Options) (*Store, error) {
-	opts.Logger = nil // silenzioso
+	opts.Logger = nil // silent
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("badger: open: %w", err)

@@ -6,8 +6,8 @@ import (
 	"github.com/giovibal/mycypher/internal/storage/codec"
 )
 
-// NodesByLabel restituisce gli ID dei nodi con la label data, in ordine di
-// nodeID (prefix scan su `l`).
+// NodesByLabel returns the IDs of the nodes with the given label, in nodeID order
+// (prefix scan on `l`).
 func NodesByLabel(txn storage.Txn, labelID uint32) ([]uint64, error) {
 	var out []uint64
 	it := txn.Scan(codec.LabelPrefix(labelID))
@@ -22,8 +22,8 @@ func NodesByLabel(txn storage.Txn, labelID uint32) ([]uint64, error) {
 	return out, nil
 }
 
-// OutEdges restituisce gli archi uscenti da nodeID. Se typeID è 0 considera tutti
-// i tipi, altrimenti solo quello dato (prefix scan su `o`).
+// OutEdges returns the outgoing edges from nodeID. If typeID is 0 it considers all
+// types, otherwise only the given one (prefix scan on `o`).
 func OutEdges(txn storage.Txn, nodeID uint64, typeID uint32) ([]EdgeRef, error) {
 	prefix := codec.OutPrefixAll(nodeID)
 	if typeID != 0 {
@@ -42,8 +42,8 @@ func OutEdges(txn storage.Txn, nodeID uint64, typeID uint32) ([]EdgeRef, error) 
 	return out, nil
 }
 
-// InEdges restituisce gli archi entranti in nodeID. Se typeID è 0 considera tutti
-// i tipi (prefix scan su `i`).
+// InEdges returns the incoming edges into nodeID. If typeID is 0 it considers all
+// types (prefix scan on `i`).
 func InEdges(txn storage.Txn, nodeID uint64, typeID uint32) ([]EdgeRef, error) {
 	prefix := codec.InPrefixAll(nodeID)
 	if typeID != 0 {
@@ -62,9 +62,9 @@ func InEdges(txn storage.Txn, nodeID uint64, typeID uint32) ([]EdgeRef, error) {
 	return out, nil
 }
 
-// NodesByProperty restituisce gli ID dei nodi con label e valore di proprietà
-// dati. Usa l'indice `p` se presente per (label, propKey), altrimenti ricade su
-// uno scan per label con filtro sul record.
+// NodesByProperty returns the IDs of the nodes with the given label and property
+// value. It uses the `p` index if present for (label, propKey), otherwise it falls
+// back to a label scan with a filter on the record.
 func NodesByProperty(txn storage.Txn, labelID, keyID uint32, value any) ([]uint64, error) {
 	value = normalize(value)
 
@@ -90,7 +90,7 @@ func NodesByProperty(txn storage.Txn, labelID, keyID uint32, value any) ([]uint6
 		return out, nil
 	}
 
-	// Fallback senza indice: scan per label + filtro sul record.
+	// Fallback without index: label scan + filter on the record.
 	nodes, err := NodesByLabel(txn, labelID)
 	if err != nil {
 		return nil, err

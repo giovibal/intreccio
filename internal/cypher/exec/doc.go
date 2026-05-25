@@ -1,2 +1,2 @@
-// Package exec implementa gli operatori executor (modello Volcano).
+// Package exec implements the executor operators (Volcano model).
 package exec

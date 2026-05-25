@@ -1,9 +1,9 @@
-// Package graph è il modello + CRUD transazionale + primitive di traversal.
+// Package graph is the model + transactional CRUD + traversal primitives.
 //
-// È l'unico punto da cui passano le scritture: ogni mutazione aggiorna il record
-// base e tutte le sue chiavi-indice (`l`, `p`, `o`, `i`) nella stessa transazione
-// (Invariante #1). Le funzioni operano su una storage.Txn fornita dal chiamante,
-// così più mutazioni possono comporsi atomicamente in un'unica Update.
+// It is the single point through which writes pass: every mutation updates the
+// base record and all of its index keys (`l`, `p`, `o`, `i`) within the same
+// transaction (Invariant #1). The functions operate on a storage.Txn provided by
+// the caller, so multiple mutations can compose atomically in a single Update.
 package graph
 
 import (
@@ -15,8 +15,8 @@ import (
 	"github.com/giovibal/mycypher/internal/storage/codec"
 )
 
-// CreateNode crea un nodo con le label e proprietà date (per nome), internandone
-// gli identificatori, e ne aggiorna gli indici. Restituisce il nuovo nodeID.
+// CreateNode creates a node with the given labels and properties (by name),
+// interning their identifiers, and updates its indexes. Returns the new nodeID.
 func CreateNode(txn storage.Txn, labels []string, props map[string]any) (uint64, error) {
 	labelIDs := make([]uint32, 0, len(labels))
 	for _, name := range labels {
@@ -44,14 +44,14 @@ func CreateNode(txn storage.Txn, labels []string, props map[string]any) (uint64,
 	return id, nil
 }
 
-// CreateEdge crea un arco tipizzato tra due nodi esistenti, scrivendo il record
-// `e` e le due viste di adiacenza `o`/`i` (Invariante #4).
+// CreateEdge creates a typed edge between two existing nodes, writing the `e`
+// record and the two adjacency views `o`/`i` (Invariant #4).
 func CreateEdge(txn storage.Txn, typ string, src, dst uint64, props map[string]any) (uint64, error) {
 	if _, err := GetNode(txn, src); err != nil {
-		return 0, fmt.Errorf("arco src %d: %w", src, err)
+		return 0, fmt.Errorf("edge src %d: %w", src, err)
 	}
 	if _, err := GetNode(txn, dst); err != nil {
-		return 0, fmt.Errorf("arco dst %d: %w", dst, err)
+		return 0, fmt.Errorf("edge dst %d: %w", dst, err)
 	}
 	typeID, err := catalog.InternType(txn, typ)
 	if err != nil {
@@ -82,8 +82,8 @@ func CreateEdge(txn storage.Txn, typ string, src, dst uint64, props map[string]a
 	return id, nil
 }
 
-// SetProperty imposta (o sostituisce) una proprietà del nodo, aggiornando il
-// record e le entry dell'indice `p` per le label indicizzate (delta vecchio→nuovo).
+// SetProperty sets (or replaces) a node property, updating the record and the
+// `p` index entries for the indexed labels (old→new delta).
 func SetProperty(txn storage.Txn, nodeID uint64, key string, value any) error {
 	node, err := GetNode(txn, nodeID)
 	if err != nil {
@@ -128,7 +128,7 @@ func SetProperty(txn storage.Txn, nodeID uint64, key string, value any) error {
 	return putNodeRecord(txn, nodeID, node.NodeRecord)
 }
 
-// GetNode legge un nodo. Restituisce ErrNodeNotFound se assente.
+// GetNode reads a node. Returns ErrNodeNotFound if absent.
 func GetNode(txn storage.Txn, id uint64) (Node, error) {
 	b, err := txn.Get(codec.NodeKey(id))
 	if errors.Is(err, storage.ErrNotFound) {
@@ -139,12 +139,12 @@ func GetNode(txn storage.Txn, id uint64) (Node, error) {
 	}
 	rec, err := codec.DecodeNode(b)
 	if err != nil {
-		return Node{}, fmt.Errorf("graph: decode nodo %d: %w", id, err)
+		return Node{}, fmt.Errorf("graph: decode node %d: %w", id, err)
 	}
 	return Node{ID: id, NodeRecord: rec}, nil
 }
 
-// GetEdge legge un arco. Restituisce ErrEdgeNotFound se assente.
+// GetEdge reads an edge. Returns ErrEdgeNotFound if absent.
 func GetEdge(txn storage.Txn, id uint64) (Edge, error) {
 	b, err := txn.Get(codec.EdgeKey(id))
 	if errors.Is(err, storage.ErrNotFound) {
@@ -155,12 +155,12 @@ func GetEdge(txn storage.Txn, id uint64) (Edge, error) {
 	}
 	rec, err := codec.DecodeEdge(b)
 	if err != nil {
-		return Edge{}, fmt.Errorf("graph: decode arco %d: %w", id, err)
+		return Edge{}, fmt.Errorf("graph: decode edge %d: %w", id, err)
 	}
 	return Edge{ID: id, EdgeRecord: rec}, nil
 }
 
-// DeleteEdge rimuove un arco: record `e` più le due entry di adiacenza `o`/`i`.
+// DeleteEdge removes an edge: the `e` record plus the two adjacency entries `o`/`i`.
 func DeleteEdge(txn storage.Txn, id uint64) error {
 	e, err := GetEdge(txn, id)
 	if err != nil {
@@ -175,9 +175,9 @@ func DeleteEdge(txn storage.Txn, id uint64) error {
 	return txn.Delete(codec.EdgeKey(id))
 }
 
-// DeleteNode rimuove un nodo e tutte le sue entry indice (`l`, `p`). Restituisce
-// ErrNodeHasEdges se esistono archi incidenti: il chiamante deve rimuoverli prima
-// (la semantica DETACH DELETE arriverà in Fase 7).
+// DeleteNode removes a node and all its index entries (`l`, `p`). Returns
+// ErrNodeHasEdges if incident edges exist: the caller must remove them first
+// (DETACH DELETE semantics will arrive in Phase 7).
 func DeleteNode(txn storage.Txn, id uint64) error {
 	node, err := GetNode(txn, id)
 	if err != nil {
@@ -216,23 +216,23 @@ func putNodeRecord(txn storage.Txn, id uint64, rec codec.NodeRecord) error {
 	return txn.Set(codec.NodeKey(id), b)
 }
 
-// putNodeIndexes scrive le entry `l` (una per label) e `p` (per ogni coppia
-// label×propKey indicizzata con valore scalare presente).
+// putNodeIndexes writes the `l` entries (one per label) and `p` entries (for each
+// indexed label×propKey pair whose scalar value is present).
 func putNodeIndexes(txn storage.Txn, nodeID uint64, rec codec.NodeRecord) error {
 	return forEachNodeIndex(txn, rec, func(key []byte) error { return txn.Set(key, nil) },
 		func(label uint32) error { return txn.Set(codec.LabelKey(label, nodeID), nil) },
 		nodeID)
 }
 
-// delNodeIndexes rimuove le stesse entry scritte da putNodeIndexes.
+// delNodeIndexes removes the same entries written by putNodeIndexes.
 func delNodeIndexes(txn storage.Txn, nodeID uint64, rec codec.NodeRecord) error {
 	return forEachNodeIndex(txn, rec, func(key []byte) error { return txn.Delete(key) },
 		func(label uint32) error { return txn.Delete(codec.LabelKey(label, nodeID)) },
 		nodeID)
 }
 
-// forEachNodeIndex applica onLabel per ogni label e onProp per ogni entry `p` da
-// mantenere, così put/del condividono l'enumerazione (un solo punto di verità).
+// forEachNodeIndex applies onLabel for every label and onProp for every `p` entry
+// to maintain, so put/del share the enumeration (single source of truth).
 func forEachNodeIndex(txn storage.Txn, rec codec.NodeRecord, onProp func(key []byte) error, onLabel func(label uint32) error, nodeID uint64) error {
 	for _, l := range rec.Labels {
 		if err := onLabel(l); err != nil {

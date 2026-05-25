@@ -100,7 +100,7 @@ func TestEdgeAppearsInBothAdjacencies(t *testing.T) {
 		if len(in) != 1 || in[0].ID != edge || in[0].Src != a || in[0].Dst != b {
 			t.Errorf("InEdges(b) = %+v", in)
 		}
-		// typeID 0 = qualsiasi tipo.
+		// typeID 0 = any type.
 		anyOut, err := OutEdges(tx, a, 0)
 		if err != nil {
 			return err
@@ -108,7 +108,7 @@ func TestEdgeAppearsInBothAdjacencies(t *testing.T) {
 		if len(anyOut) != 1 {
 			t.Errorf("OutEdges(a, any) = %+v", anyOut)
 		}
-		// Il record dell'arco fa round-trip delle proprietà.
+		// The edge record round-trips its properties.
 		e, err := GetEdge(tx, edge)
 		if err != nil {
 			return err
@@ -133,7 +133,7 @@ func TestSetProperty(t *testing.T) {
 		if err = SetProperty(tx, n, "age", 30); err != nil { // int -> int64
 			return err
 		}
-		if err = SetProperty(tx, n, "age", int64(31)); err != nil { // sovrascrittura
+		if err = SetProperty(tx, n, "age", int64(31)); err != nil { // overwrite
 			return err
 		}
 		ageID, _, err = catalog.LookupKey(tx, "age")
@@ -157,7 +157,7 @@ func TestNodesByPropertyIndexed(t *testing.T) {
 	var personID, emailID uint32
 
 	mustUpdate(t, s, func(tx storage.Txn) error {
-		// L'indice deve esistere prima della create perché le entry `p` siano scritte.
+		// The index must exist before the create so the `p` entries are written.
 		pid, err := catalog.InternLabel(tx, "Person")
 		if err != nil {
 			return err
@@ -192,7 +192,7 @@ func TestNodesByPropertyIndexed(t *testing.T) {
 			return err
 		}
 		if len(none) != 0 {
-			t.Errorf("atteso nessun risultato, got %v", none)
+			t.Errorf("expected no results, got %v", none)
 		}
 		return nil
 	})
@@ -215,9 +215,9 @@ func TestNodesByPropertyFallback(t *testing.T) {
 		return err
 	})
 	mustView(t, s, func(tx storage.Txn) error {
-		// Nessun indice su (Person, age): usa il fallback.
+		// No index on (Person, age): use the fallback.
 		if has, _ := catalog.HasIndex(tx, personID, ageID); has {
-			t.Fatal("non dovrebbe esserci un indice")
+			t.Fatal("there should be no index")
 		}
 		got, err := NodesByProperty(tx, personID, ageID, 40) // int -> int64
 		if err != nil {
@@ -230,8 +230,8 @@ func TestNodesByPropertyFallback(t *testing.T) {
 	})
 }
 
-// Invariante #1/#4: cancellare un arco rimuove record `e` ed entrambe le viste
-// di adiacenza `o`/`i`.
+// Invariant #1/#4: deleting an edge removes the `e` record and both adjacency
+// views `o`/`i`.
 func TestDeleteEdgeRemovesAdjacency(t *testing.T) {
 	s := newStore(t)
 	var a, b, edge uint64
@@ -246,19 +246,19 @@ func TestDeleteEdgeRemovesAdjacency(t *testing.T) {
 
 	mustView(t, s, func(tx storage.Txn) error {
 		if _, err := GetEdge(tx, edge); err != ErrEdgeNotFound {
-			t.Errorf("GetEdge dopo delete = %v, want ErrEdgeNotFound", err)
+			t.Errorf("GetEdge after delete = %v, want ErrEdgeNotFound", err)
 		}
 		if out, _ := OutEdges(tx, a, 0); len(out) != 0 {
-			t.Errorf("OutEdges residui: %v", out)
+			t.Errorf("leftover OutEdges: %v", out)
 		}
 		if in, _ := InEdges(tx, b, 0); len(in) != 0 {
-			t.Errorf("InEdges residui: %v", in)
+			t.Errorf("leftover InEdges: %v", in)
 		}
 		return nil
 	})
 }
 
-// Invariante #1: cancellare un nodo rimuove record `n` e tutte le entry `l`/`p`.
+// Invariant #1: deleting a node removes the `n` record and all `l`/`p` entries.
 func TestDeleteNodeRemovesIndexes(t *testing.T) {
 	s := newStore(t)
 	var n uint64
@@ -278,13 +278,13 @@ func TestDeleteNodeRemovesIndexes(t *testing.T) {
 
 	mustView(t, s, func(tx storage.Txn) error {
 		if _, err := GetNode(tx, n); err != ErrNodeNotFound {
-			t.Errorf("GetNode dopo delete = %v, want ErrNodeNotFound", err)
+			t.Errorf("GetNode after delete = %v, want ErrNodeNotFound", err)
 		}
 		if got, _ := NodesByLabel(tx, personID); len(got) != 0 {
-			t.Errorf("entry `l` residue: %v", got)
+			t.Errorf("leftover `l` entries: %v", got)
 		}
 		if got, _ := NodesByProperty(tx, personID, emailID, "x@y.com"); len(got) != 0 {
-			t.Errorf("entry `p` residue: %v", got)
+			t.Errorf("leftover `p` entries: %v", got)
 		}
 		return nil
 	})
@@ -301,7 +301,7 @@ func TestDeleteNodeWithEdgesFails(t *testing.T) {
 	})
 	err := s.Update(func(tx storage.Txn) error { return DeleteNode(tx, a) })
 	if err != ErrNodeHasEdges {
-		t.Errorf("DeleteNode con archi = %v, want ErrNodeHasEdges", err)
+		t.Errorf("DeleteNode with edges = %v, want ErrNodeHasEdges", err)
 	}
 }
 

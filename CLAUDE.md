@@ -61,7 +61,9 @@ go test -bench . ./...        # benchmark
   ordinamento); usare `testing/quick` o `gopkg.in/check` solo puro Go.
 - Niente dipendenze inutili: preferire stdlib. Ogni nuova dipendenza va
   giustificata e verificata che sia puro Go.
-- Nomi e identificatori in inglese; commenti in italiano va bene.
+- Tutto il codice in inglese: nomi, identificatori, commenti e stringhe
+  (messaggi d'errore, log, messaggi dei test). I documenti `DESIGN.md`/`PLAN.md`
+  e gli ADR restano in italiano.
 
 ## Come lavorare (per l'agente)
 - Procedere per **fasi** come in `PLAN.md`; non saltare i test di fondazione del

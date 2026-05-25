@@ -37,22 +37,22 @@ func TestInternIdempotentAndReverse(t *testing.T) {
 	}
 
 	if alice != alice2 {
-		t.Errorf("intern non idempotente: %d != %d", alice, alice2)
+		t.Errorf("intern not idempotent: %d != %d", alice, alice2)
 	}
 	if alice == bob {
-		t.Error("label distinte devono avere ID distinti")
+		t.Error("distinct labels must have distinct IDs")
 	}
 	if alice == 0 || bob == 0 {
-		t.Error("gli ID devono partire da 1 (0 riservato)")
+		t.Error("IDs must start at 1 (0 reserved)")
 	}
 
-	// I tre dizionari sono indipendenti: stesso nome → ID allocati separatamente.
+	// The three dictionaries are independent: the same name gets separate IDs.
 	if err := s.Update(func(tx storage.Txn) error {
 		lab, _ := InternLabel(tx, "Same")
 		typ, _ := InternType(tx, "Same")
 		key, _ := InternKey(tx, "Same")
 		if lab == 0 || typ == 0 || key == 0 {
-			t.Error("ID non validi")
+			t.Error("invalid IDs")
 		}
 		// reverse
 		if n, err := LabelName(tx, alice); err != nil || n != "Person" {
@@ -77,10 +77,10 @@ func TestCountersMonotonic(t *testing.T) {
 		n2, _ := NextNodeID(tx)
 		e1, _ := NextEdgeID(tx)
 		if n1 != 1 || n2 != 2 {
-			t.Errorf("node id non monotòni: %d, %d", n1, n2)
+			t.Errorf("node ids not monotonic: %d, %d", n1, n2)
 		}
 		if e1 != 1 {
-			t.Errorf("edge id deve partire da 1, got %d", e1)
+			t.Errorf("edge id must start at 1, got %d", e1)
 		}
 		return nil
 	}); err != nil {
@@ -92,7 +92,7 @@ func TestIndexRegistry(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(tx storage.Txn) error {
 		if has, _ := HasIndex(tx, 1, 2); has {
-			t.Error("indice non dovrebbe esistere")
+			t.Error("index should not exist")
 		}
 		if err := AddIndex(tx, 1, 2); err != nil {
 			return err
@@ -100,18 +100,18 @@ func TestIndexRegistry(t *testing.T) {
 		if err := AddIndex(tx, 3, 4); err != nil {
 			return err
 		}
-		if err := AddIndex(tx, 1, 2); err != nil { // idempotente
+		if err := AddIndex(tx, 1, 2); err != nil { // idempotent
 			return err
 		}
 		if has, _ := HasIndex(tx, 1, 2); !has {
-			t.Error("indice (1,2) dovrebbe esistere")
+			t.Error("index (1,2) should exist")
 		}
 		defs, err := ListIndexes(tx)
 		if err != nil {
 			return err
 		}
 		if len(defs) != 2 {
-			t.Errorf("attesi 2 indici, got %d: %v", len(defs), defs)
+			t.Errorf("expected 2 indexes, got %d: %v", len(defs), defs)
 		}
 		return nil
 	}); err != nil {
@@ -119,7 +119,7 @@ func TestIndexRegistry(t *testing.T) {
 	}
 }
 
-// Intern concorrente dello stesso insieme di nomi: nessun ID duplicato, ID stabili.
+// Concurrent intern of the same set of names: no duplicate IDs, stable IDs.
 func TestInternConcurrent(t *testing.T) {
 	s := newStore(t)
 	names := []string{"A", "B", "C", "D", "E"}
@@ -150,21 +150,21 @@ func TestInternConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Tutti i worker devono vedere gli stessi ID per gli stessi nomi.
+	// All workers must see the same IDs for the same names.
 	ref := results[0]
 	for w := 1; w < workers; w++ {
 		for _, name := range names {
 			if results[w][name] != ref[name] {
-				t.Errorf("ID incoerente per %q: worker0=%d worker%d=%d", name, ref[name], w, results[w][name])
+				t.Errorf("inconsistent ID for %q: worker0=%d worker%d=%d", name, ref[name], w, results[w][name])
 			}
 		}
 	}
-	// Gli ID devono essere distinti tra nomi distinti (nessuna collisione/duplicato).
+	// IDs must be distinct across distinct names (no collision/duplicate).
 	seen := map[uint32]string{}
 	for _, name := range names {
 		id := ref[name]
 		if other, dup := seen[id]; dup {
-			t.Errorf("ID duplicato %d per %q e %q", id, name, other)
+			t.Errorf("duplicate ID %d for %q and %q", id, name, other)
 		}
 		seen[id] = name
 	}
