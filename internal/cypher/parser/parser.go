@@ -1,0 +1,851 @@
+// Package parser traduce il testo Cypher in AST (recursive descent + Pratt per
+// le espressioni), limitato allo slice MVP (DESIGN §8).
+package parser
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/giovibal/mycypher/internal/cypher/ast"
+)
+
+// Parse analizza una query Cypher e restituisce l'AST, oppure un *ParseError.
+func Parse(src string) (*ast.Query, error) {
+	toks, err := newLexer(src).tokenize()
+	if err != nil {
+		return nil, err
+	}
+	p := &parser{toks: toks}
+	q, err := p.parseQuery()
+	if err != nil {
+		return nil, err
+	}
+	if p.at(tSemi) {
+		p.advance()
+	}
+	if !p.at(tEOF) {
+		return nil, p.errf(p.cur().pos, "token inatteso %s", p.describe(p.cur()))
+	}
+	return q, nil
+}
+
+type parser struct {
+	toks []token
+	pos  int
+}
+
+func (p *parser) cur() token { return p.toks[p.pos] }
+
+func (p *parser) peek(n int) token {
+	i := p.pos + n
+	if i >= len(p.toks) {
+		return p.toks[len(p.toks)-1] // EOF
+	}
+	return p.toks[i]
+}
+
+func (p *parser) advance() token {
+	t := p.toks[p.pos]
+	if t.typ != tEOF {
+		p.pos++
+	}
+	return t
+}
+
+func (p *parser) at(tt tokenType) bool { return p.cur().typ == tt }
+
+func (p *parser) atKw(kw string) bool {
+	t := p.cur()
+	return t.typ == tIdent && strings.EqualFold(t.text, kw)
+}
+
+func (p *parser) errf(pos ast.Pos, format string, args ...any) *ParseError {
+	return &ParseError{Pos: pos, Msg: fmt.Sprintf(format, args...)}
+}
+
+func (p *parser) describe(t token) string {
+	switch t.typ {
+	case tIdent:
+		return fmt.Sprintf("%q", t.text)
+	case tString:
+		return "stringa"
+	case tInt, tFloat:
+		return "numero"
+	default:
+		return t.typ.String()
+	}
+}
+
+func (p *parser) expect(tt tokenType) (token, error) {
+	if !p.at(tt) {
+		return token{}, p.errf(p.cur().pos, "atteso %s, trovato %s", tt, p.describe(p.cur()))
+	}
+	return p.advance(), nil
+}
+
+func (p *parser) expectKw(kw string) error {
+	if !p.atKw(kw) {
+		return p.errf(p.cur().pos, "attesa parola chiave %s, trovato %s", kw, p.describe(p.cur()))
+	}
+	p.advance()
+	return nil
+}
+
+// identName consuma un identificatore e ne restituisce il testo.
+func (p *parser) identName() (string, error) {
+	t, err := p.expect(tIdent)
+	if err != nil {
+		return "", err
+	}
+	return t.text, nil
+}
+
+// --- Clausole ---
+
+func (p *parser) parseQuery() (*ast.Query, error) {
+	q := &ast.Query{}
+	for !p.at(tEOF) && !p.at(tSemi) {
+		c, err := p.parseClause()
+		if err != nil {
+			return nil, err
+		}
+		q.Clauses = append(q.Clauses, c)
+	}
+	if len(q.Clauses) == 0 {
+		return nil, p.errf(p.cur().pos, "query vuota")
+	}
+	return q, nil
+}
+
+func (p *parser) parseClause() (ast.Clause, error) {
+	switch {
+	case p.atKw("OPTIONAL"):
+		pos := p.advance().pos
+		if err := p.expectKw("MATCH"); err != nil {
+			return nil, err
+		}
+		return p.matchBody(pos, true)
+	case p.atKw("MATCH"):
+		pos := p.advance().pos
+		return p.matchBody(pos, false)
+	case p.atKw("WITH"):
+		return p.parseWith()
+	case p.atKw("RETURN"):
+		return p.parseReturn()
+	case p.atKw("CREATE"):
+		return p.parseCreate()
+	case p.atKw("MERGE"):
+		return p.parseMerge()
+	case p.atKw("SET"):
+		return p.parseSet()
+	case p.atKw("DETACH"):
+		pos := p.advance().pos
+		if err := p.expectKw("DELETE"); err != nil {
+			return nil, err
+		}
+		return p.deleteBody(pos, true)
+	case p.atKw("DELETE"):
+		pos := p.advance().pos
+		return p.deleteBody(pos, false)
+	default:
+		return nil, p.errf(p.cur().pos, "clausola inattesa: %s", p.describe(p.cur()))
+	}
+}
+
+func (p *parser) matchBody(pos ast.Pos, optional bool) (*ast.Match, error) {
+	parts, err := p.parsePattern()
+	if err != nil {
+		return nil, err
+	}
+	m := &ast.Match{Optional: optional, Parts: parts, Pos: pos}
+	if p.atKw("WHERE") {
+		p.advance()
+		if m.Where, err = p.parseExpr(0); err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
+}
+
+func (p *parser) parseReturn() (*ast.Return, error) {
+	pos := p.advance().pos // RETURN
+	proj, err := p.parseProjection()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Return{
+		Distinct: proj.distinct, Star: proj.star, Items: proj.items,
+		OrderBy: proj.orderBy, Skip: proj.skip, Limit: proj.limit, Pos: pos,
+	}, nil
+}
+
+func (p *parser) parseWith() (*ast.With, error) {
+	pos := p.advance().pos // WITH
+	proj, err := p.parseProjection()
+	if err != nil {
+		return nil, err
+	}
+	w := &ast.With{
+		Distinct: proj.distinct, Star: proj.star, Items: proj.items,
+		OrderBy: proj.orderBy, Skip: proj.skip, Limit: proj.limit, Pos: pos,
+	}
+	if p.atKw("WHERE") {
+		p.advance()
+		if w.Where, err = p.parseExpr(0); err != nil {
+			return nil, err
+		}
+	}
+	return w, nil
+}
+
+type projection struct {
+	distinct bool
+	star     bool
+	items    []ast.ReturnItem
+	orderBy  []ast.SortItem
+	skip     ast.Expr
+	limit    ast.Expr
+}
+
+func (p *parser) parseProjection() (projection, error) {
+	var proj projection
+	if p.atKw("DISTINCT") {
+		proj.distinct = true
+		p.advance()
+	}
+	if p.at(tStar) {
+		proj.star = true
+		p.advance()
+		if p.at(tComma) {
+			p.advance()
+			items, err := p.parseReturnItems()
+			if err != nil {
+				return proj, err
+			}
+			proj.items = items
+		}
+	} else {
+		items, err := p.parseReturnItems()
+		if err != nil {
+			return proj, err
+		}
+		proj.items = items
+	}
+
+	if p.atKw("ORDER") {
+		p.advance()
+		if err := p.expectKw("BY"); err != nil {
+			return proj, err
+		}
+		ob, err := p.parseSortItems()
+		if err != nil {
+			return proj, err
+		}
+		proj.orderBy = ob
+	}
+	if p.atKw("SKIP") {
+		p.advance()
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return proj, err
+		}
+		proj.skip = e
+	}
+	if p.atKw("LIMIT") {
+		p.advance()
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return proj, err
+		}
+		proj.limit = e
+	}
+	return proj, nil
+}
+
+func (p *parser) parseReturnItems() ([]ast.ReturnItem, error) {
+	var items []ast.ReturnItem
+	for {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		item := ast.ReturnItem{Expr: e}
+		if p.atKw("AS") {
+			p.advance()
+			alias, err := p.identName()
+			if err != nil {
+				return nil, err
+			}
+			item.Alias = alias
+		}
+		items = append(items, item)
+		if !p.at(tComma) {
+			break
+		}
+		p.advance()
+	}
+	return items, nil
+}
+
+func (p *parser) parseSortItems() ([]ast.SortItem, error) {
+	var items []ast.SortItem
+	for {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		item := ast.SortItem{Expr: e}
+		switch {
+		case p.atKw("DESC") || p.atKw("DESCENDING"):
+			item.Desc = true
+			p.advance()
+		case p.atKw("ASC") || p.atKw("ASCENDING"):
+			p.advance()
+		}
+		items = append(items, item)
+		if !p.at(tComma) {
+			break
+		}
+		p.advance()
+	}
+	return items, nil
+}
+
+func (p *parser) parseCreate() (ast.Clause, error) {
+	pos := p.advance().pos // CREATE
+	if p.atKw("INDEX") {
+		return p.createIndexBody(pos)
+	}
+	parts, err := p.parsePattern()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Create{Parts: parts, Pos: pos}, nil
+}
+
+func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
+	p.advance() // INDEX
+	// Nome dell'indice opzionale prima di FOR.
+	if !p.atKw("FOR") && p.at(tIdent) {
+		p.advance()
+	}
+	if err := p.expectKw("FOR"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tLParen); err != nil {
+		return nil, err
+	}
+	variable, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tColon); err != nil {
+		return nil, err
+	}
+	label, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tRParen); err != nil {
+		return nil, err
+	}
+	if err := p.expectKw("ON"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tLParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.identName(); err != nil { // riferimento alla variabile (ignorato)
+		return nil, err
+	}
+	if _, err := p.expect(tDot); err != nil {
+		return nil, err
+	}
+	prop, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tRParen); err != nil {
+		return nil, err
+	}
+	return &ast.CreateIndex{Variable: variable, Label: label, Property: prop, Pos: pos}, nil
+}
+
+func (p *parser) parseMerge() (ast.Clause, error) {
+	pos := p.advance().pos // MERGE
+	part, err := p.parsePatternPart()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Merge{Part: part, Pos: pos}, nil
+}
+
+func (p *parser) parseSet() (ast.Clause, error) {
+	pos := p.advance().pos // SET
+	var items []ast.SetItem
+	for {
+		target, err := p.parseSetTarget()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tEq); err != nil {
+			return nil, err
+		}
+		value, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, ast.SetItem{Target: target, Value: value})
+		if !p.at(tComma) {
+			break
+		}
+		p.advance()
+	}
+	return &ast.Set{Items: items, Pos: pos}, nil
+}
+
+func (p *parser) parseSetTarget() (*ast.PropertyAccess, error) {
+	prim, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	e, err := p.parsePostfix(prim)
+	if err != nil {
+		return nil, err
+	}
+	pa, ok := e.(*ast.PropertyAccess)
+	if !ok {
+		return nil, p.errf(p.cur().pos, "atteso accesso a proprietà (es. n.prop) a sinistra di =")
+	}
+	return pa, nil
+}
+
+func (p *parser) deleteBody(pos ast.Pos, detach bool) (*ast.Delete, error) {
+	var exprs []ast.Expr
+	for {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		exprs = append(exprs, e)
+		if !p.at(tComma) {
+			break
+		}
+		p.advance()
+	}
+	return &ast.Delete{Detach: detach, Exprs: exprs, Pos: pos}, nil
+}
+
+// --- Pattern ---
+
+func (p *parser) parsePattern() ([]ast.PatternPart, error) {
+	var parts []ast.PatternPart
+	for {
+		part, err := p.parsePatternPart()
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+		if !p.at(tComma) {
+			break
+		}
+		p.advance()
+	}
+	return parts, nil
+}
+
+func (p *parser) parsePatternPart() (ast.PatternPart, error) {
+	var part ast.PatternPart
+	// Variabile di path opzionale: var = (...)
+	if p.at(tIdent) && p.peek(1).typ == tEq {
+		part.Variable = p.cur().text
+		p.advance() // var
+		p.advance() // =
+	}
+	start, err := p.parseNodePattern()
+	if err != nil {
+		return part, err
+	}
+	part.Start = start
+	for p.at(tMinus) || p.at(tLt) {
+		rel, err := p.parseRelPattern()
+		if err != nil {
+			return part, err
+		}
+		node, err := p.parseNodePattern()
+		if err != nil {
+			return part, err
+		}
+		part.Chain = append(part.Chain, ast.PatternChain{Rel: rel, Node: node})
+	}
+	return part, nil
+}
+
+func (p *parser) parseNodePattern() (*ast.NodePattern, error) {
+	open, err := p.expect(tLParen)
+	if err != nil {
+		return nil, err
+	}
+	n := &ast.NodePattern{Pos: open.pos}
+	if p.at(tIdent) {
+		n.Variable = p.advance().text
+	}
+	labels, err := p.parseLabels()
+	if err != nil {
+		return nil, err
+	}
+	n.Labels = labels
+	if p.at(tLBrace) {
+		props, err := p.parsePropertyMap()
+		if err != nil {
+			return nil, err
+		}
+		n.Props = props
+	}
+	if _, err := p.expect(tRParen); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+func (p *parser) parseLabels() ([]string, error) {
+	var labels []string
+	for p.at(tColon) {
+		p.advance()
+		name, err := p.identName()
+		if err != nil {
+			return nil, err
+		}
+		labels = append(labels, name)
+	}
+	return labels, nil
+}
+
+func (p *parser) parseRelPattern() (*ast.RelPattern, error) {
+	pos := p.cur().pos
+	leftArrow := false
+	if p.at(tLt) {
+		leftArrow = true
+		p.advance()
+	}
+	if _, err := p.expect(tMinus); err != nil {
+		return nil, err
+	}
+
+	rel := &ast.RelPattern{Pos: pos, MinHops: -1, MaxHops: -1}
+	if p.at(tLBracket) {
+		if err := p.parseRelDetail(rel); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := p.expect(tMinus); err != nil {
+		return nil, err
+	}
+	rightArrow := false
+	if p.at(tGt) {
+		rightArrow = true
+		p.advance()
+	}
+
+	switch {
+	case leftArrow && rightArrow:
+		return nil, p.errf(pos, "relazione con direzione ambigua (<-...->)")
+	case leftArrow:
+		rel.Direction = ast.DirIn
+	case rightArrow:
+		rel.Direction = ast.DirOut
+	default:
+		rel.Direction = ast.DirBoth
+	}
+	return rel, nil
+}
+
+// parseRelDetail analizza il contenuto tra parentesi quadre di una relazione.
+func (p *parser) parseRelDetail(rel *ast.RelPattern) error {
+	p.advance() // [
+	if p.at(tIdent) {
+		rel.Variable = p.advance().text
+	}
+	if p.at(tColon) {
+		p.advance()
+		name, err := p.identName()
+		if err != nil {
+			return err
+		}
+		rel.Types = append(rel.Types, name)
+		for p.at(tPipe) {
+			p.advance()
+			name, err := p.identName()
+			if err != nil {
+				return err
+			}
+			rel.Types = append(rel.Types, name)
+		}
+	}
+	if p.at(tStar) {
+		p.advance()
+		rel.VarLength = true
+		if p.at(tInt) {
+			rel.MinHops = int(p.advance().val.(int64))
+		}
+		if p.at(tDotDot) {
+			p.advance()
+			if p.at(tInt) {
+				rel.MaxHops = int(p.advance().val.(int64))
+			}
+		} else if rel.MinHops != -1 {
+			rel.MaxHops = rel.MinHops // *n = esattamente n
+		}
+	}
+	if p.at(tLBrace) {
+		props, err := p.parsePropertyMap()
+		if err != nil {
+			return err
+		}
+		rel.Props = props
+	}
+	if _, err := p.expect(tRBracket); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *parser) parsePropertyMap() (map[string]ast.Expr, error) {
+	if _, err := p.expect(tLBrace); err != nil {
+		return nil, err
+	}
+	m := map[string]ast.Expr{}
+	if !p.at(tRBrace) {
+		for {
+			key, err := p.identName()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(tColon); err != nil {
+				return nil, err
+			}
+			v, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			m[key] = v
+			if !p.at(tComma) {
+				break
+			}
+			p.advance()
+		}
+	}
+	if _, err := p.expect(tRBrace); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// --- Espressioni (Pratt) ---
+
+// infixBP restituisce il binding power dell'operatore infisso, 0 se non lo è.
+func (p *parser) infixBP() (int, string) {
+	switch p.cur().typ {
+	case tStar:
+		return 6, "*"
+	case tSlash:
+		return 6, "/"
+	case tPercent:
+		return 6, "%"
+	case tPlus:
+		return 5, "+"
+	case tMinus:
+		return 5, "-"
+	case tEq:
+		return 4, "="
+	case tNeq:
+		return 4, "<>"
+	case tLt:
+		return 4, "<"
+	case tLe:
+		return 4, "<="
+	case tGt:
+		return 4, ">"
+	case tGe:
+		return 4, ">="
+	case tIdent:
+		if p.atKw("AND") {
+			return 2, "AND"
+		}
+		if p.atKw("OR") {
+			return 1, "OR"
+		}
+	}
+	return 0, ""
+}
+
+const (
+	bpNot        = 3 // NOT (prefisso): più lasco dei confronti, più stretto di AND
+	bpUnaryMinus = 7 // - (prefisso): più stretto di tutti gli infissi
+)
+
+func (p *parser) parseExpr(minBP int) (ast.Expr, error) {
+	left, err := p.parsePrefix()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		bp, op := p.infixBP()
+		if bp == 0 || bp < minBP {
+			break
+		}
+		opTok := p.advance()
+		right, err := p.parseExpr(bp + 1)
+		if err != nil {
+			return nil, err
+		}
+		left = &ast.Binary{Op: op, Left: left, Right: right, Pos: opTok.pos}
+	}
+	return left, nil
+}
+
+func (p *parser) parsePrefix() (ast.Expr, error) {
+	if p.atKw("NOT") {
+		pos := p.advance().pos
+		operand, err := p.parseExpr(bpNot)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Unary{Op: "NOT", Expr: operand, Pos: pos}, nil
+	}
+	if p.at(tMinus) {
+		pos := p.advance().pos
+		operand, err := p.parseExpr(bpUnaryMinus)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Unary{Op: "-", Expr: operand, Pos: pos}, nil
+	}
+	prim, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	return p.parsePostfix(prim)
+}
+
+// parsePostfix applica accesso a proprietà (.key) e predicato di label (:Label).
+func (p *parser) parsePostfix(left ast.Expr) (ast.Expr, error) {
+	for {
+		switch {
+		case p.at(tDot):
+			pos := p.advance().pos
+			key, err := p.identName()
+			if err != nil {
+				return nil, err
+			}
+			left = &ast.PropertyAccess{Target: left, Key: key, Pos: pos}
+		case p.at(tColon):
+			pos := p.cur().pos
+			labels, err := p.parseLabels()
+			if err != nil {
+				return nil, err
+			}
+			return &ast.LabelsPredicate{Expr: left, Labels: labels, Pos: pos}, nil
+		default:
+			return left, nil
+		}
+	}
+}
+
+func (p *parser) parsePrimary() (ast.Expr, error) {
+	t := p.cur()
+	switch t.typ {
+	case tInt:
+		p.advance()
+		return &ast.Literal{Value: t.val, Pos: t.pos}, nil
+	case tFloat:
+		p.advance()
+		return &ast.Literal{Value: t.val, Pos: t.pos}, nil
+	case tString:
+		p.advance()
+		return &ast.Literal{Value: t.val, Pos: t.pos}, nil
+	case tDollar:
+		p.advance()
+		name, err := p.paramName()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.Param{Name: name, Pos: t.pos}, nil
+	case tLParen:
+		p.advance()
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tRParen); err != nil {
+			return nil, err
+		}
+		return e, nil
+	case tIdent:
+		switch {
+		case strings.EqualFold(t.text, "true"):
+			p.advance()
+			return &ast.Literal{Value: true, Pos: t.pos}, nil
+		case strings.EqualFold(t.text, "false"):
+			p.advance()
+			return &ast.Literal{Value: false, Pos: t.pos}, nil
+		case strings.EqualFold(t.text, "null"):
+			p.advance()
+			return &ast.Literal{Value: nil, Pos: t.pos}, nil
+		}
+		if p.peek(1).typ == tLParen {
+			return p.parseFunctionCall()
+		}
+		p.advance()
+		return &ast.Variable{Name: t.text, Pos: t.pos}, nil
+	default:
+		return nil, p.errf(t.pos, "espressione attesa, trovato %s", p.describe(t))
+	}
+}
+
+func (p *parser) paramName() (string, error) {
+	t := p.cur()
+	switch t.typ {
+	case tIdent:
+		p.advance()
+		return t.text, nil
+	case tInt:
+		p.advance()
+		return t.text, nil
+	default:
+		return "", p.errf(t.pos, "atteso nome di parametro dopo $")
+	}
+}
+
+func (p *parser) parseFunctionCall() (ast.Expr, error) {
+	nameTok := p.advance() // ident
+	if _, err := p.expect(tLParen); err != nil {
+		return nil, err
+	}
+	fn := &ast.FunctionCall{Name: nameTok.text, Pos: nameTok.pos}
+	if p.atKw("DISTINCT") {
+		fn.Distinct = true
+		p.advance()
+	}
+	if p.at(tStar) {
+		fn.Star = true
+		p.advance()
+	} else if !p.at(tRParen) {
+		for {
+			arg, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			fn.Args = append(fn.Args, arg)
+			if !p.at(tComma) {
+				break
+			}
+			p.advance()
+		}
+	}
+	if _, err := p.expect(tRParen); err != nil {
+		return nil, err
+	}
+	return fn, nil
+}
