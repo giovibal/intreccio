@@ -6,6 +6,22 @@ import (
 	"github.com/giovibal/mycypher/internal/storage/codec"
 )
 
+// AllNodes returns the IDs of all nodes (prefix scan on `n`). It is the fallback
+// access method; prefer NodesByLabel/NodesByProperty where possible.
+func AllNodes(txn storage.Txn) ([]uint64, error) {
+	var out []uint64
+	it := txn.Scan(codec.NodePrefix())
+	defer func() { _ = it.Close() }()
+	for ; it.Valid(); it.Next() {
+		id, err := codec.NodeIDFromKey(it.Key())
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
 // NodesByLabel returns the IDs of the nodes with the given label, in nodeID order
 // (prefix scan on `l`).
 func NodesByLabel(txn storage.Txn, labelID uint32) ([]uint64, error) {

@@ -5,9 +5,9 @@ that speaks a useful subset of **openCypher 9**. It targets **OLTP /
 knowledge-graph** workloads: point lookups and few-hop traversals over
 medium-sized graphs. It is *not* an analytical (OLAP) engine.
 
-> Work in progress. The storage engine, codec, graph layer and the read-side
-> query pipeline (parser → semantic analysis → planner) are implemented and
-> tested; the executor and the write path are next. See the roadmap below.
+> Work in progress. The read-side pipeline (parser → semantic analysis →
+> planner → executor) runs end-to-end against the on-disk store; the write path
+> is next. See the roadmap below.
 
 ## Highlights
 
@@ -34,7 +34,7 @@ make lint             # golangci-lint (v2)
 go run ./cmd/mycypher # run the (currently stub) CLI entrypoint
 ```
 
-The intended embeddable API (the executor wiring is being built):
+The embeddable API for read queries (write clauses arrive in Phase 7):
 
 ```go
 db, err := mycypher.Open("data/") // open/create the database
@@ -44,11 +44,12 @@ if err != nil {
 defer db.Close()
 
 res, err := db.Query(ctx, `
-    MATCH (p:Person {email: $email})-[:KNOWS]->(f)
+    MATCH (p:Person)-[:KNOWS]->(f)
+    WHERE p.email = $email
     RETURN f.name AS name
     ORDER BY name LIMIT 10
 `, map[string]any{"email": "a@b.com"})
-// for res.Next() { rec := res.Record(); /* rec.Get("name") */ }
+// res.Columns is []string; res.Rows is [][]any in column order.
 ```
 
 ## Architecture
@@ -61,7 +62,7 @@ Cypher text
   → Semantic analysis   (scoping, validation, output columns)
   → Rule-based planner  (anchor selection, filter push-down)
   → Physical plan       (Volcano/iterator operators)
-  → Executor            (Next())                         [in progress]
+  → Executor            (Next())
   → Graph storage API   (transactional CRUD of nodes/edges/indexes)
   → Key encoding        (prefixed tables over an ordered KV store)
   → Storage engine      (BadgerDB; pure Go; ACID)
@@ -89,7 +90,7 @@ internal/
     parser/              hand-written lexer + recursive-descent/Pratt parser
     sema/                semantic analysis
     plan/                rule-based planner + EXPLAIN
-    exec/                executor operators (Volcano)            [in progress]
+    exec/                executor operators (Volcano)
 mycypher.go              public embeddable API (package mycypher)
 docs/adr/                architecture decision records
 ```
@@ -127,7 +128,7 @@ Development proceeds in phases (details in `PLAN.md`):
 - [x] Phase 3 — Parser → AST
 - [x] Phase 4 — Semantic analysis
 - [x] Phase 5 — Logical plan + rule-based planner
-- [ ] Phase 6 — Executor (read path): first end-to-end query
+- [x] Phase 6 — Executor (read path): first end-to-end query
 - [ ] Phase 7 — Write path (Cypher)
 - [ ] Phase 8 — Advanced projection and traversal
 - [ ] Phase 9 — Indexes managed via Cypher + CLI/REPL
