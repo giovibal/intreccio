@@ -32,10 +32,33 @@ go build ./...        # build
 go test ./...         # run tests
 make race             # tests with the race detector
 make lint             # golangci-lint (v2)
-go run ./cmd/mycypher # run the (currently stub) CLI entrypoint
+go run ./cmd/mycypher # interactive REPL on an in-memory database
 ```
 
-The embeddable API supports both reads and writes through `Query`:
+### CLI / REPL
+
+The `mycypher` binary opens either a directory-backed database or an in-memory
+one if no path is given, and accepts Cypher statements interactively (terminated
+by `;`) or as a one-shot via `-c`:
+
+```bash
+# interactive REPL on an in-memory database
+mycypher
+
+# one-shot
+mycypher -c "CREATE (n:Person {name: 'Bob'}) RETURN n.name AS name"
+
+# persistent database under data/
+mycypher data/
+```
+
+REPL commands: `:quit` / `:exit` to leave, `:help` for a short help. Statements
+can span multiple lines; the terminator is `;` (note: a `;` inside a string
+literal is not currently recognized as a statement boundary).
+
+### Embeddable API
+
+The library supports both reads and writes through `Query`:
 
 ```go
 db, err := mycypher.Open("data/") // open/create the database
