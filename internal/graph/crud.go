@@ -175,9 +175,38 @@ func DeleteEdge(txn storage.Txn, id uint64) error {
 	return txn.Delete(codec.EdgeKey(id))
 }
 
+// DetachDeleteNode removes all incident edges (in any direction, including
+// self-loops) and then the node itself. It is the DETACH DELETE semantics.
+func DetachDeleteNode(txn storage.Txn, id uint64) error {
+	if _, err := GetNode(txn, id); err != nil {
+		return err
+	}
+	edgeIDs := map[uint64]struct{}{}
+	out, err := OutEdges(txn, id, 0)
+	if err != nil {
+		return err
+	}
+	for _, e := range out {
+		edgeIDs[e.ID] = struct{}{}
+	}
+	in, err := InEdges(txn, id, 0)
+	if err != nil {
+		return err
+	}
+	for _, e := range in {
+		edgeIDs[e.ID] = struct{}{}
+	}
+	for eid := range edgeIDs {
+		if err := DeleteEdge(txn, eid); err != nil {
+			return err
+		}
+	}
+	return DeleteNode(txn, id)
+}
+
 // DeleteNode removes a node and all its index entries (`l`, `p`). Returns
 // ErrNodeHasEdges if incident edges exist: the caller must remove them first
-// (DETACH DELETE semantics will arrive in Phase 7).
+// (use DetachDeleteNode for the DETACH DELETE semantics).
 func DeleteNode(txn storage.Txn, id uint64) error {
 	node, err := GetNode(txn, id)
 	if err != nil {

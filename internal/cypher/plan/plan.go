@@ -61,12 +61,53 @@ func (pl *planner) clause(c ast.Clause) error {
 		return pl.planWith(cl)
 	case *ast.Return:
 		return pl.planReturn(cl)
-	case *ast.Create, *ast.Merge, *ast.Set, *ast.Delete:
-		return fmt.Errorf("plan: write planning not yet supported (Phase 7)")
+	case *ast.Create:
+		return pl.planCreate(cl)
+	case *ast.Merge:
+		return pl.planMerge(cl)
+	case *ast.Set:
+		pl.plan = &SetItems{Input: pl.plan, Items: cl.Items}
+		return nil
+	case *ast.Delete:
+		pl.plan = &Delete{Input: pl.plan, Exprs: cl.Exprs, Detach: cl.Detach}
+		return nil
 	case *ast.CreateIndex:
 		return fmt.Errorf("plan: CREATE INDEX not yet planned (Phase 9)")
 	default:
 		return fmt.Errorf("plan: unsupported clause")
+	}
+}
+
+// --- Write clauses ---
+
+func (pl *planner) planCreate(c *ast.Create) error {
+	pl.plan = &Create{Input: pl.plan, Parts: c.Parts}
+	for _, part := range c.Parts {
+		pl.bindPatternVars(part)
+	}
+	return nil
+}
+
+func (pl *planner) planMerge(m *ast.Merge) error {
+	pl.plan = &Merge{Input: pl.plan, Part: m.Part}
+	pl.bindPatternVars(m.Part)
+	return nil
+}
+
+func (pl *planner) bindPatternVars(part ast.PatternPart) {
+	if part.Variable != "" {
+		pl.bind(part.Variable)
+	}
+	if part.Start.Variable != "" {
+		pl.bind(part.Start.Variable)
+	}
+	for _, ch := range part.Chain {
+		if ch.Rel.Variable != "" {
+			pl.bind(ch.Rel.Variable)
+		}
+		if ch.Node.Variable != "" {
+			pl.bind(ch.Node.Variable)
+		}
 	}
 }
 

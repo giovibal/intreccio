@@ -102,6 +102,34 @@ type CartesianProduct struct {
 	Right Op
 }
 
+// --- Write operators ---
+
+// Create: creates the given patterns for each input row.
+type Create struct {
+	Input Op
+	Parts []ast.PatternPart
+}
+
+// Merge: match-or-create for a single pattern, per input row.
+type Merge struct {
+	Input Op
+	Part  ast.PatternPart
+}
+
+// SetItems: applies property assignments for each input row.
+type SetItems struct {
+	Input Op
+	Items []ast.SetItem
+}
+
+// Delete: removes the values produced by the given expressions; if Detach is
+// true, incident edges are removed before deleting a node.
+type Delete struct {
+	Input  Op
+	Exprs  []ast.Expr
+	Detach bool
+}
+
 func (*AllNodesScan) op()     {}
 func (*NodeByLabelScan) op()  {}
 func (*NodeByProperty) op()   {}
@@ -113,3 +141,7 @@ func (*Sort) op()             {}
 func (*Skip) op()             {}
 func (*Limit) op()            {}
 func (*CartesianProduct) op() {}
+func (*Create) op()           {}
+func (*Merge) op()            {}
+func (*SetItems) op()         {}
+func (*Delete) op()           {}

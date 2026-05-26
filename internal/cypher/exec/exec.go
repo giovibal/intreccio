@@ -29,6 +29,18 @@ func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Write-only queries have no output columns: drain for side effects.
+	if len(columns) == 0 {
+		for {
+			_, ok, err := o.next()
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, nil
+			}
+		}
+	}
 	var rows [][]any
 	for {
 		b, ok, err := o.next()
@@ -125,6 +137,30 @@ func build(p plan.Op, ctx *Context) (op, error) {
 		return &cartesian{left: left, right: right}, nil
 	case *plan.Aggregate:
 		return nil, fmt.Errorf("exec: aggregation not yet supported (Phase 8)")
+	case *plan.Create:
+		in, err := build(x.Input, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &createOp{ctx: ctx, input: in, parts: x.Parts}, nil
+	case *plan.Merge:
+		in, err := build(x.Input, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &mergeOp{ctx: ctx, input: in, part: x.Part}, nil
+	case *plan.SetItems:
+		in, err := build(x.Input, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &setOp{ctx: ctx, input: in, items: x.Items}, nil
+	case *plan.Delete:
+		in, err := build(x.Input, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
 	default:
 		return nil, fmt.Errorf("exec: unsupported operator %T", p)
 	}

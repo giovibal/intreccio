@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/giovibal/mycypher/internal/catalog"
+	"github.com/giovibal/mycypher/internal/cypher/ast"
 	"github.com/giovibal/mycypher/internal/cypher/exec"
 	"github.com/giovibal/mycypher/internal/cypher/parser"
 	"github.com/giovibal/mycypher/internal/cypher/plan"
@@ -48,9 +49,11 @@ type Result struct {
 	Rows    [][]any
 }
 
-// Query runs a read-only Cypher query and returns the result. Write clauses are
-// not yet supported (Phase 7).
+// Query runs a Cypher query and returns the result. If the query contains any
+// write clauses (CREATE/MERGE/SET/DELETE) it runs inside a write transaction;
+// otherwise inside a read-only transaction.
 func (db *DB) Query(ctx context.Context, cypher string, params map[string]any) (*Result, error) {
+	_ = ctx // reserved for cancellation; not consulted yet.
 	q, err := parser.Parse(cypher)
 	if err != nil {
 		return nil, err
@@ -60,8 +63,13 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any) (
 		return nil, err
 	}
 
+	run := db.store.View
+	if isWriteQuery(q) {
+		run = db.store.Update
+	}
+
 	var result *Result
-	err = db.store.View(func(txn storage.Txn) error {
+	err = run(func(txn storage.Txn) error {
 		p, err := plan.Plan(q, planCatalog{txn: txn})
 		if err != nil {
 			return err
@@ -77,6 +85,16 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any) (
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	return result, nil
+}
+
+func isWriteQuery(q *ast.Query) bool {
+	for _, c := range q.Clauses {
+		switch c.(type) {
+		case *ast.Create, *ast.Merge, *ast.Set, *ast.Delete, *ast.CreateIndex:
+			return true
+		}
+	}
+	return false
 }
 
 // planCatalog adapts the catalog to plan.Catalog, resolving names within the

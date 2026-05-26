@@ -5,9 +5,10 @@ that speaks a useful subset of **openCypher 9**. It targets **OLTP /
 knowledge-graph** workloads: point lookups and few-hop traversals over
 medium-sized graphs. It is *not* an analytical (OLAP) engine.
 
-> Work in progress. The read-side pipeline (parser → semantic analysis →
-> planner → executor) runs end-to-end against the on-disk store; the write path
-> is next. See the roadmap below.
+> Work in progress. Cypher reads and writes (CREATE/MERGE/SET/DELETE/DETACH
+> DELETE) run end-to-end through the public API; advanced projection
+> (ORDER BY/DISTINCT chaining), aggregations and variable-length traversal land
+> in Phase 8. See the roadmap below.
 
 ## Highlights
 
@@ -34,7 +35,7 @@ make lint             # golangci-lint (v2)
 go run ./cmd/mycypher # run the (currently stub) CLI entrypoint
 ```
 
-The embeddable API for read queries (write clauses arrive in Phase 7):
+The embeddable API supports both reads and writes through `Query`:
 
 ```go
 db, err := mycypher.Open("data/") // open/create the database
@@ -129,7 +130,7 @@ Development proceeds in phases (details in `PLAN.md`):
 - [x] Phase 4 — Semantic analysis
 - [x] Phase 5 — Logical plan + rule-based planner
 - [x] Phase 6 — Executor (read path): first end-to-end query
-- [ ] Phase 7 — Write path (Cypher)
+- [x] Phase 7 — Write path (Cypher)
 - [ ] Phase 8 — Advanced projection and traversal
 - [ ] Phase 9 — Indexes managed via Cypher + CLI/REPL
 - [ ] Phase 10 — Hardening (fuzzing, TCK subset, benchmarks, crash recovery)

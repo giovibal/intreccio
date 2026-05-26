@@ -52,8 +52,112 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("Limit(%s)", exprString(x.Count)), []Op{x.Input}
 	case *CartesianProduct:
 		return "CartesianProduct", []Op{x.Left, x.Right}
+	case *Create:
+		return fmt.Sprintf("Create(%s)", patternsString(x.Parts)), []Op{x.Input}
+	case *Merge:
+		return fmt.Sprintf("Merge(%s)", patternsString([]ast.PatternPart{x.Part})), []Op{x.Input}
+	case *SetItems:
+		parts := make([]string, len(x.Items))
+		for i, it := range x.Items {
+			parts[i] = exprString(it.Target) + " = " + exprString(it.Value)
+		}
+		return fmt.Sprintf("Set(%s)", strings.Join(parts, ", ")), []Op{x.Input}
+	case *Delete:
+		parts := make([]string, len(x.Exprs))
+		for i, e := range x.Exprs {
+			parts[i] = exprString(e)
+		}
+		op := "Delete"
+		if x.Detach {
+			op = "DetachDelete"
+		}
+		return fmt.Sprintf("%s(%s)", op, strings.Join(parts, ", ")), []Op{x.Input}
 	default:
 		return "?", nil
+	}
+}
+
+// patternsString renders a list of pattern parts compactly for EXPLAIN.
+func patternsString(parts []ast.PatternPart) string {
+	pieces := make([]string, len(parts))
+	for i, p := range parts {
+		pieces[i] = patternString(p)
+	}
+	return strings.Join(pieces, ", ")
+}
+
+func patternString(p ast.PatternPart) string {
+	s := nodeString(p.Start)
+	for _, ch := range p.Chain {
+		s += relString(ch.Rel) + nodeString(ch.Node)
+	}
+	return s
+}
+
+func nodeString(n *ast.NodePattern) string {
+	var b strings.Builder
+	b.WriteByte('(')
+	if n.Variable != "" {
+		b.WriteString(n.Variable)
+	}
+	for _, l := range n.Labels {
+		b.WriteByte(':')
+		b.WriteString(l)
+	}
+	if len(n.Props) > 0 {
+		b.WriteByte(' ')
+		b.WriteString(propsString(n.Props))
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
+func relString(r *ast.RelPattern) string {
+	var inner string
+	if r.Variable != "" {
+		inner += r.Variable
+	}
+	if len(r.Types) > 0 {
+		inner += ":" + strings.Join(r.Types, "|")
+	}
+	if len(r.Props) > 0 {
+		if inner != "" {
+			inner += " "
+		}
+		inner += propsString(r.Props)
+	}
+	body := ""
+	if inner != "" {
+		body = "[" + inner + "]"
+	}
+	switch r.Direction {
+	case ast.DirOut:
+		return "-" + body + "->"
+	case ast.DirIn:
+		return "<-" + body + "-"
+	default:
+		return "-" + body + "-"
+	}
+}
+
+func propsString(props map[string]ast.Expr) string {
+	keys := make([]string, 0, len(props))
+	for k := range props {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + ": " + exprString(props[k])
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
 	}
 }
 
