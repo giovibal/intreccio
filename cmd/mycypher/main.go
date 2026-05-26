@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 
@@ -80,6 +81,24 @@ func repl(db *mycypher.DB, in io.Reader, out, errOut io.Writer) {
 		line = strings.TrimRight(line, "\n\r")
 		trimmed := strings.TrimSpace(line)
 
+		// :edit/:e is handled regardless of buffer state: with a partial buffer
+		// it pre-populates the editor with what was typed so far, then resets
+		// the buffer and runs the edited content as a batch.
+		if trimmed == ":edit" || trimmed == ":e" {
+			initial := buf.String()
+			buf.Reset()
+			content, err := openEditor(initial)
+			if err != nil {
+				_, _ = fmt.Fprintln(errOut, err)
+			} else {
+				runBatch(db, content, out, errOut)
+			}
+			if eof {
+				return
+			}
+			continue
+		}
+
 		if buf.Len() == 0 {
 			switch trimmed {
 			case "":
@@ -116,6 +135,63 @@ func repl(db *mycypher.DB, in io.Reader, out, errOut io.Writer) {
 		}
 		if eof {
 			return
+		}
+	}
+}
+
+// openEditor writes initial to a temp file, runs $VISUAL/$EDITOR/vi on it, and
+// returns the edited content. The editor inherits the terminal (stdin/stdout/stderr).
+func openEditor(initial string) (string, error) {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+
+	f, err := os.CreateTemp("", "mycypher-*.cypher")
+	if err != nil {
+		return "", fmt.Errorf("edit: create temp: %w", err)
+	}
+	path := f.Name()
+	defer func() { _ = os.Remove(path) }()
+
+	if initial != "" {
+		if _, err := f.WriteString(initial); err != nil {
+			_ = f.Close()
+			return "", fmt.Errorf("edit: write temp: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("edit: close temp: %w", err)
+	}
+
+	cmd := exec.Command("sh", "-c", editor+` "$@"`, "--", path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("edit: %s: %w", editor, err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("edit: read temp: %w", err)
+	}
+	return string(content), nil
+}
+
+// runBatch splits content on ';' and runs each non-empty statement in order.
+// Errors are reported on errOut but do not interrupt the batch.
+func runBatch(db *mycypher.DB, content string, out, errOut io.Writer) {
+	for _, stmt := range strings.Split(content, ";") {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if err := execute(db, stmt, out); err != nil {
+			_, _ = fmt.Fprintln(errOut, err)
 		}
 	}
 }
@@ -172,7 +248,10 @@ func renderValue(v any) string {
 
 func printHelp(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "Statements end with ';' and may span multiple lines.")
-	_, _ = fmt.Fprintln(out, "Commands: :quit, :exit, :help.")
+	_, _ = fmt.Fprintln(out, "Commands:")
+	_, _ = fmt.Fprintln(out, "  :quit, :exit    leave the REPL")
+	_, _ = fmt.Fprintln(out, "  :help           show this message")
+	_, _ = fmt.Fprintln(out, "  :edit, :e       open the current buffer in $EDITOR and run the result")
 	_, _ = fmt.Fprintln(out, "Note: ';' inside string literals is not recognized as a statement boundary.")
 }
 

@@ -88,6 +88,43 @@ func TestReplExitOnEOF(t *testing.T) {
 	}
 }
 
+func TestRunBatch(t *testing.T) {
+	db := newDB(t)
+	var out, errOut bytes.Buffer
+	runBatch(db,
+		"CREATE (n:Person {name: 'A'});"+
+			"CREATE (m:Person {name: 'B'});"+
+			"MATCH (p:Person) RETURN p.name AS n ORDER BY n;",
+		&out, &errOut)
+	got := out.String()
+	if !strings.Contains(got, "A") || !strings.Contains(got, "B") {
+		t.Errorf("expected both A and B in output, got %q", got)
+	}
+	if !strings.Contains(got, "(2 rows)") {
+		t.Errorf("expected 2 rows in MATCH output, got %q", got)
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("no errors expected, got %q", errOut.String())
+	}
+}
+
+func TestRunBatchSkipsEmptyAndContinuesOnError(t *testing.T) {
+	db := newDB(t)
+	var out, errOut bytes.Buffer
+	// A leading ';' produces an empty statement (skipped). The middle "BOGUS"
+	// statement fails to parse; the batch must still run the final MATCH.
+	runBatch(db,
+		"; CREATE (n:Person {name: 'A'}); BOGUS; MATCH (p:Person) RETURN p.name AS n;",
+		&out, &errOut)
+	got := out.String()
+	if !strings.Contains(got, "A") {
+		t.Errorf("expected A in output (final MATCH must run), got %q", got)
+	}
+	if errOut.Len() == 0 {
+		t.Error("expected a parse error on stderr for BOGUS")
+	}
+}
+
 func TestReplPropagatesErrors(t *testing.T) {
 	db := newDB(t)
 	var out, errOut bytes.Buffer
