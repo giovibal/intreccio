@@ -5,10 +5,11 @@ that speaks a useful subset of **openCypher 9**. It targets **OLTP /
 knowledge-graph** workloads: point lookups and few-hop traversals over
 medium-sized graphs. It is *not* an analytical (OLAP) engine.
 
-> Work in progress. Cypher reads and writes (CREATE/MERGE/SET/DELETE/DETACH
-> DELETE) run end-to-end through the public API; advanced projection
-> (ORDER BY/DISTINCT chaining), aggregations and variable-length traversal land
-> in Phase 8. See the roadmap below.
+> Work in progress. Cypher reads and writes, aggregations
+> (count/sum/avg/min/max/collect) with implicit grouping, `DISTINCT`, ORDER BY,
+> SKIP, LIMIT, WITH chaining and variable-length traversal (with trail
+> semantics — no repeated relationships) all run end-to-end through the public
+> API. See the roadmap below.
 
 ## Highlights
 
@@ -154,7 +155,7 @@ Development proceeds in phases (details in `PLAN.md`):
 - [x] Phase 5 — Logical plan + rule-based planner
 - [x] Phase 6 — Executor (read path): first end-to-end query
 - [x] Phase 7 — Write path (Cypher)
-- [ ] Phase 8 — Advanced projection and traversal
+- [x] Phase 8 — Advanced projection and traversal
 - [ ] Phase 9 — Indexes managed via Cypher + CLI/REPL
 - [ ] Phase 10 — Hardening (fuzzing, TCK subset, benchmarks, crash recovery)
 

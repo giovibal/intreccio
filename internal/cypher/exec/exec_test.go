@@ -212,6 +212,180 @@ func TestNoResultsForMissingLabel(t *testing.T) {
 	}
 }
 
+func TestCountStarEmptyAndPopulated(t *testing.T) {
+	s := newStore(t)
+
+	rows := runQuery(t, s, "MATCH (n) RETURN count(*) AS c", nil)
+	if len(rows) != 1 || rows[0][0] != int64(0) {
+		t.Errorf("empty db: got %v, want [[0]]", rows)
+	}
+
+	seedSocial(t, s) // 3 persons + 3 KNOWS edges
+	rows = runQuery(t, s, "MATCH (n:Person) RETURN count(*) AS c", nil)
+	if len(rows) != 1 || rows[0][0] != int64(3) {
+		t.Errorf("populated: got %v, want [[3]]", rows)
+	}
+}
+
+func TestAggregateGroupBy(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, p := range []map[string]any{
+			{"name": "A", "country": "IT"},
+			{"name": "B", "country": "IT"},
+			{"name": "C", "country": "DE"},
+		} {
+			if _, err := graph.CreateNode(tx, []string{"Person"}, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (p:Person) RETURN p.country AS country, count(*) AS n ORDER BY country", nil)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 groups, got %d (%v)", len(rows), rows)
+	}
+	if rows[0][0] != "DE" || rows[0][1] != int64(1) {
+		t.Errorf("row[0] = %v, want [DE 1]", rows[0])
+	}
+	if rows[1][0] != "IT" || rows[1][1] != int64(2) {
+		t.Errorf("row[1] = %v, want [IT 2]", rows[1])
+	}
+}
+
+func TestAggregateSumAvgMinMax(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, age := range []int64{10, 20, 30, 40} {
+			if _, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"age": age}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (p:Person) RETURN sum(p.age) AS s, avg(p.age) AS a, min(p.age) AS lo, max(p.age) AS hi", nil)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0][0] != int64(100) {
+		t.Errorf("sum = %v, want 100", rows[0][0])
+	}
+	if rows[0][1] != float64(25) {
+		t.Errorf("avg = %v, want 25", rows[0][1])
+	}
+	if rows[0][2] != int64(10) {
+		t.Errorf("min = %v, want 10", rows[0][2])
+	}
+	if rows[0][3] != int64(40) {
+		t.Errorf("max = %v, want 40", rows[0][3])
+	}
+}
+
+func TestAggregateCollect(t *testing.T) {
+	s := newStore(t)
+	seedSocial(t, s)
+
+	rows := runQuery(t, s,
+		"MATCH (p:Person) RETURN collect(p.name) AS names", nil)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	got, ok := rows[0][0].([]any)
+	if !ok {
+		t.Fatalf("expected []any, got %T", rows[0][0])
+	}
+	if len(got) != 3 {
+		t.Errorf("expected 3 names, got %v", got)
+	}
+}
+
+func TestAggregateCountDistinct(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, c := range []string{"IT", "IT", "IT", "DE", "DE", "FR"} {
+			if _, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"country": c}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (p:Person) RETURN count(DISTINCT p.country) AS c", nil)
+	if len(rows) != 1 || rows[0][0] != int64(3) {
+		t.Errorf("got %v, want [[3]]", rows)
+	}
+}
+
+func TestVarLengthExpand(t *testing.T) {
+	s := newStore(t)
+	seedSocial(t, s) // Alice→Bob, Alice→Carol, Bob→Carol
+
+	// 1..2 hops from Alice via KNOWS.
+	// Depth 1: Bob, Carol.
+	// Depth 2: from Alice→Bob→Carol → Carol (one more path).
+	// Expected names: Bob, Carol, Carol.
+	rows := runQuery(t, s,
+		"MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) WHERE a.email = $e RETURN b.name AS n ORDER BY n",
+		map[string]any{"e": "a@b.com"})
+
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r[0].(string)
+	}
+	want := []string{"Bob", "Carol", "Carol"}
+	if !equalStrings(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestVarLengthTrailSemantics builds a 2-cycle a→b→a (two distinct edges) and
+// verifies that *1..5 traversals never reuse the same edge twice. Reachable
+// trails from a are: {b} via e1, {a} via e1+e2 — and nothing deeper since
+// extending requires reusing e1 or e2.
+func TestVarLengthTrailSemantics(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		a, err := graph.CreateNode(tx, []string{"N"}, map[string]any{"name": "a"})
+		if err != nil {
+			return err
+		}
+		b, err := graph.CreateNode(tx, []string{"N"}, map[string]any{"name": "b"})
+		if err != nil {
+			return err
+		}
+		if _, err := graph.CreateEdge(tx, "T", a, b, nil); err != nil {
+			return err
+		}
+		_, err = graph.CreateEdge(tx, "T", b, a, nil)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (a:N)-[:T*1..5]->(x) WHERE a.name = $n RETURN x.name AS n ORDER BY n",
+		map[string]any{"n": "a"})
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r[0].(string)
+	}
+	want := []string{"a", "b"} // exactly one trail reaching each
+	if !equalStrings(got, want) {
+		t.Errorf("trail semantics violated: got %v, want %v", got, want)
+	}
+}
+
 func TestLimit(t *testing.T) {
 	s := newStore(t)
 	seedSocial(t, s)

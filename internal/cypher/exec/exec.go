@@ -136,7 +136,11 @@ func build(p plan.Op, ctx *Context) (op, error) {
 		}
 		return &cartesian{left: left, right: right}, nil
 	case *plan.Aggregate:
-		return nil, fmt.Errorf("exec: aggregation not yet supported (Phase 8)")
+		in, err := build(x.Input, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &aggregateOp{ctx: ctx, input: in, groupKeys: x.GroupKeys, aggs: x.Aggs}, nil
 	case *plan.Create:
 		in, err := build(x.Input, ctx)
 		if err != nil {
