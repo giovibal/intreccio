@@ -157,7 +157,10 @@ Development proceeds in phases (details in `PLAN.md`):
 - [x] Phase 7 — Write path (Cypher)
 - [x] Phase 8 — Advanced projection and traversal
 - [x] Phase 9 — Indexes managed via Cypher + CLI/REPL
-- [ ] Phase 10 — Hardening (fuzzing, TCK subset, benchmarks, crash recovery)
+- [x] Phase 10 — Hardening: fuzz tests on parser + codec, benchmarks
+  (insert/traversal/indexed lookup, end-to-end query), persistence test across
+  reopen, and godoc examples. The openCypher TCK subset is deferred as future
+  work.
 
 ## Documentation
 
