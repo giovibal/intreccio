@@ -87,6 +87,32 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any) (
 	return result, nil
 }
 
+// Explain returns the textual physical plan for the given query without running
+// it. Useful to verify that a plan picks up an index, an ordering, etc.
+func (db *DB) Explain(ctx context.Context, cypher string) (string, error) {
+	_ = ctx
+	q, err := parser.Parse(cypher)
+	if err != nil {
+		return "", err
+	}
+	if _, err := sema.Analyze(q); err != nil {
+		return "", err
+	}
+	var out string
+	err = db.store.View(func(txn storage.Txn) error {
+		p, err := plan.Plan(q, planCatalog{txn: txn})
+		if err != nil {
+			return err
+		}
+		out = plan.Explain(p)
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("explain: %w", err)
+	}
+	return out, nil
+}
+
 func isWriteQuery(q *ast.Query) bool {
 	for _, c := range q.Clauses {
 		switch c.(type) {

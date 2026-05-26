@@ -6,6 +6,7 @@ import (
 	"github.com/giovibal/mycypher/internal/catalog"
 	"github.com/giovibal/mycypher/internal/cypher/ast"
 	"github.com/giovibal/mycypher/internal/graph"
+	"github.com/giovibal/mycypher/internal/storage/codec"
 )
 
 // --- CREATE ---
@@ -206,6 +207,70 @@ func (d *deleteOp) next() (binding, bool, error) {
 		}
 	}
 	return b, true, nil
+}
+
+// --- CREATE INDEX ---
+
+type createIndexOp struct {
+	ctx   *Context
+	label string
+	prop  string
+	done  bool
+}
+
+func (c *createIndexOp) next() (binding, bool, error) {
+	if c.done {
+		return nil, false, nil
+	}
+	c.done = true
+
+	labelID, err := catalog.InternLabel(c.ctx.Txn, c.label)
+	if err != nil {
+		return nil, false, err
+	}
+	keyID, err := catalog.InternKey(c.ctx.Txn, c.prop)
+	if err != nil {
+		return nil, false, err
+	}
+
+	has, err := catalog.HasIndex(c.ctx.Txn, labelID, keyID)
+	if err != nil {
+		return nil, false, err
+	}
+	if has {
+		// Idempotent: registry entry already present and any prior backfill is
+		// kept consistent by the graph layer on every subsequent mutation.
+		return binding{}, true, nil
+	}
+
+	if err := catalog.AddIndex(c.ctx.Txn, labelID, keyID); err != nil {
+		return nil, false, err
+	}
+
+	// Backfill: scan every node carrying the label and write a `p` entry for
+	// each whose property value is a scalar.
+	nodeIDs, err := graph.NodesByLabel(c.ctx.Txn, labelID)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, id := range nodeIDs {
+		node, err := graph.GetNode(c.ctx.Txn, id)
+		if err != nil {
+			return nil, false, err
+		}
+		v, ok := node.Props[keyID]
+		if !ok || !graph.IsIndexable(v) {
+			continue
+		}
+		pk, err := codec.PropKey(labelID, keyID, v, id)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := c.ctx.Txn.Set(pk, nil); err != nil {
+			return nil, false, err
+		}
+	}
+	return binding{}, true, nil
 }
 
 // --- MERGE ---

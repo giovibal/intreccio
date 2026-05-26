@@ -10,9 +10,9 @@ func normalize(v any) any {
 	return v
 }
 
-// isIndexable reports whether a value can go into a `p` index (scalars only;
+// IsIndexable reports whether a value can go into a `p` index (scalars only;
 // lists and maps are not indexable in v1, DESIGN §4).
-func isIndexable(v any) bool {
+func IsIndexable(v any) bool {
 	switch v.(type) {
 	case nil, bool, int64, float64, string:
 		return true
@@ -20,6 +20,9 @@ func isIndexable(v any) bool {
 		return false
 	}
 }
+
+// isIndexable is the package-internal alias kept for the existing callers.
+func isIndexable(v any) bool { return IsIndexable(v) }
 
 // scalarEqual compares two scalar values for equality (fallback of
 // NodesByProperty without an index).

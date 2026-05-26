@@ -72,7 +72,8 @@ func (pl *planner) clause(c ast.Clause) error {
 		pl.plan = &Delete{Input: pl.plan, Exprs: cl.Exprs, Detach: cl.Detach}
 		return nil
 	case *ast.CreateIndex:
-		return fmt.Errorf("plan: CREATE INDEX not yet planned (Phase 9)")
+		pl.plan = &CreateIndex{Label: cl.Label, Property: cl.Property}
+		return nil
 	default:
 		return fmt.Errorf("plan: unsupported clause")
 	}

@@ -72,6 +72,8 @@ func describe(o Op) (string, []Op) {
 			op = "DetachDelete"
 		}
 		return fmt.Sprintf("%s(%s)", op, strings.Join(parts, ", ")), []Op{x.Input}
+	case *CreateIndex:
+		return fmt.Sprintf("CreateIndex(:%s.%s)", x.Label, x.Property), nil
 	default:
 		return "?", nil
 	}

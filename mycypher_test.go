@@ -3,6 +3,7 @@ package mycypher
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/giovibal/mycypher/internal/graph"
@@ -165,11 +166,75 @@ func TestDetachDelete(t *testing.T) {
 	}
 }
 
-func TestCreateIndexNotPlanned(t *testing.T) {
+func TestCreateIndexChangesPlanAndPreservesResults(t *testing.T) {
 	db := newDB(t)
+	ctx := context.Background()
+
+	// Seed three Person nodes with distinct emails.
+	mustQuery(t, db, "CREATE (n:Person {name: 'A', email: 'a@b.com'})", nil)
+	mustQuery(t, db, "CREATE (n:Person {name: 'B', email: 'b@b.com'})", nil)
+	mustQuery(t, db, "CREATE (n:Person {name: 'C', email: 'c@b.com'})", nil)
+
+	const matchByEmail = "MATCH (p:Person) WHERE p.email = $e RETURN p.name AS n"
+
+	// Before the index: the plan must rely on a label scan.
+	before, err := db.Explain(ctx, matchByEmail)
+	if err != nil {
+		t.Fatalf("Explain before: %v", err)
+	}
+	if !strings.Contains(before, "NodeByLabelScan") {
+		t.Errorf("expected NodeByLabelScan before index, got:\n%s", before)
+	}
+	if strings.Contains(before, "NodeByProperty") {
+		t.Errorf("did NOT expect NodeByProperty before index, got:\n%s", before)
+	}
+
+	// Capture pre-index results.
+	pre := mustQuery(t, db, matchByEmail, map[string]any{"e": "b@b.com"})
+	if len(pre.Rows) != 1 || pre.Rows[0][0] != "B" {
+		t.Fatalf("pre-index rows = %v, want [[B]]", pre.Rows)
+	}
+
+	// Install the index.
+	mustQuery(t, db, "CREATE INDEX FOR (p:Person) ON (p.email)", nil)
+
+	// After the index: the plan must use NodeByProperty.
+	after, err := db.Explain(ctx, matchByEmail)
+	if err != nil {
+		t.Fatalf("Explain after: %v", err)
+	}
+	if !strings.Contains(after, "NodeByProperty") {
+		t.Errorf("expected NodeByProperty after index, got:\n%s", after)
+	}
+
+	// Backfill check: pre-existing nodes are findable via the index path.
+	post := mustQuery(t, db, matchByEmail, map[string]any{"e": "b@b.com"})
+	if len(post.Rows) != 1 || post.Rows[0][0] != "B" {
+		t.Errorf("post-index rows = %v, want [[B]] (backfill failed?)", post.Rows)
+	}
+}
+
+func TestCreateIndexIdempotent(t *testing.T) {
+	db := newDB(t)
+	mustQuery(t, db, "CREATE INDEX FOR (p:Person) ON (p.email)", nil)
+	// A second CREATE INDEX must not error.
 	if _, err := db.Query(context.Background(),
-		"CREATE INDEX FOR (p:Person) ON (p.email)", nil); err == nil {
-		t.Error("expected an error (CREATE INDEX is planned in Phase 9)")
+		"CREATE INDEX FOR (p:Person) ON (p.email)", nil); err != nil {
+		t.Errorf("idempotent CREATE INDEX errored: %v", err)
+	}
+}
+
+func TestCreateIndexThenInsertUsesIndex(t *testing.T) {
+	db := newDB(t)
+	// Index before data: new inserts must populate the `p` entries.
+	mustQuery(t, db, "CREATE INDEX FOR (p:Person) ON (p.email)", nil)
+	mustQuery(t, db, "CREATE (n:Person {name: 'X', email: 'x@b.com'})", nil)
+
+	res := mustQuery(t, db,
+		"MATCH (p:Person) WHERE p.email = $e RETURN p.name AS n",
+		map[string]any{"e": "x@b.com"})
+	if len(res.Rows) != 1 || res.Rows[0][0] != "X" {
+		t.Errorf("rows = %v, want [[X]]", res.Rows)
 	}
 }
 

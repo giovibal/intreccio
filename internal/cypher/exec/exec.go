@@ -165,6 +165,8 @@ func build(p plan.Op, ctx *Context) (op, error) {
 			return nil, err
 		}
 		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
+	case *plan.CreateIndex:
+		return &createIndexOp{ctx: ctx, label: x.Label, prop: x.Property}, nil
 	default:
 		return nil, fmt.Errorf("exec: unsupported operator %T", p)
 	}

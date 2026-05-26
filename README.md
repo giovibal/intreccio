@@ -156,7 +156,7 @@ Development proceeds in phases (details in `PLAN.md`):
 - [x] Phase 6 — Executor (read path): first end-to-end query
 - [x] Phase 7 — Write path (Cypher)
 - [x] Phase 8 — Advanced projection and traversal
-- [ ] Phase 9 — Indexes managed via Cypher + CLI/REPL
+- [x] Phase 9 — Indexes managed via Cypher + CLI/REPL
 - [ ] Phase 10 — Hardening (fuzzing, TCK subset, benchmarks, crash recovery)
 
 ## Documentation

@@ -130,6 +130,13 @@ type Delete struct {
 	Detach bool
 }
 
+// CreateIndex: registers a secondary `p` index on (:Label).prop and backfills
+// the entries for any existing nodes that already have the property.
+type CreateIndex struct {
+	Label    string
+	Property string
+}
+
 func (*AllNodesScan) op()     {}
 func (*NodeByLabelScan) op()  {}
 func (*NodeByProperty) op()   {}
@@ -145,3 +152,4 @@ func (*Create) op()           {}
 func (*Merge) op()            {}
 func (*SetItems) op()         {}
 func (*Delete) op()           {}
+func (*CreateIndex) op()      {}
