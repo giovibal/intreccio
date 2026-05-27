@@ -2,6 +2,7 @@ package exec
 
 import (
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/giovibal/mycypher/internal/catalog"
@@ -1016,6 +1017,55 @@ func TestSetPropertyToNullRemovesIt(t *testing.T) {
 		if k == "age" {
 			t.Errorf("age should be absent after SET n.age = null, got keys %v", ks)
 		}
+	}
+}
+
+func TestConcurrentMergeIsIdempotent(t *testing.T) {
+	s := newStore(t)
+	const goroutines = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	errs := make(chan error, goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					errs <- nil
+				}
+			}()
+			q, err := parser.Parse("MERGE (n:Person {email: 'x@x.com'}) RETURN n.email")
+			if err != nil {
+				errs <- err
+				return
+			}
+			res, err := sema.Analyze(q)
+			if err != nil {
+				errs <- err
+				return
+			}
+			err = s.Update(func(txn storage.Txn) error {
+				p, err := plan.Plan(q, testCatalog{txn: txn})
+				if err != nil {
+					return err
+				}
+				_, err = Run(p, res.Columns, &Context{Txn: txn})
+				return err
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent MERGE: %v", err)
+		}
+	}
+
+	rows := runQuery(t, s, "MATCH (n:Person {email: 'x@x.com'}) RETURN n.email AS e", nil)
+	if len(rows) != 1 {
+		t.Errorf("expected exactly one Person, got %d (%v)", len(rows), rows)
 	}
 }
 
