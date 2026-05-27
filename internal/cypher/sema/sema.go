@@ -290,6 +290,40 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 		return a.checkExpr(sc, ex.Right, inAgg)
 	case *ast.LabelsPredicate:
 		return a.checkExpr(sc, ex.Expr, inAgg)
+	case *ast.ListLiteral:
+		for _, el := range ex.Elements {
+			if err := a.checkExpr(sc, el, inAgg); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.MapLiteral:
+		for _, v := range ex.Entries {
+			if err := a.checkExpr(sc, v, inAgg); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.Case:
+		if ex.Operand != nil {
+			if err := a.checkExpr(sc, ex.Operand, inAgg); err != nil {
+				return err
+			}
+		}
+		for _, w := range ex.Whens {
+			if err := a.checkExpr(sc, w.Cond, inAgg); err != nil {
+				return err
+			}
+			if err := a.checkExpr(sc, w.Result, inAgg); err != nil {
+				return err
+			}
+		}
+		if ex.Else != nil {
+			if err := a.checkExpr(sc, ex.Else, inAgg); err != nil {
+				return err
+			}
+		}
+		return nil
 	case *ast.FunctionCall:
 		agg := isAggregate(ex.Name)
 		if agg && inAgg {

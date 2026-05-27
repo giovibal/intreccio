@@ -146,6 +146,66 @@ func TestParseValidCorpus(t *testing.T) {
 			}},
 		},
 		{
+			"is-null",
+			"MATCH (n) WHERE n.email IS NULL RETURN n",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{
+					Parts: []ast.PatternPart{part(node("n", nil, nil))},
+					Where: un("IS NULL", pa(vr("n"), "email")),
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("n")}}},
+			}},
+		},
+		{
+			"is-not-null",
+			"MATCH (n) WHERE n.email IS NOT NULL RETURN n",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{
+					Parts: []ast.PatternPart{part(node("n", nil, nil))},
+					Where: un("IS NOT NULL", pa(vr("n"), "email")),
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("n")}}},
+			}},
+		},
+		{
+			"starts-with",
+			"MATCH (n) WHERE n.name STARTS WITH 'A' RETURN n",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{
+					Parts: []ast.PatternPart{part(node("n", nil, nil))},
+					Where: bin("STARTS WITH", pa(vr("n"), "name"), lit("A")),
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("n")}}},
+			}},
+		},
+		{
+			"in-list-literal",
+			"MATCH (n) WHERE n.country IN ['IT', 'DE'] RETURN n",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{
+					Parts: []ast.PatternPart{part(node("n", nil, nil))},
+					Where: bin("IN", pa(vr("n"), "country"), &ast.ListLiteral{Elements: []ast.Expr{lit("IT"), lit("DE")}}),
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("n")}}},
+			}},
+		},
+		{
+			"case-searched",
+			"RETURN CASE WHEN 1 = 1 THEN 'yes' ELSE 'no' END AS r",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Return{Items: []ast.ReturnItem{{
+					Expr: &ast.Case{
+						Whens: []ast.CaseAlternative{{
+							Cond:   bin("=", lit(int64(1)), lit(int64(1))),
+							Result: lit("yes"),
+						}},
+						Else: lit("no"),
+					},
+					Alias: "r",
+				}}},
+			}},
+		},
+		{
 			"with-chaining-and-order",
 			"MATCH (p)-[:KNOWS]->(f) WITH p, count(f) AS friends WHERE friends > 5 RETURN p.name AS name ORDER BY name DESC SKIP 2 LIMIT 10",
 			&ast.Query{Clauses: []ast.Clause{

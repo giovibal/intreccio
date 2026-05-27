@@ -47,11 +47,65 @@ func eval(e ast.Expr, b binding, ctx *Context) (any, error) {
 		return evalBinary(ex, b, ctx)
 	case *ast.LabelsPredicate:
 		return evalLabels(ex, b, ctx)
+	case *ast.ListLiteral:
+		out := make([]any, len(ex.Elements))
+		for i, el := range ex.Elements {
+			v, err := eval(el, b, ctx)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = v
+		}
+		return out, nil
+	case *ast.MapLiteral:
+		out := make(map[string]any, len(ex.Entries))
+		for k, v := range ex.Entries {
+			val, err := eval(v, b, ctx)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = val
+		}
+		return out, nil
+	case *ast.Case:
+		return evalCase(ex, b, ctx)
 	case *ast.FunctionCall:
-		return nil, fmt.Errorf("exec: function %s not supported yet", ex.Name)
+		return evalFunctionCall(ex, b, ctx)
 	default:
 		return nil, fmt.Errorf("exec: unsupported expression %T", e)
 	}
+}
+
+func evalCase(ex *ast.Case, b binding, ctx *Context) (any, error) {
+	if ex.Operand != nil {
+		operand, err := eval(ex.Operand, b, ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, w := range ex.Whens {
+			candidate, err := eval(w.Cond, b, ctx)
+			if err != nil {
+				return nil, err
+			}
+			if equals(operand, candidate) {
+				return eval(w.Result, b, ctx)
+			}
+		}
+	} else {
+		for _, w := range ex.Whens {
+			cond, err := eval(w.Cond, b, ctx)
+			if err != nil {
+				return nil, err
+			}
+			if truthy(cond) {
+				return eval(w.Result, b, ctx)
+			}
+		}
+	}
+	if ex.Else != nil {
+		return eval(ex.Else, b, ctx)
+	}
+	return nil, nil
 }
 
 func evalProperty(ex *ast.PropertyAccess, b binding, ctx *Context) (any, error) {
@@ -136,6 +190,10 @@ func evalUnary(ex *ast.Unary, b binding, ctx *Context) (any, error) {
 		default:
 			return nil, fmt.Errorf("exec: unary minus requires a number, got %T", v)
 		}
+	case "IS NULL":
+		return v == nil, nil
+	case "IS NOT NULL":
+		return v != nil, nil
 	default:
 		return nil, fmt.Errorf("exec: unknown unary operator %q", ex.Op)
 	}
@@ -167,9 +225,48 @@ func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 		return compareOp(ex.Op, l, r), nil
 	case "+", "-", "*", "/", "%":
 		return arithmetic(ex.Op, l, r)
+	case "STARTS WITH":
+		return stringPredicate(l, r, strings.HasPrefix)
+	case "ENDS WITH":
+		return stringPredicate(l, r, strings.HasSuffix)
+	case "CONTAINS":
+		return stringPredicate(l, r, strings.Contains)
+	case "IN":
+		return inList(l, r)
 	default:
 		return nil, fmt.Errorf("exec: unknown binary operator %q", ex.Op)
 	}
+}
+
+func stringPredicate(l, r any, fn func(string, string) bool) (any, error) {
+	if l == nil || r == nil {
+		return nil, nil
+	}
+	ls, ok := l.(string)
+	if !ok {
+		return nil, fmt.Errorf("exec: string predicate left operand must be a string, got %T", l)
+	}
+	rs, ok := r.(string)
+	if !ok {
+		return nil, fmt.Errorf("exec: string predicate right operand must be a string, got %T", r)
+	}
+	return fn(ls, rs), nil
+}
+
+func inList(needle, haystack any) (any, error) {
+	if haystack == nil {
+		return nil, nil
+	}
+	list, ok := haystack.([]any)
+	if !ok {
+		return nil, fmt.Errorf("exec: IN requires a list, got %T", haystack)
+	}
+	for _, item := range list {
+		if equals(needle, item) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (any, error) {

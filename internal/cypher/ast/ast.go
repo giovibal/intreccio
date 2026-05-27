@@ -216,6 +216,34 @@ type LabelsPredicate struct {
 	Pos    Pos
 }
 
+// ListLiteral is a [expr, expr, ...] expression.
+type ListLiteral struct {
+	Elements []Expr
+	Pos      Pos
+}
+
+// MapLiteral is a {key: expr, ...} expression.
+type MapLiteral struct {
+	Entries map[string]Expr
+	Pos     Pos
+}
+
+// Case is the CASE expression. When Operand is non-nil the form is "simple"
+// (CASE x WHEN v THEN r ...); when nil the form is "searched"
+// (CASE WHEN cond THEN r ...). Else is optional.
+type Case struct {
+	Operand Expr
+	Whens   []CaseAlternative
+	Else    Expr
+	Pos     Pos
+}
+
+// CaseAlternative is one WHEN ... THEN ... branch of a CASE expression.
+type CaseAlternative struct {
+	Cond   Expr
+	Result Expr
+}
+
 func (*Literal) expr()         {}
 func (*Param) expr()           {}
 func (*Variable) expr()        {}
@@ -224,3 +252,6 @@ func (*Unary) expr()           {}
 func (*Binary) expr()          {}
 func (*FunctionCall) expr()    {}
 func (*LabelsPredicate) expr() {}
+func (*ListLiteral) expr()     {}
+func (*MapLiteral) expr()      {}
+func (*Case) expr()            {}

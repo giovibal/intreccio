@@ -59,6 +59,13 @@ func (p *parser) atKw(kw string) bool {
 	return t.typ == tIdent && strings.EqualFold(t.text, kw)
 }
 
+// peekKw reports whether the token at distance n is a (case-insensitive) match
+// for the given keyword.
+func (p *parser) peekKw(n int, kw string) bool {
+	t := p.peek(n)
+	return t.typ == tIdent && strings.EqualFold(t.text, kw)
+}
+
 func (p *parser) errf(pos ast.Pos, format string, args ...any) *ParseError {
 	return &ParseError{Pos: pos, Msg: fmt.Sprintf(format, args...)}
 }
@@ -681,6 +688,7 @@ func (p *parser) infixBP() (int, string) {
 }
 
 const (
+	bpCompare    = 4 // comparison level (=, <>, <, <=, >, >=, IS NULL, STARTS WITH, ...)
 	bpNot        = 3 // NOT (prefix): looser than comparisons, tighter than AND
 	bpUnaryMinus = 7 // - (prefix): tighter than all infix operators
 )
@@ -691,6 +699,41 @@ func (p *parser) parseExpr(minBP int) (ast.Expr, error) {
 		return nil, err
 	}
 	for {
+		// Multi-keyword postfix/infix operators at comparison level (bp 4).
+		if minBP <= bpCompare {
+			// IS NULL / IS NOT NULL (postfix)
+			if p.atKw("IS") && (p.peekKw(1, "NULL") || (p.peekKw(1, "NOT") && p.peekKw(2, "NULL"))) {
+				pos := p.advance().pos
+				isNot := false
+				if p.atKw("NOT") {
+					isNot = true
+					p.advance()
+				}
+				if err := p.expectKw("NULL"); err != nil {
+					return nil, err
+				}
+				op := "IS NULL"
+				if isNot {
+					op = "IS NOT NULL"
+				}
+				left = &ast.Unary{Op: op, Expr: left, Pos: pos}
+				continue
+			}
+			// Binary string predicates and IN.
+			if op, consume := p.matchKeywordInfix(); op != "" {
+				pos := p.cur().pos
+				for i := 0; i < consume; i++ {
+					p.advance()
+				}
+				right, err := p.parseExpr(bpCompare + 1)
+				if err != nil {
+					return nil, err
+				}
+				left = &ast.Binary{Op: op, Left: left, Right: right, Pos: pos}
+				continue
+			}
+		}
+		// Standard single-token infix.
 		bp, op := p.infixBP()
 		if bp == 0 || bp < minBP {
 			break
@@ -703,6 +746,22 @@ func (p *parser) parseExpr(minBP int) (ast.Expr, error) {
 		left = &ast.Binary{Op: op, Left: left, Right: right, Pos: opTok.pos}
 	}
 	return left, nil
+}
+
+// matchKeywordInfix recognises STARTS WITH / ENDS WITH / CONTAINS / IN and
+// returns the operator name plus the number of tokens to advance.
+func (p *parser) matchKeywordInfix() (string, int) {
+	switch {
+	case p.atKw("STARTS") && p.peekKw(1, "WITH"):
+		return "STARTS WITH", 2
+	case p.atKw("ENDS") && p.peekKw(1, "WITH"):
+		return "ENDS WITH", 2
+	case p.atKw("CONTAINS"):
+		return "CONTAINS", 1
+	case p.atKw("IN"):
+		return "IN", 1
+	}
+	return "", 0
 }
 
 func (p *parser) parsePrefix() (ast.Expr, error) {
@@ -782,6 +841,10 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 			return nil, err
 		}
 		return e, nil
+	case tLBracket:
+		return p.parseListLiteral()
+	case tLBrace:
+		return p.parseMapLiteralExpr()
 	case tIdent:
 		switch {
 		case strings.EqualFold(t.text, "true"):
@@ -793,6 +856,8 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 		case strings.EqualFold(t.text, "null"):
 			p.advance()
 			return &ast.Literal{Value: nil, Pos: t.pos}, nil
+		case strings.EqualFold(t.text, "case"):
+			return p.parseCase()
 		}
 		if p.peek(1).typ == tLParen {
 			return p.parseFunctionCall()
@@ -816,6 +881,81 @@ func (p *parser) paramName() (string, error) {
 	default:
 		return "", p.errf(t.pos, "expected parameter name after $")
 	}
+}
+
+func (p *parser) parseListLiteral() (ast.Expr, error) {
+	pos := p.advance().pos // [
+	list := &ast.ListLiteral{Pos: pos}
+	if !p.at(tRBracket) {
+		for {
+			e, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			list.Elements = append(list.Elements, e)
+			if !p.at(tComma) {
+				break
+			}
+			p.advance()
+		}
+	}
+	if _, err := p.expect(tRBracket); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+func (p *parser) parseMapLiteralExpr() (ast.Expr, error) {
+	pos := p.cur().pos
+	m, err := p.parsePropertyMap()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.MapLiteral{Entries: m, Pos: pos}, nil
+}
+
+// parseCase parses both the simple form (CASE x WHEN v THEN ...) and the
+// searched form (CASE WHEN cond THEN ...).
+func (p *parser) parseCase() (ast.Expr, error) {
+	pos := p.advance().pos // CASE
+	c := &ast.Case{Pos: pos}
+	if !p.atKw("WHEN") {
+		operand, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		c.Operand = operand
+	}
+	for p.atKw("WHEN") {
+		p.advance() // WHEN
+		cond, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectKw("THEN"); err != nil {
+			return nil, err
+		}
+		result, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		c.Whens = append(c.Whens, ast.CaseAlternative{Cond: cond, Result: result})
+	}
+	if len(c.Whens) == 0 {
+		return nil, p.errf(pos, "CASE expression requires at least one WHEN clause")
+	}
+	if p.atKw("ELSE") {
+		p.advance()
+		elseExpr, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		c.Else = elseExpr
+	}
+	if err := p.expectKw("END"); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func (p *parser) parseFunctionCall() (ast.Expr, error) {

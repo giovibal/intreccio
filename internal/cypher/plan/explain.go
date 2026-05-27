@@ -248,6 +248,42 @@ func exprString(e ast.Expr) string {
 		return exprString(ex.Left) + " " + ex.Op + " " + exprString(ex.Right)
 	case *ast.LabelsPredicate:
 		return exprString(ex.Expr) + ":" + strings.Join(ex.Labels, ":")
+	case *ast.ListLiteral:
+		parts := make([]string, len(ex.Elements))
+		for i, el := range ex.Elements {
+			parts[i] = exprString(el)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case *ast.MapLiteral:
+		keys := make([]string, 0, len(ex.Entries))
+		for k := range ex.Entries {
+			keys = append(keys, k)
+		}
+		sortStrings(keys)
+		parts := make([]string, len(keys))
+		for i, k := range keys {
+			parts[i] = k + ": " + exprString(ex.Entries[k])
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
+	case *ast.Case:
+		var sb strings.Builder
+		sb.WriteString("CASE")
+		if ex.Operand != nil {
+			sb.WriteByte(' ')
+			sb.WriteString(exprString(ex.Operand))
+		}
+		for _, w := range ex.Whens {
+			sb.WriteString(" WHEN ")
+			sb.WriteString(exprString(w.Cond))
+			sb.WriteString(" THEN ")
+			sb.WriteString(exprString(w.Result))
+		}
+		if ex.Else != nil {
+			sb.WriteString(" ELSE ")
+			sb.WriteString(exprString(ex.Else))
+		}
+		sb.WriteString(" END")
+		return sb.String()
 	case *ast.FunctionCall:
 		var sb strings.Builder
 		sb.WriteString(ex.Name)

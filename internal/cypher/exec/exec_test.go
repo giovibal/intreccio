@@ -386,6 +386,203 @@ func TestVarLengthTrailSemantics(t *testing.T) {
 	}
 }
 
+func TestStringPredicates(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, name := range []string{"alice", "amber", "bob", "barbara"} {
+			if _, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": name}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name  string
+		where string
+		want  []string
+	}{
+		{"starts-with", "p.name STARTS WITH 'a'", []string{"alice", "amber"}},
+		{"ends-with", "p.name ENDS WITH 'a'", []string{"barbara"}},
+		{"contains", "p.name CONTAINS 'ar'", []string{"barbara"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := runQuery(t, s,
+				"MATCH (p:Person) WHERE "+tc.where+" RETURN p.name AS n ORDER BY n", nil)
+			got := make([]string, len(rows))
+			for i, r := range rows {
+				got[i] = r[0].(string)
+			}
+			if !equalStrings(got, tc.want) {
+				t.Errorf("%s: got %v, want %v", tc.where, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsNullAndNot(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		if _, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "A", "email": "a@x.com"}); err != nil {
+			return err
+		}
+		if _, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "B"}); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (p:Person) WHERE p.email IS NULL RETURN p.name AS n", nil)
+	if len(rows) != 1 || rows[0][0] != "B" {
+		t.Errorf("IS NULL: got %v, want [[B]]", rows)
+	}
+	rows = runQuery(t, s,
+		"MATCH (p:Person) WHERE p.email IS NOT NULL RETURN p.name AS n", nil)
+	if len(rows) != 1 || rows[0][0] != "A" {
+		t.Errorf("IS NOT NULL: got %v, want [[A]]", rows)
+	}
+}
+
+func TestInListLiteral(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, c := range []string{"IT", "DE", "FR", "JP"} {
+			if _, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"c": c}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (p:P) WHERE p.c IN ['IT', 'FR'] RETURN p.c AS c ORDER BY c", nil)
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r[0].(string)
+	}
+	if want := []string{"FR", "IT"}; !equalStrings(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestCaseExpressions(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, age := range []int64{12, 30, 70} {
+			if _, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"age": age}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Searched form
+	rows := runQuery(t, s,
+		"MATCH (p:P) RETURN CASE WHEN p.age < 18 THEN 'minor' WHEN p.age < 65 THEN 'adult' ELSE 'senior' END AS band ORDER BY p.age", nil)
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r[0].(string)
+	}
+	if want := []string{"minor", "adult", "senior"}; !equalStrings(got, want) {
+		t.Errorf("searched: got %v, want %v", got, want)
+	}
+
+	// Simple form
+	rows = runQuery(t, s,
+		"MATCH (p:P) WHERE p.age = 30 RETURN CASE p.age WHEN 30 THEN 'match' ELSE 'no' END AS r", nil)
+	if len(rows) != 1 || rows[0][0] != "match" {
+		t.Errorf("simple: got %v", rows)
+	}
+}
+
+func TestScalarFunctions(t *testing.T) {
+	s := newStore(t)
+	var aliceID, knowsID uint64
+	if err := s.Update(func(tx storage.Txn) error {
+		var err error
+		aliceID, err = graph.CreateNode(tx, []string{"Person", "Admin"}, map[string]any{"name": "Alice"})
+		if err != nil {
+			return err
+		}
+		bob, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "Bob"})
+		if err != nil {
+			return err
+		}
+		knowsID, err = graph.CreateEdge(tx, "KNOWS", aliceID, bob, map[string]any{"since": int64(2020)})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// id() on node and edge.
+	rows := runQuery(t, s, "MATCH (p:Person {name: 'Alice'}) RETURN id(p) AS i", nil)
+	if len(rows) != 1 || rows[0][0] != int64(aliceID) {
+		t.Errorf("id(node): got %v", rows)
+	}
+	rows = runQuery(t, s, "MATCH (a)-[r:KNOWS]->(b) RETURN id(r) AS i", nil)
+	if len(rows) != 1 || rows[0][0] != int64(knowsID) {
+		t.Errorf("id(rel): got %v", rows)
+	}
+
+	// labels() returns both labels in some order — check membership.
+	rows = runQuery(t, s, "MATCH (p:Person {name: 'Alice'}) RETURN labels(p) AS ls", nil)
+	if len(rows) != 1 {
+		t.Fatalf("labels: %v", rows)
+	}
+	ls := rows[0][0].([]any)
+	got := map[string]bool{}
+	for _, v := range ls {
+		got[v.(string)] = true
+	}
+	if !got["Person"] || !got["Admin"] {
+		t.Errorf("labels = %v, want Person and Admin", ls)
+	}
+
+	// type() returns the rel type.
+	rows = runQuery(t, s, "MATCH (a)-[r:KNOWS]->(b) RETURN type(r) AS t", nil)
+	if len(rows) != 1 || rows[0][0] != "KNOWS" {
+		t.Errorf("type(): %v", rows)
+	}
+
+	// String functions
+	rows = runQuery(t, s, "RETURN toUpper('hello') AS u, toLower('WORLD') AS l, trim('  x  ') AS t, substring('abcdef', 1, 3) AS s, size('αβγ') AS n", nil)
+	if len(rows) != 1 {
+		t.Fatalf("string fns: %v", rows)
+	}
+	row := rows[0]
+	if row[0] != "HELLO" || row[1] != "world" || row[2] != "x" || row[3] != "bcd" || row[4] != int64(3) {
+		t.Errorf("string fns row = %v", row)
+	}
+
+	// Conversions
+	rows = runQuery(t, s, "RETURN toInteger('42') AS i, toFloat('3.5') AS f, toString(7) AS s", nil)
+	row = rows[0]
+	if row[0] != int64(42) || row[1] != 3.5 || row[2] != "7" {
+		t.Errorf("conversions: %v", row)
+	}
+
+	// List helpers
+	rows = runQuery(t, s, "RETURN size([1,2,3]) AS n, head([10,20,30]) AS h, last([10,20,30]) AS l, tail([10,20,30]) AS t", nil)
+	row = rows[0]
+	if row[0] != int64(3) || row[1] != int64(10) || row[2] != int64(30) {
+		t.Errorf("list size/head/last: %v", row)
+	}
+	tail := row[3].([]any)
+	if len(tail) != 2 || tail[0] != int64(20) || tail[1] != int64(30) {
+		t.Errorf("list tail: %v", tail)
+	}
+}
+
 func TestLimit(t *testing.T) {
 	s := newStore(t)
 	seedSocial(t, s)

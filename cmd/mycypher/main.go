@@ -59,7 +59,8 @@ func repl(db *mycypher.DB, in io.Reader, out, errOut io.Writer) {
 		tty = isTerminal(f)
 	}
 	if tty {
-		_, _ = fmt.Fprintln(out, "mycypher REPL — end statements with ';', type :quit to exit, :help for help")
+		// _, _ = fmt.Fprintln(out, "mycypher REPL — end statements with ';', type :quit to exit, :help for help")
+		printHelp(out)
 	}
 
 	reader := bufio.NewReader(in)
