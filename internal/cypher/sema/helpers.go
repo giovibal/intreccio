@@ -25,6 +25,10 @@ func clausePos(c ast.Clause) ast.Pos {
 		return cl.Pos
 	case *ast.CreateIndex:
 		return cl.Pos
+	case *ast.Remove:
+		return cl.Pos
+	case *ast.Unwind:
+		return cl.Pos
 	default:
 		return ast.Pos{}
 	}

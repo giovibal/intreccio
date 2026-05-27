@@ -110,16 +110,47 @@ type Create struct {
 	Parts []ast.PatternPart
 }
 
-// Merge: match-or-create for a single pattern, per input row.
+// Merge: match-or-create for a single pattern, per input row. The optional
+// OnCreate/OnMatch SET items are applied to the resulting bindings after the
+// match-or-create decision.
 type Merge struct {
-	Input Op
-	Part  ast.PatternPart
+	Input    Op
+	Part     ast.PatternPart
+	OnCreate []ast.SetClause
+	OnMatch  []ast.SetClause
 }
 
-// SetItems: applies property assignments for each input row.
+// SetItems: applies property assignments, label additions or whole-map updates
+// for each input row.
 type SetItems struct {
 	Input Op
-	Items []ast.SetItem
+	Items []ast.SetClause
+}
+
+// Remove: removes properties or labels for each input row.
+type Remove struct {
+	Input Op
+	Items []ast.RemoveClause
+}
+
+// Unwind: expands a list expression into rows by binding each element to Alias.
+type Unwind struct {
+	Input Op
+	Expr  ast.Expr
+	Alias string
+}
+
+// Argument is a placeholder leaf used inside OuterApply's inner subplan: at exec
+// time it is replaced by an operator that emits the current outer row once.
+type Argument struct{}
+
+// OuterApply implements the left-outer join used by OPTIONAL MATCH: for each
+// row produced by Outer it runs Inner; if Inner emits at least one row, those
+// are propagated, otherwise one row is emitted with NewVars bound to null.
+type OuterApply struct {
+	Outer   Op
+	Inner   Op
+	NewVars []string
 }
 
 // Delete: removes the values produced by the given expressions; if Detach is
@@ -153,3 +184,7 @@ func (*Merge) op()            {}
 func (*SetItems) op()         {}
 func (*Delete) op()           {}
 func (*CreateIndex) op()      {}
+func (*Remove) op()           {}
+func (*Unwind) op()           {}
+func (*Argument) op()         {}
+func (*OuterApply) op()       {}

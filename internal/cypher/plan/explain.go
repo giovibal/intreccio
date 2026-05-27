@@ -57,11 +57,15 @@ func describe(o Op) (string, []Op) {
 	case *Merge:
 		return fmt.Sprintf("Merge(%s)", patternsString([]ast.PatternPart{x.Part})), []Op{x.Input}
 	case *SetItems:
-		parts := make([]string, len(x.Items))
-		for i, it := range x.Items {
-			parts[i] = exprString(it.Target) + " = " + exprString(it.Value)
-		}
-		return fmt.Sprintf("Set(%s)", strings.Join(parts, ", ")), []Op{x.Input}
+		return fmt.Sprintf("Set(%s)", setClausesString(x.Items)), []Op{x.Input}
+	case *Remove:
+		return fmt.Sprintf("Remove(%s)", removeClausesString(x.Items)), []Op{x.Input}
+	case *Unwind:
+		return fmt.Sprintf("Unwind(%s AS %s)", exprString(x.Expr), x.Alias), []Op{x.Input}
+	case *Argument:
+		return "Argument", nil
+	case *OuterApply:
+		return fmt.Sprintf("OuterApply(new=[%s])", strings.Join(x.NewVars, ", ")), []Op{x.Outer, x.Inner}
 	case *Delete:
 		parts := make([]string, len(x.Exprs))
 		for i, e := range x.Exprs {
@@ -77,6 +81,54 @@ func describe(o Op) (string, []Op) {
 	default:
 		return "?", nil
 	}
+}
+
+func setClausesString(items []ast.SetClause) string {
+	parts := make([]string, len(items))
+	for i, it := range items {
+		switch v := it.(type) {
+		case *ast.SetProperty:
+			parts[i] = exprString(v.Target) + " = " + exprString(v.Value)
+		case *ast.SetLabels:
+			var b strings.Builder
+			b.WriteString(v.Variable)
+			for _, l := range v.Labels {
+				b.WriteByte(':')
+				b.WriteString(l)
+			}
+			parts[i] = b.String()
+		case *ast.SetMap:
+			op := "="
+			if !v.Replace {
+				op = "+="
+			}
+			parts[i] = v.Variable + " " + op + " " + exprString(v.Value)
+		default:
+			parts[i] = "?"
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func removeClausesString(items []ast.RemoveClause) string {
+	parts := make([]string, len(items))
+	for i, it := range items {
+		switch v := it.(type) {
+		case *ast.RemoveProperty:
+			parts[i] = exprString(v.Target)
+		case *ast.RemoveLabels:
+			var b strings.Builder
+			b.WriteString(v.Variable)
+			for _, l := range v.Labels {
+				b.WriteByte(':')
+				b.WriteString(l)
+			}
+			parts[i] = b.String()
+		default:
+			parts[i] = "?"
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // patternsString renders a list of pattern parts compactly for EXPLAIN.

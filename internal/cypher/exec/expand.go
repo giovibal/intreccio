@@ -9,11 +9,11 @@ import (
 	"github.com/giovibal/mycypher/internal/graph"
 )
 
-func buildExpand(x *plan.Expand, ctx *Context) (op, error) {
+func buildExpandWith(x *plan.Expand, ctx *Context, arg *argumentOp) (op, error) {
 	if x.VarLength {
-		return buildVarExpand(x, ctx)
+		return buildVarExpandWith(x, ctx, arg)
 	}
-	in, err := build(x.Input, ctx)
+	in, err := buildWith(x.Input, ctx, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +182,8 @@ type varHit struct {
 	edges []uint64
 }
 
-func buildVarExpand(x *plan.Expand, ctx *Context) (op, error) {
-	in, err := build(x.Input, ctx)
+func buildVarExpandWith(x *plan.Expand, ctx *Context, arg *argumentOp) (op, error) {
+	in, err := buildWith(x.Input, ctx, arg)
 	if err != nil {
 		return nil, err
 	}

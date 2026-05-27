@@ -55,15 +55,31 @@ type Create struct {
 	Pos   Pos
 }
 
-// Merge is MERGE of a single pattern.
+// Merge is MERGE of a single pattern with optional ON CREATE / ON MATCH SET
+// blocks applied to the matched-or-created bindings.
 type Merge struct {
-	Part PatternPart
-	Pos  Pos
+	Part     PatternPart
+	OnCreate []SetClause
+	OnMatch  []SetClause
+	Pos      Pos
 }
 
-// Set is SET of one or more properties.
+// Set is SET of one or more items (property assignment, label set, or map set).
 type Set struct {
-	Items []SetItem
+	Items []SetClause
+	Pos   Pos
+}
+
+// Remove removes properties or labels.
+type Remove struct {
+	Items []RemoveClause
+	Pos   Pos
+}
+
+// Unwind expands a list expression into individual rows bound to Alias.
+type Unwind struct {
+	Expr  Expr
+	Alias string
 	Pos   Pos
 }
 
@@ -88,6 +104,8 @@ func (*Return) clause()      {}
 func (*Create) clause()      {}
 func (*Merge) clause()       {}
 func (*Set) clause()         {}
+func (*Remove) clause()      {}
+func (*Unwind) clause()      {}
 func (*Delete) clause()      {}
 func (*CreateIndex) clause() {}
 
@@ -103,11 +121,54 @@ type SortItem struct {
 	Desc bool
 }
 
-// SetItem is a SET assignment: Target = Value (with Target a property access).
-type SetItem struct {
+// SetClause is one assignment inside a SET clause: property update, label
+// addition, or whole-property replacement/merge via a map expression.
+type SetClause interface{ setClause() }
+
+// SetProperty is `SET target = value`, where target is `var.prop`.
+type SetProperty struct {
 	Target *PropertyAccess
 	Value  Expr
 }
+
+// SetLabels is `SET var:Label1:Label2` — adds labels to a node.
+type SetLabels struct {
+	Variable string
+	Labels   []string
+	Pos      Pos
+}
+
+// SetMap is `SET var = expr` (Replace=true) or `SET var += expr` (Replace=false)
+// where expr evaluates to a map of property values.
+type SetMap struct {
+	Variable string
+	Value    Expr
+	Replace  bool
+	Pos      Pos
+}
+
+func (*SetProperty) setClause() {}
+func (*SetLabels) setClause()   {}
+func (*SetMap) setClause()      {}
+
+// RemoveClause is one item inside a REMOVE clause: a property removal or a
+// label removal.
+type RemoveClause interface{ removeClause() }
+
+// RemoveProperty is `REMOVE target` where target is `var.prop`.
+type RemoveProperty struct {
+	Target *PropertyAccess
+}
+
+// RemoveLabels is `REMOVE var:Label1:Label2`.
+type RemoveLabels struct {
+	Variable string
+	Labels   []string
+	Pos      Pos
+}
+
+func (*RemoveProperty) removeClause() {}
+func (*RemoveLabels) removeClause()   {}
 
 // --- Pattern ---
 

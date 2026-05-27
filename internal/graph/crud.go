@@ -175,6 +175,254 @@ func DeleteEdge(txn storage.Txn, id uint64) error {
 	return txn.Delete(codec.EdgeKey(id))
 }
 
+// RemoveProperty removes a property from a node, updating record and `p`
+// index entries for any indexed (label, propKey) pair in the same transaction.
+// Removing a non-existent property is a no-op.
+func RemoveProperty(txn storage.Txn, nodeID uint64, key string) error {
+	node, err := GetNode(txn, nodeID)
+	if err != nil {
+		return err
+	}
+	keyID, found, err := catalog.LookupKey(txn, key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil // unknown key globally → no entries anywhere
+	}
+	old, had := node.Props[keyID]
+	if !had {
+		return nil
+	}
+	delete(node.Props, keyID)
+	for _, l := range node.Labels {
+		has, err := catalog.HasIndex(txn, l, keyID)
+		if err != nil {
+			return err
+		}
+		if !has || !isIndexable(old) {
+			continue
+		}
+		pk, err := codec.PropKey(l, keyID, old, nodeID)
+		if err != nil {
+			return err
+		}
+		if err := txn.Delete(pk); err != nil {
+			return err
+		}
+	}
+	return putNodeRecord(txn, nodeID, node.NodeRecord)
+}
+
+// AddLabels adds labels to a node, updating the record, the `l` index entries
+// and any `p` index entries induced by the new (label, propKey) combinations.
+// Duplicate labels are ignored.
+func AddLabels(txn storage.Txn, nodeID uint64, labels []string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	node, err := GetNode(txn, nodeID)
+	if err != nil {
+		return err
+	}
+	existing := make(map[uint32]bool, len(node.Labels))
+	for _, l := range node.Labels {
+		existing[l] = true
+	}
+	var added []uint32
+	for _, name := range labels {
+		id, err := catalog.InternLabel(txn, name)
+		if err != nil {
+			return err
+		}
+		if existing[id] {
+			continue
+		}
+		existing[id] = true
+		added = append(added, id)
+		node.Labels = append(node.Labels, id)
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	for _, id := range added {
+		if err := txn.Set(codec.LabelKey(id, nodeID), nil); err != nil {
+			return err
+		}
+		for k, v := range node.Props {
+			if !isIndexable(v) {
+				continue
+			}
+			has, err := catalog.HasIndex(txn, id, k)
+			if err != nil {
+				return err
+			}
+			if !has {
+				continue
+			}
+			pk, err := codec.PropKey(id, k, v, nodeID)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(pk, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return putNodeRecord(txn, nodeID, node.NodeRecord)
+}
+
+// RemoveLabels removes labels from a node, deleting the corresponding `l` and
+// `p` index entries. Labels that are not present are ignored.
+func RemoveLabels(txn storage.Txn, nodeID uint64, labels []string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	node, err := GetNode(txn, nodeID)
+	if err != nil {
+		return err
+	}
+	toRemove := make(map[uint32]bool)
+	for _, name := range labels {
+		id, found, err := catalog.LookupLabel(txn, name)
+		if err != nil {
+			return err
+		}
+		if found {
+			toRemove[id] = true
+		}
+	}
+	if len(toRemove) == 0 {
+		return nil
+	}
+	var kept []uint32
+	for _, id := range node.Labels {
+		if toRemove[id] {
+			if err := txn.Delete(codec.LabelKey(id, nodeID)); err != nil {
+				return err
+			}
+			for k, v := range node.Props {
+				if !isIndexable(v) {
+					continue
+				}
+				has, err := catalog.HasIndex(txn, id, k)
+				if err != nil {
+					return err
+				}
+				if !has {
+					continue
+				}
+				pk, err := codec.PropKey(id, k, v, nodeID)
+				if err != nil {
+					return err
+				}
+				if err := txn.Delete(pk); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		kept = append(kept, id)
+	}
+	node.Labels = kept
+	return putNodeRecord(txn, nodeID, node.NodeRecord)
+}
+
+// SetNodeProperties applies a map of new properties to a node. When replace is
+// true the resulting node has *exactly* the provided properties (others are
+// deleted); when false the new properties are merged onto the existing ones.
+// Index entries are kept in sync inside the same transaction.
+func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, replace bool) error {
+	node, err := GetNode(txn, nodeID)
+	if err != nil {
+		return err
+	}
+	desired := make(map[uint32]any, len(props))
+	for k, v := range props {
+		keyID, err := catalog.InternKey(txn, k)
+		if err != nil {
+			return err
+		}
+		desired[keyID] = normalize(v)
+	}
+
+	if replace {
+		// Delete `p` entries for properties that will be removed or changed.
+		for keyID, old := range node.Props {
+			newVal, kept := desired[keyID]
+			if kept && scalarEqual(newVal, old) {
+				continue
+			}
+			for _, l := range node.Labels {
+				has, err := catalog.HasIndex(txn, l, keyID)
+				if err != nil {
+					return err
+				}
+				if !has || !isIndexable(old) {
+					continue
+				}
+				pk, err := codec.PropKey(l, keyID, old, nodeID)
+				if err != nil {
+					return err
+				}
+				if err := txn.Delete(pk); err != nil {
+					return err
+				}
+			}
+		}
+		node.Props = make(map[uint32]any, len(desired))
+		for k, v := range desired {
+			node.Props[k] = v
+		}
+	} else {
+		for keyID, newVal := range desired {
+			if old, had := node.Props[keyID]; had && !scalarEqual(old, newVal) {
+				for _, l := range node.Labels {
+					has, err := catalog.HasIndex(txn, l, keyID)
+					if err != nil {
+						return err
+					}
+					if !has || !isIndexable(old) {
+						continue
+					}
+					pk, err := codec.PropKey(l, keyID, old, nodeID)
+					if err != nil {
+						return err
+					}
+					if err := txn.Delete(pk); err != nil {
+						return err
+					}
+				}
+			}
+			node.Props[keyID] = newVal
+		}
+	}
+
+	// Write `p` entries for current properties (idempotent on existing keys).
+	for keyID, v := range node.Props {
+		if !isIndexable(v) {
+			continue
+		}
+		for _, l := range node.Labels {
+			has, err := catalog.HasIndex(txn, l, keyID)
+			if err != nil {
+				return err
+			}
+			if !has {
+				continue
+			}
+			pk, err := codec.PropKey(l, keyID, v, nodeID)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(pk, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return putNodeRecord(txn, nodeID, node.NodeRecord)
+}
+
 // DetachDeleteNode removes all incident edges (in any direction, including
 // self-loops) and then the node itself. It is the DETACH DELETE semantics.
 func DetachDeleteNode(txn storage.Txn, id uint64) error {

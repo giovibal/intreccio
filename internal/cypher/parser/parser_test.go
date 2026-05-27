@@ -67,7 +67,7 @@ func TestParseValidCorpus(t *testing.T) {
 			"MATCH (n:Person) SET n.age = n.age + 1",
 			&ast.Query{Clauses: []ast.Clause{
 				&ast.Match{Parts: []ast.PatternPart{part(node("n", []string{"Person"}, nil))}},
-				&ast.Set{Items: []ast.SetItem{{
+				&ast.Set{Items: []ast.SetClause{&ast.SetProperty{
 					Target: pa(vr("n"), "age"),
 					Value:  bin("+", pa(vr("n"), "age"), lit(int64(1))),
 				}}},

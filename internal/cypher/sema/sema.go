@@ -74,9 +74,13 @@ func (a *analyzer) clause(sc *scope, c ast.Clause) error {
 	case *ast.Create:
 		return a.create(sc, cl)
 	case *ast.Merge:
-		return a.introducePattern(sc, []ast.PatternPart{cl.Part})
+		return a.merge(sc, cl)
 	case *ast.Set:
 		return a.set(sc, cl)
+	case *ast.Remove:
+		return a.remove(sc, cl)
+	case *ast.Unwind:
+		return a.unwind(sc, cl)
 	case *ast.Delete:
 		return a.delete(sc, cl)
 	case *ast.With:
@@ -106,10 +110,72 @@ func (a *analyzer) create(sc *scope, c *ast.Create) error {
 
 func (a *analyzer) set(sc *scope, s *ast.Set) error {
 	for _, item := range s.Items {
-		if err := a.checkExpr(sc, item.Target, false); err != nil {
+		if err := a.checkSetClause(sc, item); err != nil {
 			return err
 		}
-		if err := a.checkExpr(sc, item.Value, false); err != nil {
+	}
+	return nil
+}
+
+func (a *analyzer) checkSetClause(sc *scope, item ast.SetClause) error {
+	switch it := item.(type) {
+	case *ast.SetProperty:
+		if err := a.checkExpr(sc, it.Target, false); err != nil {
+			return err
+		}
+		return a.checkExpr(sc, it.Value, false)
+	case *ast.SetLabels:
+		if !sc.has(it.Variable) {
+			return a.errf(it.Pos, "undefined variable: %s", it.Variable)
+		}
+		return nil
+	case *ast.SetMap:
+		if !sc.has(it.Variable) {
+			return a.errf(it.Pos, "undefined variable: %s", it.Variable)
+		}
+		return a.checkExpr(sc, it.Value, false)
+	default:
+		return a.errf(ast.Pos{}, "unsupported SET clause %T", item)
+	}
+}
+
+func (a *analyzer) remove(sc *scope, r *ast.Remove) error {
+	for _, item := range r.Items {
+		switch it := item.(type) {
+		case *ast.RemoveProperty:
+			if err := a.checkExpr(sc, it.Target, false); err != nil {
+				return err
+			}
+		case *ast.RemoveLabels:
+			if !sc.has(it.Variable) {
+				return a.errf(it.Pos, "undefined variable: %s", it.Variable)
+			}
+		default:
+			return a.errf(ast.Pos{}, "unsupported REMOVE clause %T", item)
+		}
+	}
+	return nil
+}
+
+func (a *analyzer) unwind(sc *scope, u *ast.Unwind) error {
+	if err := a.checkExpr(sc, u.Expr, false); err != nil {
+		return err
+	}
+	sc.define(u.Alias, u.Pos)
+	return nil
+}
+
+func (a *analyzer) merge(sc *scope, m *ast.Merge) error {
+	if err := a.introducePattern(sc, []ast.PatternPart{m.Part}); err != nil {
+		return err
+	}
+	for _, item := range m.OnCreate {
+		if err := a.checkSetClause(sc, item); err != nil {
+			return err
+		}
+	}
+	for _, item := range m.OnMatch {
+		if err := a.checkSetClause(sc, item); err != nil {
 			return err
 		}
 	}
@@ -359,7 +425,7 @@ func hasCreateIndex(q *ast.Query) bool {
 // endsQuery reports whether the clause can terminate a query.
 func endsQuery(c ast.Clause) bool {
 	switch c.(type) {
-	case *ast.Return, *ast.Create, *ast.Merge, *ast.Set, *ast.Delete, *ast.CreateIndex:
+	case *ast.Return, *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex:
 		return true
 	default:
 		return false

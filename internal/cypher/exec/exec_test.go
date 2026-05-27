@@ -49,8 +49,10 @@ func runQuery(t *testing.T, s storage.Store, cypher string, params map[string]an
 	if err != nil {
 		t.Fatalf("sema: %v", err)
 	}
+	// We always run inside an Update transaction so the helper handles both
+	// read and write queries; the overhead is negligible for tests.
 	var rows [][]any
-	err = s.View(func(txn storage.Txn) error {
+	err = s.Update(func(txn storage.Txn) error {
 		p, err := plan.Plan(q, testCatalog{txn: txn})
 		if err != nil {
 			return err
@@ -580,6 +582,141 @@ func TestScalarFunctions(t *testing.T) {
 	tail := row[3].([]any)
 	if len(tail) != 2 || tail[0] != int64(20) || tail[1] != int64(30) {
 		t.Errorf("list tail: %v", tail)
+	}
+}
+
+func TestOptionalMatchProducesNullForUnmatched(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		a, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "A"})
+		if err != nil {
+			return err
+		}
+		b, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "B"})
+		if err != nil {
+			return err
+		}
+		if _, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "C"}); err != nil {
+			return err
+		}
+		_, err = graph.CreateEdge(tx, "KNOWS", a, b, nil)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name AS an, b.name AS bn ORDER BY an", nil)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows (one per person), got %d (%v)", len(rows), rows)
+	}
+	// A -> B; B has no outgoing; C has no outgoing.
+	if rows[0][0] != "A" || rows[0][1] != "B" {
+		t.Errorf("row[0] = %v, want [A B]", rows[0])
+	}
+	if rows[1][0] != "B" || rows[1][1] != nil {
+		t.Errorf("row[1] = %v, want [B null]", rows[1])
+	}
+	if rows[2][0] != "C" || rows[2][1] != nil {
+		t.Errorf("row[2] = %v, want [C null]", rows[2])
+	}
+}
+
+func TestUnwindList(t *testing.T) {
+	s := newStore(t)
+	rows := runQuery(t, s, "UNWIND [1, 2, 3] AS x RETURN x", nil)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %v", rows)
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if rows[i][0] != want {
+			t.Errorf("row[%d] = %v, want %d", i, rows[i][0], want)
+		}
+	}
+}
+
+func TestSetLabels(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "Alice"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runQuery(t, s, "MATCH (n:Person) SET n:Admin:Manager", nil)
+	rows := runQuery(t, s, "MATCH (n:Admin) RETURN n.name AS n", nil)
+	if len(rows) != 1 || rows[0][0] != "Alice" {
+		t.Errorf("expected Alice with :Admin: %v", rows)
+	}
+	rows = runQuery(t, s, "MATCH (n:Manager) RETURN n.name AS n", nil)
+	if len(rows) != 1 || rows[0][0] != "Alice" {
+		t.Errorf("expected Alice with :Manager: %v", rows)
+	}
+}
+
+func TestSetMapReplaceAndMerge(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "Alice", "age": int64(30)})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// SET n += {age: 31, country: 'IT'} merges.
+	runQuery(t, s, "MATCH (n:P {name: 'Alice'}) SET n += {age: 31, country: 'IT'}", nil)
+	rows := runQuery(t, s, "MATCH (n:P) RETURN n.name AS name, n.age AS age, n.country AS c", nil)
+	if rows[0][0] != "Alice" || rows[0][1] != int64(31) || rows[0][2] != "IT" {
+		t.Errorf("after +=: %v", rows[0])
+	}
+
+	// SET n = {name: 'Alice', score: 99} replaces (age/country gone).
+	runQuery(t, s, "MATCH (n:P {name: 'Alice'}) SET n = {name: 'Alice', score: 99}", nil)
+	rows = runQuery(t, s, "MATCH (n:P) RETURN n.name AS name, n.score AS s, n.age AS age", nil)
+	if rows[0][0] != "Alice" || rows[0][1] != int64(99) || rows[0][2] != nil {
+		t.Errorf("after =: %v", rows[0])
+	}
+}
+
+func TestRemovePropertyAndLabel(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P", "Admin"}, map[string]any{"name": "Alice", "email": "a@x.com"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runQuery(t, s, "MATCH (n:P) REMOVE n.email, n:Admin", nil)
+	rows := runQuery(t, s, "MATCH (n:P) RETURN n.email AS e", nil)
+	if rows[0][0] != nil {
+		t.Errorf("email should be removed: %v", rows[0])
+	}
+	rows = runQuery(t, s, "MATCH (n:Admin) RETURN n.name AS n", nil)
+	if len(rows) != 0 {
+		t.Errorf("Admin label should be removed: %v", rows)
+	}
+}
+
+func TestMergeOnCreateAndOnMatch(t *testing.T) {
+	s := newStore(t)
+	// First MERGE: creates → OnCreate fires.
+	runQuery(t, s,
+		"MERGE (n:Person {email: 'a@x.com'}) ON CREATE SET n.created = 1 ON MATCH SET n.seen = 1 RETURN n.email AS e",
+		nil)
+	rows := runQuery(t, s,
+		"MATCH (n:Person {email: 'a@x.com'}) RETURN n.created AS c, n.seen AS s", nil)
+	if rows[0][0] != int64(1) || rows[0][1] != nil {
+		t.Errorf("first MERGE expected created=1 seen=null, got %v", rows[0])
+	}
+
+	// Second MERGE: matches → OnMatch fires.
+	runQuery(t, s,
+		"MERGE (n:Person {email: 'a@x.com'}) ON CREATE SET n.created = 1 ON MATCH SET n.seen = 1",
+		nil)
+	rows = runQuery(t, s,
+		"MATCH (n:Person {email: 'a@x.com'}) RETURN n.created AS c, n.seen AS s", nil)
+	if rows[0][0] != int64(1) || rows[0][1] != int64(1) {
+		t.Errorf("second MERGE expected created=1 seen=1, got %v", rows[0])
 	}
 }
 

@@ -145,6 +145,10 @@ func (p *parser) parseClause() (ast.Clause, error) {
 		return p.parseMerge()
 	case p.atKw("SET"):
 		return p.parseSet()
+	case p.atKw("REMOVE"):
+		return p.parseRemove()
+	case p.atKw("UNWIND"):
+		return p.parseUnwind()
 	case p.atKw("DETACH"):
 		pos := p.advance().pos
 		if err := p.expectKw("DELETE"); err != nil {
@@ -384,13 +388,104 @@ func (p *parser) parseMerge() (ast.Clause, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Merge{Part: part, Pos: pos}, nil
+	m := &ast.Merge{Part: part, Pos: pos}
+	for p.atKw("ON") {
+		p.advance() // ON
+		switch {
+		case p.atKw("CREATE"):
+			p.advance()
+			if err := p.expectKw("SET"); err != nil {
+				return nil, err
+			}
+			items, err := p.parseSetItems()
+			if err != nil {
+				return nil, err
+			}
+			m.OnCreate = append(m.OnCreate, items...)
+		case p.atKw("MATCH"):
+			p.advance()
+			if err := p.expectKw("SET"); err != nil {
+				return nil, err
+			}
+			items, err := p.parseSetItems()
+			if err != nil {
+				return nil, err
+			}
+			m.OnMatch = append(m.OnMatch, items...)
+		default:
+			return nil, p.errf(p.cur().pos, "expected CREATE or MATCH after ON, found %s", p.describe(p.cur()))
+		}
+	}
+	return m, nil
 }
 
 func (p *parser) parseSet() (ast.Clause, error) {
 	pos := p.advance().pos // SET
-	var items []ast.SetItem
+	items, err := p.parseSetItems()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Set{Items: items, Pos: pos}, nil
+}
+
+// parseSetItems reads one or more comma-separated SET items.
+func (p *parser) parseSetItems() ([]ast.SetClause, error) {
+	var items []ast.SetClause
 	for {
+		item, err := p.parseSetItem()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+		if !p.at(tComma) {
+			break
+		}
+		p.advance()
+	}
+	return items, nil
+}
+
+// parseSetItem reads one SET item: property assignment, label addition or
+// whole-map assignment (replace `=` or merge `+=`).
+func (p *parser) parseSetItem() (ast.SetClause, error) {
+	if !p.at(tIdent) {
+		return nil, p.errf(p.cur().pos, "SET expects an identifier, found %s", p.describe(p.cur()))
+	}
+	name := p.cur().text
+	namePos := p.cur().pos
+	next := p.peek(1)
+	switch next.typ {
+	case tColon:
+		p.advance() // identifier
+		labels, err := p.parseLabels()
+		if err != nil {
+			return nil, err
+		}
+		if len(labels) == 0 {
+			return nil, p.errf(namePos, "SET %s: expected one or more labels", name)
+		}
+		return &ast.SetLabels{Variable: name, Labels: labels, Pos: namePos}, nil
+	case tEq:
+		p.advance() // identifier
+		p.advance() // =
+		value, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.SetMap{Variable: name, Value: value, Replace: true, Pos: namePos}, nil
+	case tPlus:
+		if p.peek(2).typ != tEq {
+			return nil, p.errf(namePos, "SET %s: expected '+=' after identifier", name)
+		}
+		p.advance() // identifier
+		p.advance() // +
+		p.advance() // =
+		value, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.SetMap{Variable: name, Value: value, Replace: false, Pos: namePos}, nil
+	case tDot:
 		target, err := p.parseSetTarget()
 		if err != nil {
 			return nil, err
@@ -402,13 +497,72 @@ func (p *parser) parseSet() (ast.Clause, error) {
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, ast.SetItem{Target: target, Value: value})
+		return &ast.SetProperty{Target: target, Value: value}, nil
+	default:
+		return nil, p.errf(namePos, "SET %s: expected '.', ':', '=' or '+='", name)
+	}
+}
+
+func (p *parser) parseRemove() (ast.Clause, error) {
+	pos := p.advance().pos // REMOVE
+	var items []ast.RemoveClause
+	for {
+		item, err := p.parseRemoveItem()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
 		if !p.at(tComma) {
 			break
 		}
 		p.advance()
 	}
-	return &ast.Set{Items: items, Pos: pos}, nil
+	return &ast.Remove{Items: items, Pos: pos}, nil
+}
+
+func (p *parser) parseRemoveItem() (ast.RemoveClause, error) {
+	if !p.at(tIdent) {
+		return nil, p.errf(p.cur().pos, "REMOVE expects an identifier, found %s", p.describe(p.cur()))
+	}
+	name := p.cur().text
+	namePos := p.cur().pos
+	next := p.peek(1)
+	switch next.typ {
+	case tColon:
+		p.advance() // identifier
+		labels, err := p.parseLabels()
+		if err != nil {
+			return nil, err
+		}
+		if len(labels) == 0 {
+			return nil, p.errf(namePos, "REMOVE %s: expected one or more labels", name)
+		}
+		return &ast.RemoveLabels{Variable: name, Labels: labels, Pos: namePos}, nil
+	case tDot:
+		target, err := p.parseSetTarget()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.RemoveProperty{Target: target}, nil
+	default:
+		return nil, p.errf(namePos, "REMOVE %s: expected '.' or ':'", name)
+	}
+}
+
+func (p *parser) parseUnwind() (ast.Clause, error) {
+	pos := p.advance().pos // UNWIND
+	expr, err := p.parseExpr(0)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectKw("AS"); err != nil {
+		return nil, err
+	}
+	alias, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.Unwind{Expr: expr, Alias: alias, Pos: pos}, nil
 }
 
 func (p *parser) parseSetTarget() (*ast.PropertyAccess, error) {

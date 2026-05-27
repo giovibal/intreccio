@@ -68,6 +68,13 @@ func (pl *planner) clause(c ast.Clause) error {
 	case *ast.Set:
 		pl.plan = &SetItems{Input: pl.plan, Items: cl.Items}
 		return nil
+	case *ast.Remove:
+		pl.plan = &Remove{Input: pl.plan, Items: cl.Items}
+		return nil
+	case *ast.Unwind:
+		pl.plan = &Unwind{Input: pl.plan, Expr: cl.Expr, Alias: cl.Alias}
+		pl.bind(cl.Alias)
+		return nil
 	case *ast.Delete:
 		pl.plan = &Delete{Input: pl.plan, Exprs: cl.Exprs, Detach: cl.Detach}
 		return nil
@@ -90,7 +97,7 @@ func (pl *planner) planCreate(c *ast.Create) error {
 }
 
 func (pl *planner) planMerge(m *ast.Merge) error {
-	pl.plan = &Merge{Input: pl.plan, Part: m.Part}
+	pl.plan = &Merge{Input: pl.plan, Part: m.Part, OnCreate: m.OnCreate, OnMatch: m.OnMatch}
 	pl.bindPatternVars(m.Part)
 	return nil
 }
@@ -141,6 +148,9 @@ type equality struct {
 }
 
 func (pl *planner) planMatch(m *ast.Match) error {
+	if m.Optional {
+		return pl.planOptionalMatch(m)
+	}
 	var whereConj []ast.Expr
 	if m.Where != nil {
 		whereConj = conjuncts(m.Where)
@@ -170,6 +180,65 @@ func (pl *planner) planMatch(m *ast.Match) error {
 	if len(residual) > 0 {
 		pl.plan = &Filter{Input: pl.plan, Pred: andAll(residual)}
 	}
+	return nil
+}
+
+// planOptionalMatch builds an OuterApply: the optional pattern is planned as a
+// subplan whose leaf is an Argument (replaced by the current outer row at exec
+// time); the wrapper emits one row per outer with null bindings for any pattern
+// variable that did not appear before this clause if the inner produced no rows.
+func (pl *planner) planOptionalMatch(m *ast.Match) error {
+	outer := pl.plan
+	boundBefore := make(map[string]bool, len(pl.bound))
+	for k, v := range pl.bound {
+		boundBefore[k] = v
+	}
+
+	// Plan the pattern starting from an Argument leaf.
+	pl.plan = &Argument{}
+
+	// Same per-MATCH logic as planMatch, but accumulating onto the subplan.
+	var whereConj []ast.Expr
+	if m.Where != nil {
+		whereConj = conjuncts(m.Where)
+	}
+	consumed := map[int]bool{}
+	whereEqs := map[string][]equality{}
+	for i, e := range whereConj {
+		if eq, ok := asEquality(e); ok {
+			eq.conjIdx = i
+			whereEqs[eq.variable] = append(whereEqs[eq.variable], eq)
+		}
+	}
+	var residual []ast.Expr
+	for _, part := range m.Parts {
+		r, err := pl.planPart(part, whereEqs, consumed)
+		if err != nil {
+			return err
+		}
+		residual = append(residual, r...)
+	}
+	for i, e := range whereConj {
+		if !consumed[i] {
+			residual = append(residual, e)
+		}
+	}
+	if len(residual) > 0 {
+		pl.plan = &Filter{Input: pl.plan, Pred: andAll(residual)}
+	}
+
+	inner := pl.plan
+
+	// Variables introduced by this clause are those in pl.bound but not in
+	// boundBefore. Preserve binding order for stability.
+	var newVars []string
+	for _, name := range pl.boundOrder {
+		if !boundBefore[name] {
+			newVars = append(newVars, name)
+		}
+	}
+
+	pl.plan = &OuterApply{Outer: outer, Inner: inner, NewVars: newVars}
 	return nil
 }
 

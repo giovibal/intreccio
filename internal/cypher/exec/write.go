@@ -130,7 +130,7 @@ func evalProps(props map[string]ast.Expr, b binding, ctx *Context) (map[string]a
 type setOp struct {
 	ctx   *Context
 	input op
-	items []ast.SetItem
+	items []ast.SetClause
 }
 
 func (s *setOp) next() (binding, bool, error) {
@@ -138,30 +138,143 @@ func (s *setOp) next() (binding, bool, error) {
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	for _, item := range s.items {
-		if item.Target == nil {
-			return nil, false, fmt.Errorf("exec: SET target must be a property access")
+	if err := applySetClauses(s.ctx, b, s.items); err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
+}
+
+// applySetClauses executes a list of SET items against the bindings in row b,
+// refreshing the bound nodes after each mutation so downstream operators see
+// the new values.
+func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
+	for _, item := range items {
+		switch it := item.(type) {
+		case *ast.SetProperty:
+			if it.Target == nil {
+				return fmt.Errorf("exec: SET target must be a property access")
+			}
+			varRef, ok := it.Target.Target.(*ast.Variable)
+			if !ok {
+				return fmt.Errorf("exec: SET target must be a variable's property")
+			}
+			node, ok := b[varRef.Name].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET target %s is not a node", varRef.Name)
+			}
+			val, err := eval(it.Value, b, ctx)
+			if err != nil {
+				return err
+			}
+			if err := graph.SetProperty(ctx.Txn, node.ID, it.Target.Key, val); err != nil {
+				return err
+			}
+			refreshed, err := graph.GetNode(ctx.Txn, node.ID)
+			if err != nil {
+				return err
+			}
+			b[varRef.Name] = refreshed
+		case *ast.SetLabels:
+			node, ok := b[it.Variable].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET %s:... is not a node", it.Variable)
+			}
+			if err := graph.AddLabels(ctx.Txn, node.ID, it.Labels); err != nil {
+				return err
+			}
+			refreshed, err := graph.GetNode(ctx.Txn, node.ID)
+			if err != nil {
+				return err
+			}
+			b[it.Variable] = refreshed
+		case *ast.SetMap:
+			node, ok := b[it.Variable].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET %s = ... is not a node", it.Variable)
+			}
+			val, err := eval(it.Value, b, ctx)
+			if err != nil {
+				return err
+			}
+			if val == nil {
+				if it.Replace {
+					// SET n = null clears all properties.
+					if err := graph.SetNodeProperties(ctx.Txn, node.ID, nil, true); err != nil {
+						return err
+					}
+				}
+			} else {
+				m, ok := val.(map[string]any)
+				if !ok {
+					return fmt.Errorf("exec: SET %s requires a map value, got %T", it.Variable, val)
+				}
+				if err := graph.SetNodeProperties(ctx.Txn, node.ID, m, it.Replace); err != nil {
+					return err
+				}
+			}
+			refreshed, err := graph.GetNode(ctx.Txn, node.ID)
+			if err != nil {
+				return err
+			}
+			b[it.Variable] = refreshed
+		default:
+			return fmt.Errorf("exec: unsupported SET clause %T", item)
 		}
-		varRef, ok := item.Target.Target.(*ast.Variable)
-		if !ok {
-			return nil, false, fmt.Errorf("exec: SET target must be a variable's property")
+	}
+	return nil
+}
+
+// --- REMOVE ---
+
+type removeOp struct {
+	ctx   *Context
+	input op
+	items []ast.RemoveClause
+}
+
+func (r *removeOp) next() (binding, bool, error) {
+	b, ok, err := r.input.next()
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	for _, item := range r.items {
+		switch it := item.(type) {
+		case *ast.RemoveProperty:
+			if it.Target == nil {
+				return nil, false, fmt.Errorf("exec: REMOVE target must be a property access")
+			}
+			varRef, ok := it.Target.Target.(*ast.Variable)
+			if !ok {
+				return nil, false, fmt.Errorf("exec: REMOVE target must be a variable's property")
+			}
+			node, ok := b[varRef.Name].(graph.Node)
+			if !ok {
+				return nil, false, fmt.Errorf("exec: REMOVE %s.%s: not a node", varRef.Name, it.Target.Key)
+			}
+			if err := graph.RemoveProperty(r.ctx.Txn, node.ID, it.Target.Key); err != nil {
+				return nil, false, err
+			}
+			refreshed, err := graph.GetNode(r.ctx.Txn, node.ID)
+			if err != nil {
+				return nil, false, err
+			}
+			b[varRef.Name] = refreshed
+		case *ast.RemoveLabels:
+			node, ok := b[it.Variable].(graph.Node)
+			if !ok {
+				return nil, false, fmt.Errorf("exec: REMOVE %s:... not a node", it.Variable)
+			}
+			if err := graph.RemoveLabels(r.ctx.Txn, node.ID, it.Labels); err != nil {
+				return nil, false, err
+			}
+			refreshed, err := graph.GetNode(r.ctx.Txn, node.ID)
+			if err != nil {
+				return nil, false, err
+			}
+			b[it.Variable] = refreshed
+		default:
+			return nil, false, fmt.Errorf("exec: unsupported REMOVE clause %T", item)
 		}
-		node, ok := b[varRef.Name].(graph.Node)
-		if !ok {
-			return nil, false, fmt.Errorf("exec: SET target %s is not a node", varRef.Name)
-		}
-		val, err := eval(item.Value, b, s.ctx)
-		if err != nil {
-			return nil, false, err
-		}
-		if err := graph.SetProperty(s.ctx.Txn, node.ID, item.Target.Key, val); err != nil {
-			return nil, false, err
-		}
-		refreshed, err := graph.GetNode(s.ctx.Txn, node.ID)
-		if err != nil {
-			return nil, false, err
-		}
-		b[varRef.Name] = refreshed
 	}
 	return b, true, nil
 }
@@ -276,9 +389,11 @@ func (c *createIndexOp) next() (binding, bool, error) {
 // --- MERGE ---
 
 type mergeOp struct {
-	ctx   *Context
-	input op
-	part  ast.PatternPart
+	ctx      *Context
+	input    op
+	part     ast.PatternPart
+	onCreate []ast.SetClause
+	onMatch  []ast.SetClause
 
 	out []binding
 	pos int
@@ -305,21 +420,41 @@ func (m *mergeOp) next() (binding, bool, error) {
 }
 
 func (m *mergeOp) run(b binding) ([]binding, error) {
+	var (
+		rows     []binding
+		wasMatch bool
+		err      error
+	)
 	switch len(m.part.Chain) {
 	case 0:
-		return m.mergeNode(b, m.part.Start)
+		rows, wasMatch, err = m.mergeNode(b, m.part.Start)
 	case 1:
-		return m.mergeRel(b, m.part.Start, m.part.Chain[0])
+		rows, wasMatch, err = m.mergeRel(b, m.part.Start, m.part.Chain[0])
 	default:
 		return nil, fmt.Errorf("exec: MERGE with more than one relationship is not yet supported")
 	}
+	if err != nil {
+		return nil, err
+	}
+	clauses := m.onCreate
+	if wasMatch {
+		clauses = m.onMatch
+	}
+	if len(clauses) > 0 {
+		for _, row := range rows {
+			if err := applySetClauses(m.ctx, row, clauses); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return rows, nil
 }
 
 // mergeNode: match nodes with all labels and inline props; create one if none match.
-func (m *mergeOp) mergeNode(b binding, n *ast.NodePattern) ([]binding, error) {
+func (m *mergeOp) mergeNode(b binding, n *ast.NodePattern) ([]binding, bool, error) {
 	labelIDs, allLabelsExist, err := resolveLabels(m.ctx, n.Labels)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var matches []binding
 	if allLabelsExist {
@@ -330,19 +465,19 @@ func (m *mergeOp) mergeNode(b binding, n *ast.NodePattern) ([]binding, error) {
 			ids, err = graph.AllNodes(m.ctx.Txn)
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, id := range ids {
 			node, err := graph.GetNode(m.ctx.Txn, id)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if !hasAllLabelIDs(node, labelIDs) {
 				continue
 			}
 			ok, err := propsMatch(m.ctx, node.Props, n.Props, b)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if !ok {
 				continue
@@ -355,36 +490,36 @@ func (m *mergeOp) mergeNode(b binding, n *ast.NodePattern) ([]binding, error) {
 		}
 	}
 	if len(matches) > 0 {
-		return matches, nil
+		return matches, true, nil
 	}
 	// No match: create.
 	nb := b.clone()
 	if _, err := createOrReuseNode(m.ctx, nb, n); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return []binding{nb}, nil
+	return []binding{nb}, false, nil
 }
 
 // mergeRel: a single relationship from the start node. The start must reference a
 // bound variable; the end node may be bound or unbound (with labels/props).
-func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChain) ([]binding, error) {
+func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChain) ([]binding, bool, error) {
 	rel := ch.Rel
 	end := ch.Node
 	if rel.Direction == ast.DirBoth {
-		return nil, fmt.Errorf("exec: MERGE requires a directed relationship")
+		return nil, false, fmt.Errorf("exec: MERGE requires a directed relationship")
 	}
 	if len(rel.Types) != 1 {
-		return nil, fmt.Errorf("exec: MERGE requires exactly one relationship type")
+		return nil, false, fmt.Errorf("exec: MERGE requires exactly one relationship type")
 	}
 	if rel.VarLength {
-		return nil, fmt.Errorf("exec: MERGE does not support variable-length relationships")
+		return nil, false, fmt.Errorf("exec: MERGE does not support variable-length relationships")
 	}
 	if start.Variable == "" {
-		return nil, fmt.Errorf("exec: MERGE start node must reference a bound variable")
+		return nil, false, fmt.Errorf("exec: MERGE start node must reference a bound variable")
 	}
 	startNode, ok := b[start.Variable].(graph.Node)
 	if !ok {
-		return nil, fmt.Errorf("exec: MERGE start variable %s is not bound", start.Variable)
+		return nil, false, fmt.Errorf("exec: MERGE start variable %s is not bound", start.Variable)
 	}
 
 	var endNode graph.Node
@@ -398,12 +533,12 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 
 	endLabelIDs, endLabelsExist, err := resolveLabels(m.ctx, end.Labels)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	typeID, found, err := catalog.LookupType(m.ctx.Txn, rel.Types[0])
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var matches []binding
 	if found && endLabelsExist {
@@ -414,7 +549,7 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 			refs, err = graph.InEdges(m.ctx.Txn, startNode.ID, typeID)
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, r := range refs {
 			otherID := r.Dst
@@ -426,7 +561,7 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 			}
 			otherNode, err := graph.GetNode(m.ctx.Txn, otherID)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if !endBound {
 				if !hasAllLabelIDs(otherNode, endLabelIDs) {
@@ -434,7 +569,7 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 				}
 				ok, err := propsMatch(m.ctx, otherNode.Props, end.Props, b)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				if !ok {
 					continue
@@ -442,11 +577,11 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 			}
 			edge, err := graph.GetEdge(m.ctx.Txn, r.ID)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			ok, err := propsMatch(m.ctx, edge.Props, rel.Props, b)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if !ok {
 				continue
@@ -462,7 +597,7 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 		}
 	}
 	if len(matches) > 0 {
-		return matches, nil
+		return matches, true, nil
 	}
 
 	// No match: create.
@@ -471,15 +606,15 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 	if !endBound {
 		propMap, err := evalProps(end.Props, b, m.ctx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		id, err := graph.CreateNode(m.ctx.Txn, end.Labels, propMap)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		newEnd, err := graph.GetNode(m.ctx.Txn, id)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		endResolved = newEnd
 		if end.Variable != "" {
@@ -487,9 +622,9 @@ func (m *mergeOp) mergeRel(b binding, start *ast.NodePattern, ch ast.PatternChai
 		}
 	}
 	if err := createRel(m.ctx, nb, rel, startNode, endResolved); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return []binding{nb}, nil
+	return []binding{nb}, false, nil
 }
 
 // --- shared helpers ---

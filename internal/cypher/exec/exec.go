@@ -25,7 +25,7 @@ type op interface {
 // Run builds the operator tree for root and drains it, returning the rows mapped
 // to the given output columns.
 func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
-	o, err := build(root, ctx)
+	o, err := buildWith(root, ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,10 @@ func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
 	return rows, nil
 }
 
-func build(p plan.Op, ctx *Context) (op, error) {
+// buildChildren constructs the exec operator for a non-Argument plan node and
+// recursively delegates child construction to buildWith (so any nested
+// Argument leaves are replaced by the supplied argumentOp).
+func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 	switch x := p.(type) {
 	case nil:
 		return &unit{}, nil
@@ -82,15 +85,15 @@ func build(p plan.Op, ctx *Context) (op, error) {
 		}
 		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
 	case *plan.Expand:
-		return buildExpand(x, ctx)
+		return buildExpandWith(x, ctx, arg)
 	case *plan.Filter:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &filter{ctx: ctx, input: in, pred: x.Pred}, nil
 	case *plan.Project:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
@@ -100,13 +103,13 @@ func build(p plan.Op, ctx *Context) (op, error) {
 		}
 		return pr, nil
 	case *plan.Sort:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &sortOp{ctx: ctx, input: in, keys: x.Keys}, nil
 	case *plan.Skip:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
@@ -116,7 +119,7 @@ func build(p plan.Op, ctx *Context) (op, error) {
 		}
 		return &skip{input: in, n: n}, nil
 	case *plan.Limit:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
@@ -126,47 +129,70 @@ func build(p plan.Op, ctx *Context) (op, error) {
 		}
 		return &limit{input: in, n: n}, nil
 	case *plan.CartesianProduct:
-		left, err := build(x.Left, ctx)
+		left, err := buildWith(x.Left, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
-		right, err := build(x.Right, ctx)
+		right, err := buildWith(x.Right, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &cartesian{left: left, right: right}, nil
 	case *plan.Aggregate:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &aggregateOp{ctx: ctx, input: in, groupKeys: x.GroupKeys, aggs: x.Aggs}, nil
 	case *plan.Create:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &createOp{ctx: ctx, input: in, parts: x.Parts}, nil
 	case *plan.Merge:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
-		return &mergeOp{ctx: ctx, input: in, part: x.Part}, nil
+		return &mergeOp{ctx: ctx, input: in, part: x.Part, onCreate: x.OnCreate, onMatch: x.OnMatch}, nil
 	case *plan.SetItems:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &setOp{ctx: ctx, input: in, items: x.Items}, nil
+	case *plan.Remove:
+		in, err := buildWith(x.Input, ctx, arg)
+		if err != nil {
+			return nil, err
+		}
+		return &removeOp{ctx: ctx, input: in, items: x.Items}, nil
+	case *plan.Unwind:
+		in, err := buildWith(x.Input, ctx, arg)
+		if err != nil {
+			return nil, err
+		}
+		return &unwindOp{ctx: ctx, input: in, expr: x.Expr, alias: x.Alias}, nil
 	case *plan.Delete:
-		in, err := build(x.Input, ctx)
+		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
 			return nil, err
 		}
 		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
 	case *plan.CreateIndex:
 		return &createIndexOp{ctx: ctx, label: x.Label, prop: x.Property}, nil
+	case *plan.OuterApply:
+		outer, err := buildWith(x.Outer, ctx, arg)
+		if err != nil {
+			return nil, err
+		}
+		return &outerApplyOp{
+			ctx:       ctx,
+			outer:     outer,
+			innerPlan: x.Inner,
+			newVars:   x.NewVars,
+		}, nil
 	default:
 		return nil, fmt.Errorf("exec: unsupported operator %T", p)
 	}
