@@ -10,9 +10,19 @@ type Pos struct {
 	Col    int // 1-based, in runes
 }
 
-// Query is a single query: a sequence of clauses.
+// Query is a regular query: a sequence of clauses optionally followed by one
+// or more UNION arms.
 type Query struct {
 	Clauses []Clause
+	Unions  []QueryUnion
+}
+
+// QueryUnion is one UNION arm of a Query. All=true corresponds to UNION ALL
+// (no deduplication); All=false corresponds to UNION (DISTINCT).
+type QueryUnion struct {
+	All     bool
+	Clauses []Clause
+	Pos     Pos
 }
 
 // Clause is a top-level clause.

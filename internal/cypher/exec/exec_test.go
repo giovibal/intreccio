@@ -720,6 +720,47 @@ func TestMergeOnCreateAndOnMatch(t *testing.T) {
 	}
 }
 
+func TestUnionDistinctDeduplicates(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		for _, p := range [][2]string{
+			{"Person", "Alice"}, {"Person", "Bob"},
+			{"Company", "Acme"}, {"Company", "Alice"},
+		} {
+			if _, err := graph.CreateNode(tx, []string{p[0]}, map[string]any{"name": p[1]}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// UNION dedup: Alice appears once even though both arms yield it.
+	rows := runQuery(t, s,
+		"MATCH (p:Person) RETURN p.name AS n UNION MATCH (c:Company) RETURN c.name AS n", nil)
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r[0].(string)
+	}
+	sort.Strings(got)
+	if want := []string{"Acme", "Alice", "Bob"}; !equalStrings(got, want) {
+		t.Errorf("UNION: got %v, want %v", got, want)
+	}
+
+	// UNION ALL keeps duplicates.
+	rows = runQuery(t, s,
+		"MATCH (p:Person) RETURN p.name AS n UNION ALL MATCH (c:Company) RETURN c.name AS n", nil)
+	got = got[:0]
+	for _, r := range rows {
+		got = append(got, r[0].(string))
+	}
+	sort.Strings(got)
+	if want := []string{"Acme", "Alice", "Alice", "Bob"}; !equalStrings(got, want) {
+		t.Errorf("UNION ALL: got %v, want %v", got, want)
+	}
+}
+
 func TestLimit(t *testing.T) {
 	s := newStore(t)
 	seedSocial(t, s)

@@ -17,16 +17,41 @@ type Catalog interface {
 
 // Plan builds the physical plan for the query (read path; writing is Phase 7).
 func Plan(q *ast.Query, cat Catalog) (Op, error) {
-	pl := &planner{cat: cat, bound: map[string]bool{}}
-	for _, c := range q.Clauses {
-		if err := pl.clause(c); err != nil {
+	first, columns, err := planArm(q.Clauses, cat)
+	if err != nil {
+		return nil, err
+	}
+	if len(q.Unions) == 0 {
+		return first, nil
+	}
+	parts := []Op{first}
+	all := true // UNION ALL implies no dedup; if any arm uses non-ALL we dedup.
+	for _, u := range q.Unions {
+		armPlan, _, err := planArm(u.Clauses, cat)
+		if err != nil {
 			return nil, err
+		}
+		parts = append(parts, armPlan)
+		if !u.All {
+			all = false
+		}
+	}
+	return &Union{Parts: parts, Columns: columns, All: all}, nil
+}
+
+// planArm builds the plan for a single UNION arm (or for a query without UNION)
+// and returns the output column names captured from the arm's projection.
+func planArm(clauses []ast.Clause, cat Catalog) (Op, []string, error) {
+	pl := &planner{cat: cat, bound: map[string]bool{}}
+	for _, c := range clauses {
+		if err := pl.clause(c); err != nil {
+			return nil, nil, err
 		}
 	}
 	if pl.plan == nil {
-		return nil, fmt.Errorf("plan: no plan produced")
+		return nil, nil, fmt.Errorf("plan: no plan produced")
 	}
-	return pl.plan, nil
+	return pl.plan, append([]string(nil), pl.boundOrder...), nil
 }
 
 type planner struct {

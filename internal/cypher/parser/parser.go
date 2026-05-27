@@ -111,17 +111,45 @@ func (p *parser) identName() (string, error) {
 
 func (p *parser) parseQuery() (*ast.Query, error) {
 	q := &ast.Query{}
-	for !p.at(tEOF) && !p.at(tSemi) {
+	clauses, err := p.parseClauseList()
+	if err != nil {
+		return nil, err
+	}
+	if len(clauses) == 0 {
+		return nil, p.errf(p.cur().pos, "empty query")
+	}
+	q.Clauses = clauses
+
+	for p.atKw("UNION") {
+		pos := p.advance().pos
+		all := false
+		if p.atKw("ALL") {
+			all = true
+			p.advance()
+		}
+		rest, err := p.parseClauseList()
+		if err != nil {
+			return nil, err
+		}
+		if len(rest) == 0 {
+			return nil, p.errf(pos, "UNION arm has no clauses")
+		}
+		q.Unions = append(q.Unions, ast.QueryUnion{All: all, Clauses: rest, Pos: pos})
+	}
+	return q, nil
+}
+
+// parseClauseList reads clauses until EOF, semicolon or a UNION keyword.
+func (p *parser) parseClauseList() ([]ast.Clause, error) {
+	var clauses []ast.Clause
+	for !p.at(tEOF) && !p.at(tSemi) && !p.atKw("UNION") {
 		c, err := p.parseClause()
 		if err != nil {
 			return nil, err
 		}
-		q.Clauses = append(q.Clauses, c)
+		clauses = append(clauses, c)
 	}
-	if len(q.Clauses) == 0 {
-		return nil, p.errf(p.cur().pos, "empty query")
-	}
-	return q, nil
+	return clauses, nil
 }
 
 func (p *parser) parseClause() (ast.Clause, error) {

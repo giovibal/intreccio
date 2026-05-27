@@ -153,6 +153,15 @@ type OuterApply struct {
 	NewVars []string
 }
 
+// Union concatenates the results of two or more sub-plans. If All is true
+// duplicates are kept (UNION ALL); otherwise rows are de-duplicated on the
+// projected columns.
+type Union struct {
+	Parts   []Op
+	Columns []string
+	All     bool
+}
+
 // Delete: removes the values produced by the given expressions; if Detach is
 // true, incident edges are removed before deleting a node.
 type Delete struct {
@@ -188,3 +197,4 @@ func (*Remove) op()           {}
 func (*Unwind) op()           {}
 func (*Argument) op()         {}
 func (*OuterApply) op()       {}
+func (*Union) op()            {}

@@ -193,6 +193,20 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 			innerPlan: x.Inner,
 			newVars:   x.NewVars,
 		}, nil
+	case *plan.Union:
+		parts := make([]op, len(x.Parts))
+		for i, p := range x.Parts {
+			part, err := buildWith(p, ctx, arg)
+			if err != nil {
+				return nil, err
+			}
+			parts[i] = part
+		}
+		u := &unionOp{parts: parts, columns: x.Columns, dedup: !x.All}
+		if u.dedup {
+			u.seen = map[string]struct{}{}
+		}
+		return u, nil
 	default:
 		return nil, fmt.Errorf("exec: unsupported operator %T", p)
 	}

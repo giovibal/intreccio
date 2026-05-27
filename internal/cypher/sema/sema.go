@@ -42,16 +42,40 @@ func (a *analyzer) errf(pos ast.Pos, format string, args ...any) *SemaError {
 }
 
 func (a *analyzer) run(q *ast.Query) (*Result, error) {
-	if len(q.Clauses) == 0 {
+	cols, err := a.analyzeArm(q.Clauses)
+	if err != nil {
+		return nil, err
+	}
+	if len(q.Unions) > 0 && hasCreateIndex(q) {
+		return nil, a.errf(clausePos(q.Clauses[0]), "CREATE INDEX must be the only clause")
+	}
+	for _, u := range q.Unions {
+		// Each UNION arm is analysed in isolation; columns must match by name.
+		armCols, err := (&analyzer{}).analyzeArm(u.Clauses)
+		if err != nil {
+			return nil, err
+		}
+		if !sameColumns(cols, armCols) {
+			return nil, a.errf(u.Pos, "UNION arms must produce the same columns (got %v vs %v)", cols, armCols)
+		}
+	}
+	a.result.Columns = cols
+	return &a.result, nil
+}
+
+// analyzeArm validates a single query "arm" (the clauses before/between/after
+// UNION) and returns the columns it produces (nil if it doesn't RETURN).
+func (a *analyzer) analyzeArm(clauses []ast.Clause) ([]string, error) {
+	if len(clauses) == 0 {
 		return nil, &SemaError{Msg: "empty query"}
 	}
-	if hasCreateIndex(q) && len(q.Clauses) != 1 {
-		return nil, a.errf(clausePos(q.Clauses[0]), "CREATE INDEX must be the only clause")
+	if hasClauseOfType[*ast.CreateIndex](clauses) && len(clauses) != 1 {
+		return nil, a.errf(clausePos(clauses[0]), "CREATE INDEX must be the only clause")
 	}
 
 	sc := newScope()
-	for i, clause := range q.Clauses {
-		last := i == len(q.Clauses)-1
+	for i, clause := range clauses {
+		last := i == len(clauses)-1
 		if _, ok := clause.(*ast.Return); ok && !last {
 			return nil, a.errf(clausePos(clause), "RETURN must be the last clause")
 		}
@@ -59,12 +83,32 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 			return nil, err
 		}
 	}
-
-	if !endsQuery(q.Clauses[len(q.Clauses)-1]) {
-		return nil, a.errf(clausePos(q.Clauses[len(q.Clauses)-1]),
+	if !endsQuery(clauses[len(clauses)-1]) {
+		return nil, a.errf(clausePos(clauses[len(clauses)-1]),
 			"incomplete query: a RETURN or a writing clause is required")
 	}
-	return &a.result, nil
+	return a.result.Columns, nil
+}
+
+func hasClauseOfType[T ast.Clause](clauses []ast.Clause) bool {
+	for _, c := range clauses {
+		if _, ok := c.(T); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *analyzer) clause(sc *scope, c ast.Clause) error {

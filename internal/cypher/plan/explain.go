@@ -66,6 +66,12 @@ func describe(o Op) (string, []Op) {
 		return "Argument", nil
 	case *OuterApply:
 		return fmt.Sprintf("OuterApply(new=[%s])", strings.Join(x.NewVars, ", ")), []Op{x.Outer, x.Inner}
+	case *Union:
+		op := "Union"
+		if x.All {
+			op = "UnionAll"
+		}
+		return op, x.Parts
 	case *Delete:
 		parts := make([]string, len(x.Exprs))
 		for i, e := range x.Exprs {

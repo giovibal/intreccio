@@ -123,25 +123,37 @@ docs/adr/                architecture decision records
 The public, embeddable API lives in the root `mycypher` package; everything else
 is under `internal/`.
 
-## Supported Cypher (MVP scope)
+## Supported Cypher
 
+Read side:
 - `MATCH` / `OPTIONAL MATCH` with node/relationship patterns, directions, labels
-  and types; `WHERE` with comparisons, `AND`/`OR`/`NOT`, property access and label
-  predicates.
+  and types; `OPTIONAL MATCH` produces null bindings on no-match.
+- `WHERE` with comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`), boolean ops
+  (`AND`/`OR`/`NOT`), property access and label predicates,
+  `IS NULL`/`IS NOT NULL`, `STARTS WITH`/`ENDS WITH`/`CONTAINS`, `IN` with list
+  literals, `CASE WHEN ... THEN ... ELSE ... END` (simple and searched).
 - `RETURN` with projection, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`.
-- `WITH` chaining and scope reset.
+- `WITH` chaining and scope reset; `UNWIND list AS x`.
+- `UNION` / `UNION ALL`.
 - Variable-length paths `-[:T*1..3]->` (trail semantics: no repeated
   relationships).
-- Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` with implicit
-  grouping.
-- Write clauses `CREATE`, `MERGE`, `SET`, `DELETE`, `DETACH DELETE`, plus
-  `CREATE INDEX`, and `$param` parameters.
+- Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` (with `DISTINCT`).
+- Scalar functions: `id`, `labels`, `type`, `keys`, `properties`, `size`,
+  `length`, `head`, `last`, `tail`, `toInteger`, `toFloat`, `toString`,
+  `toUpper`, `toLower`, `trim`, `substring`, `replace`, `split`, `abs`.
 
-Parsing, semantic analysis and planning cover the read side today; execution of
-the above is delivered incrementally (see the roadmap).
+Write side:
+- `CREATE`, `MERGE` (with `ON CREATE SET` / `ON MATCH SET`).
+- `SET`: property assignment (`n.p = v`), label addition (`n:Foo`), map replace
+  (`n = {...}`) or merge (`n += {...}`).
+- `REMOVE`: property (`n.p`) or labels (`n:Foo`).
+- `DELETE` / `DETACH DELETE`.
+- `CREATE INDEX FOR (v:Label) ON (v.prop)` with on-demand backfill.
+- Parameters (`$name`).
 
 **Out of scope for v1:** OLAP/vectorized execution, distribution/replication,
-`shortestPath`, subqueries (`EXISTS { }`, `CALL { }`), and full TCK conformance.
+`shortestPath`/`allShortestPaths`, subqueries (`EXISTS { }`, `CALL { }`), user-defined
+procedures, path variables (`p = (...)`) and full TCK conformance.
 
 ## Roadmap
 
