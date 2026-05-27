@@ -761,6 +761,264 @@ func TestUnionDistinctDeduplicates(t *testing.T) {
 	}
 }
 
+func TestOptionalMatchWithFailingWhere(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		a, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "A"})
+		if err != nil {
+			return err
+		}
+		b, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "B", "score": int64(10)})
+		if err != nil {
+			return err
+		}
+		_, err = graph.CreateEdge(tx, "T", a, b, nil)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// b.score = 10 < 100, so even though the MATCH succeeds, the WHERE
+	// filters the row to a null binding for b.
+	rows := runQuery(t, s,
+		"MATCH (a:Person {name: 'A'}) OPTIONAL MATCH (a)-[:T]->(b) WHERE b.score > 100 RETURN a.name AS an, b AS bn", nil)
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %v", rows)
+	}
+	if rows[0][0] != "A" || rows[0][1] != nil {
+		t.Errorf("row = %v, want [A null]", rows[0])
+	}
+}
+
+func TestOptionalMatchChained(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		a, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "A"})
+		if err != nil {
+			return err
+		}
+		b, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "B"})
+		if err != nil {
+			return err
+		}
+		c, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "C"})
+		if err != nil {
+			return err
+		}
+		if _, err := graph.CreateEdge(tx, "T", a, b, nil); err != nil {
+			return err
+		}
+		_, err = graph.CreateEdge(tx, "T", c, a, nil)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := runQuery(t, s,
+		"MATCH (a:P {name: 'A'}) OPTIONAL MATCH (a)-[:T]->(b) OPTIONAL MATCH (c)-[:T]->(a) RETURN b.name AS bn, c.name AS cn", nil)
+	if len(rows) != 1 || rows[0][0] != "B" || rows[0][1] != "C" {
+		t.Errorf("row = %v, want [B C]", rows[0])
+	}
+}
+
+func TestUnwindEmpty(t *testing.T) {
+	s := newStore(t)
+	rows := runQuery(t, s, "UNWIND [] AS x RETURN x", nil)
+	if len(rows) != 0 {
+		t.Errorf("expected zero rows, got %v", rows)
+	}
+}
+
+func TestUnwindNull(t *testing.T) {
+	s := newStore(t)
+	rows := runQuery(t, s, "WITH null AS x UNWIND x AS y RETURN y", nil)
+	if len(rows) != 0 {
+		t.Errorf("expected zero rows, got %v", rows)
+	}
+}
+
+func TestRemoveMissingPropertyIsNoOp(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "Alice"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Property "email" was never set; REMOVE must succeed silently.
+	runQuery(t, s, "MATCH (n:P) REMOVE n.email", nil)
+	rows := runQuery(t, s, "MATCH (n:P) RETURN n.name AS name", nil)
+	if len(rows) != 1 || rows[0][0] != "Alice" {
+		t.Errorf("unexpected rows after no-op REMOVE: %v", rows)
+	}
+}
+
+func TestRemoveLabelNotPresentIsNoOp(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "Alice"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runQuery(t, s, "MATCH (n:P) REMOVE n:DoesNotExist", nil)
+	rows := runQuery(t, s, "MATCH (n:P) RETURN n.name AS name", nil)
+	if len(rows) != 1 {
+		t.Errorf("unexpected rows after no-op REMOVE label: %v", rows)
+	}
+}
+
+func TestMergeOnCreateOnlyOnFirstCall(t *testing.T) {
+	s := newStore(t)
+	runQuery(t, s,
+		"MERGE (n:P {email: 'x'}) ON CREATE SET n.created = 1 ON MATCH SET n.seen = 1", nil)
+	runQuery(t, s,
+		"MERGE (n:P {email: 'x'}) ON CREATE SET n.created = 2 ON MATCH SET n.seen = 1", nil)
+	rows := runQuery(t, s,
+		"MATCH (n:P {email: 'x'}) RETURN n.created AS c, n.seen AS s", nil)
+	if len(rows) != 1 || rows[0][0] != int64(1) || rows[0][1] != int64(1) {
+		t.Errorf("expected created=1 seen=1 after two MERGE, got %v", rows[0])
+	}
+}
+
+func TestCaseNoMatchNoElseReturnsNull(t *testing.T) {
+	s := newStore(t)
+	rows := runQuery(t, s, "RETURN CASE WHEN false THEN 1 END AS v", nil)
+	if len(rows) != 1 || rows[0][0] != nil {
+		t.Errorf("expected [null], got %v", rows)
+	}
+}
+
+func TestStringPredicateWithNullOperand(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "Alice"})
+		if err != nil {
+			return err
+		}
+		// no `name` here → property is null.
+		_, err = graph.CreateNode(tx, []string{"P"}, map[string]any{"email": "x"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// null operand → predicate is null → row excluded.
+	rows := runQuery(t, s, "MATCH (n:P) WHERE n.name STARTS WITH 'A' RETURN n.name AS name", nil)
+	if len(rows) != 1 || rows[0][0] != "Alice" {
+		t.Errorf("expected only Alice, got %v", rows)
+	}
+}
+
+func TestInWithNullList(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "Alice"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// IN against a null list → null → row filtered out.
+	rows := runQuery(t, s, "MATCH (n:P) WHERE n.name IN null RETURN n.name", nil)
+	if len(rows) != 0 {
+		t.Errorf("expected zero rows, got %v", rows)
+	}
+}
+
+func TestAggregationSkipsNulls(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		// Two nodes with score, one without (null).
+		if _, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"score": int64(10)}); err != nil {
+			return err
+		}
+		if _, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"score": int64(30)}); err != nil {
+			return err
+		}
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "noscore"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows := runQuery(t, s,
+		"MATCH (n:P) RETURN count(n.score) AS c, sum(n.score) AS s, avg(n.score) AS a, min(n.score) AS mn, max(n.score) AS mx", nil)
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %v", rows)
+	}
+	r := rows[0]
+	if r[0] != int64(2) || r[1] != int64(40) || r[2] != float64(20) || r[3] != int64(10) || r[4] != int64(30) {
+		t.Errorf("aggregates ignoring null = %v, want [2 40 20 10 30]", r)
+	}
+}
+
+func TestIdAndLabelsOnNull(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "A"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// b is always null (no relation exists), so id(b) and labels(b) must be null.
+	rows := runQuery(t, s,
+		"MATCH (a:P) OPTIONAL MATCH (a)-[:T]->(b) RETURN id(b) AS ib, labels(b) AS lb", nil)
+	if len(rows) != 1 || rows[0][0] != nil || rows[0][1] != nil {
+		t.Errorf("row = %v, want [null null]", rows[0])
+	}
+}
+
+func TestVarLengthZeroHops(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		a, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "A"})
+		if err != nil {
+			return err
+		}
+		b, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "B"})
+		if err != nil {
+			return err
+		}
+		_, err = graph.CreateEdge(tx, "T", a, b, nil)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// *0..1 from A yields A (zero hops) and B (one hop).
+	rows := runQuery(t, s,
+		"MATCH (a:P {name: 'A'})-[:T*0..1]->(b) RETURN b.name AS bn ORDER BY bn", nil)
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r[0].(string))
+	}
+	if want := []string{"A", "B"}; !equalStrings(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSetPropertyToNullRemovesIt(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		_, err := graph.CreateNode(tx, []string{"P"}, map[string]any{"name": "Alice", "age": int64(30)})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// SET n.age = null must remove the key, per Cypher semantics.
+	runQuery(t, s, "MATCH (n:P {name: 'Alice'}) SET n.age = null", nil)
+	rows := runQuery(t, s, "MATCH (n:P) RETURN keys(n) AS ks", nil)
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %v", rows)
+	}
+	ks, ok := rows[0][0].([]any)
+	if !ok {
+		t.Fatalf("expected keys(n) to be a list, got %T", rows[0][0])
+	}
+	for _, k := range ks {
+		if k == "age" {
+			t.Errorf("age should be absent after SET n.age = null, got keys %v", ks)
+		}
+	}
+}
+
 func TestLimit(t *testing.T) {
 	s := newStore(t)
 	seedSocial(t, s)

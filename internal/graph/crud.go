@@ -124,7 +124,11 @@ func SetProperty(txn storage.Txn, nodeID uint64, key string, value any) error {
 		}
 	}
 
-	node.Props[keyID] = value
+	if value == nil {
+		delete(node.Props, keyID)
+	} else {
+		node.Props[keyID] = value
+	}
 	return putNodeRecord(txn, nodeID, node.NodeRecord)
 }
 
@@ -372,6 +376,9 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 		}
 		node.Props = make(map[uint32]any, len(desired))
 		for k, v := range desired {
+			if v == nil {
+				continue
+			}
 			node.Props[k] = v
 		}
 	} else {
@@ -394,7 +401,11 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 					}
 				}
 			}
-			node.Props[keyID] = newVal
+			if newVal == nil {
+				delete(node.Props, keyID)
+			} else {
+				node.Props[keyID] = newVal
+			}
 		}
 	}
 
