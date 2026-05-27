@@ -49,14 +49,61 @@ func TestValidNoColumns(t *testing.T) {
 	for _, src := range []string{
 		"CREATE (n:Person {name: 'Bob'})",
 		"MATCH (n:Person) SET n.age = 1",
+		"MATCH (n:Person) SET n:Admin",
+		"MATCH (n) SET n = {name: 'x'}",
+		"MATCH (n) SET n += {age: 1}",
+		"MATCH (n:Person) REMOVE n.email, n:Admin",
 		"MATCH (n) DETACH DELETE n",
 		"MERGE (n:Person {email: $e})",
+		"MERGE (n:Person {email: $e}) ON CREATE SET n.c = 1 ON MATCH SET n.s = 1",
 		"CREATE INDEX FOR (p:Person) ON (p.email)",
 		"CREATE (a:Person)-[:KNOWS]->(b:Person)",
 	} {
 		t.Run(src, func(t *testing.T) {
 			if _, err := analyze(t, src); err != nil {
 				t.Errorf("Analyze(%q): %v", src, err)
+			}
+		})
+	}
+}
+
+func TestValidExtendedQueries(t *testing.T) {
+	cases := []struct {
+		src  string
+		cols []string
+	}{
+		{"UNWIND [1,2,3] AS x RETURN x", []string{"x"}},
+		{"MATCH (a) UNWIND [1,2] AS i RETURN a, i", []string{"a", "i"}},
+		{"MATCH (a) OPTIONAL MATCH (a)-[:T]->(b) RETURN a, b", []string{"a", "b"}},
+		// OPTIONAL MATCH keeps b in scope for subsequent clauses.
+		{"MATCH (a) OPTIONAL MATCH (a)-[:T]->(b) RETURN a.name AS n, b.name AS m", []string{"n", "m"}},
+		// UNION with matching column names is valid.
+		{"MATCH (p:Person) RETURN p.name AS n UNION MATCH (c:Company) RETURN c.name AS n", []string{"n"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.src, func(t *testing.T) {
+			res, err := analyze(t, tc.src)
+			if err != nil {
+				t.Fatalf("Analyze(%q): %v", tc.src, err)
+			}
+			if !reflect.DeepEqual(res.Columns, tc.cols) {
+				t.Errorf("columns = %v, want %v", res.Columns, tc.cols)
+			}
+		})
+	}
+}
+
+func TestUnionColumnMismatch(t *testing.T) {
+	for _, src := range []string{
+		"MATCH (a) RETURN a UNION MATCH (b) RETURN b.name",
+		"MATCH (a) RETURN a AS x UNION MATCH (b) RETURN b AS y",
+		"MATCH (a) RETURN a, count(*) AS c UNION MATCH (b) RETURN b",
+	} {
+		t.Run(src, func(t *testing.T) {
+			if _, err := analyze(t, src); err == nil {
+				t.Errorf("Analyze(%q): expected an error for mismatched UNION columns", src)
+			} else if _, ok := err.(*SemaError); !ok {
+				t.Errorf("expected *SemaError, got %T: %v", err, err)
 			}
 		})
 	}
@@ -74,6 +121,13 @@ func TestUndefinedVariable(t *testing.T) {
 		{"where", "MATCH (a) WHERE b.x = 1 RETURN a", 1, 0},
 		{"set-target", "MATCH (a) SET b.x = 1", 1, 0},
 		{"order-by", "MATCH (a) RETURN a AS x ORDER BY y", 1, 0},
+		{"set-label-undefined", "SET m:Foo", 1, 0},
+		{"set-map-undefined", "SET m = {a: 1}", 1, 0},
+		{"set-map-merge-undefined", "SET m += {a: 1}", 1, 0},
+		{"remove-property-undefined", "REMOVE m.x", 1, 0},
+		{"remove-label-undefined", "REMOVE m:L", 1, 0},
+		{"unwind-from-undefined", "WITH 1 AS x UNWIND y AS z RETURN z", 1, 0},
+		{"merge-on-create-undefined", "MERGE (n:P {x: 1}) ON CREATE SET m.y = 1", 1, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

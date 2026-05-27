@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/giovibal/mycypher/internal/cypher/ast"
@@ -55,6 +56,25 @@ func collect(o Op) []Op {
 	case *CartesianProduct:
 		out = append(out, collect(x.Left)...)
 		out = append(out, collect(x.Right)...)
+	case *Create:
+		out = append(out, collect(x.Input)...)
+	case *Merge:
+		out = append(out, collect(x.Input)...)
+	case *SetItems:
+		out = append(out, collect(x.Input)...)
+	case *Remove:
+		out = append(out, collect(x.Input)...)
+	case *Unwind:
+		out = append(out, collect(x.Input)...)
+	case *Delete:
+		out = append(out, collect(x.Input)...)
+	case *OuterApply:
+		out = append(out, collect(x.Outer)...)
+		out = append(out, collect(x.Inner)...)
+	case *Union:
+		for _, p := range x.Parts {
+			out = append(out, collect(p)...)
+		}
 	}
 	return out
 }
@@ -199,6 +219,122 @@ func TestProjectionTail(t *testing.T) {
 	}
 	if _, ok := sort.Input.(*Project); !ok {
 		t.Fatalf("expected Project, got %T", sort.Input)
+	}
+}
+
+func TestOptionalMatchProducesOuterApply(t *testing.T) {
+	root := mustPlan(t,
+		"MATCH (a) OPTIONAL MATCH (a)-[:T]->(b) RETURN a, b",
+		withIndex())
+	var outer *OuterApply
+	for _, o := range collect(root) {
+		if x, ok := o.(*OuterApply); ok {
+			outer = x
+			break
+		}
+	}
+	if outer == nil {
+		t.Fatal("expected an OuterApply in the plan")
+	}
+	// NewVars must contain at least the optionally bound `b`.
+	found := false
+	for _, v := range outer.NewVars {
+		if v == "b" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("NewVars %v does not contain 'b'", outer.NewVars)
+	}
+}
+
+func TestUnionProducesUnionOp(t *testing.T) {
+	root := mustPlan(t,
+		"MATCH (a) RETURN a AS x UNION MATCH (b) RETURN b AS x",
+		withIndex())
+	u, ok := root.(*Union)
+	if !ok {
+		t.Fatalf("expected *Union at the root, got %T", root)
+	}
+	if len(u.Parts) != 2 {
+		t.Errorf("expected 2 parts, got %d", len(u.Parts))
+	}
+	if u.All {
+		t.Errorf("UNION (without ALL) should have All=false")
+	}
+
+	root = mustPlan(t,
+		"MATCH (a) RETURN a AS x UNION ALL MATCH (b) RETURN b AS x",
+		withIndex())
+	u, ok = root.(*Union)
+	if !ok {
+		t.Fatalf("expected *Union at the root, got %T", root)
+	}
+	if !u.All {
+		t.Errorf("UNION ALL should have All=true")
+	}
+}
+
+func TestExplainSetVariants(t *testing.T) {
+	cases := []struct {
+		src      string
+		contains string
+	}{
+		{"MATCH (n) SET n.x = 1", "n.x = 1"},
+		{"MATCH (n) SET n:Foo", "n:Foo"},
+		{"MATCH (n) SET n = {a: 1}", "n = {a: 1}"},
+		{"MATCH (n) SET n += {a: 1}", "n += {a: 1}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.src, func(t *testing.T) {
+			root := mustPlan(t, tc.src, withIndex())
+			got := Explain(root)
+			if !strings.Contains(got, tc.contains) {
+				t.Errorf("EXPLAIN for %q missing %q:\n%s", tc.src, tc.contains, got)
+			}
+		})
+	}
+}
+
+func TestExplainRemoveAndUnwind(t *testing.T) {
+	root := mustPlan(t, "MATCH (n) REMOVE n.email, n:Admin", withIndex())
+	got := Explain(root)
+	if !strings.Contains(got, "Remove(") || !strings.Contains(got, "n.email") || !strings.Contains(got, "n:Admin") {
+		t.Errorf("REMOVE EXPLAIN missing expected text:\n%s", got)
+	}
+
+	root = mustPlan(t, "UNWIND [1, 2, 3] AS x RETURN x", withIndex())
+	got = Explain(root)
+	if !strings.Contains(got, "Unwind(") || !strings.Contains(got, "AS x") {
+		t.Errorf("UNWIND EXPLAIN missing expected text:\n%s", got)
+	}
+}
+
+func TestExplainOuterApply(t *testing.T) {
+	root := mustPlan(t,
+		"MATCH (a) OPTIONAL MATCH (a)-[:T]->(b) RETURN a, b",
+		withIndex())
+	got := Explain(root)
+	if !strings.Contains(got, "OuterApply") {
+		t.Errorf("OPTIONAL MATCH EXPLAIN missing OuterApply:\n%s", got)
+	}
+}
+
+func TestExplainUnion(t *testing.T) {
+	root := mustPlan(t,
+		"MATCH (a) RETURN a AS x UNION MATCH (b) RETURN b AS x",
+		withIndex())
+	got := Explain(root)
+	if !strings.Contains(got, "Union\n") {
+		t.Errorf("UNION EXPLAIN missing 'Union':\n%s", got)
+	}
+
+	root = mustPlan(t,
+		"MATCH (a) RETURN a AS x UNION ALL MATCH (b) RETURN b AS x",
+		withIndex())
+	got = Explain(root)
+	if !strings.Contains(got, "UnionAll") {
+		t.Errorf("UNION ALL EXPLAIN missing 'UnionAll':\n%s", got)
 	}
 }
 

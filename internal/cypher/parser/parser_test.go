@@ -206,6 +206,141 @@ func TestParseValidCorpus(t *testing.T) {
 			}},
 		},
 		{
+			"ends-with",
+			"MATCH (n) WHERE n.name ENDS WITH 'a' RETURN n",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{
+					Parts: []ast.PatternPart{part(node("n", nil, nil))},
+					Where: bin("ENDS WITH", pa(vr("n"), "name"), lit("a")),
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("n")}}},
+			}},
+		},
+		{
+			"contains",
+			"MATCH (n) WHERE n.name CONTAINS 'ar' RETURN n",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{
+					Parts: []ast.PatternPart{part(node("n", nil, nil))},
+					Where: bin("CONTAINS", pa(vr("n"), "name"), lit("ar")),
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("n")}}},
+			}},
+		},
+		{
+			"map-literal-expression",
+			"RETURN {a: 1, b: 'x'} AS m",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Return{Items: []ast.ReturnItem{{
+					Expr: &ast.MapLiteral{Entries: map[string]ast.Expr{
+						"a": lit(int64(1)),
+						"b": lit("x"),
+					}},
+					Alias: "m",
+				}}},
+			}},
+		},
+		{
+			"merge-on-create-on-match",
+			"MERGE (n:Person {email: $e}) ON CREATE SET n.created = 1 ON MATCH SET n.seen = 1",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Merge{
+					Part: part(node("n", []string{"Person"}, map[string]ast.Expr{"email": par("e")})),
+					OnCreate: []ast.SetClause{&ast.SetProperty{
+						Target: pa(vr("n"), "created"), Value: lit(int64(1)),
+					}},
+					OnMatch: []ast.SetClause{&ast.SetProperty{
+						Target: pa(vr("n"), "seen"), Value: lit(int64(1)),
+					}},
+				},
+			}},
+		},
+		{
+			"remove-property-and-label",
+			"MATCH (n) REMOVE n.email, n:Admin",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{Parts: []ast.PatternPart{part(node("n", nil, nil))}},
+				&ast.Remove{Items: []ast.RemoveClause{
+					&ast.RemoveProperty{Target: pa(vr("n"), "email")},
+					&ast.RemoveLabels{Variable: "n", Labels: []string{"Admin"}},
+				}},
+			}},
+		},
+		{
+			"unwind",
+			"UNWIND [1, 2, 3] AS x RETURN x",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Unwind{
+					Expr:  &ast.ListLiteral{Elements: []ast.Expr{lit(int64(1)), lit(int64(2)), lit(int64(3))}},
+					Alias: "x",
+				},
+				&ast.Return{Items: []ast.ReturnItem{{Expr: vr("x")}}},
+			}},
+		},
+		{
+			"set-labels",
+			"MATCH (n) SET n:Foo:Bar",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{Parts: []ast.PatternPart{part(node("n", nil, nil))}},
+				&ast.Set{Items: []ast.SetClause{
+					&ast.SetLabels{Variable: "n", Labels: []string{"Foo", "Bar"}},
+				}},
+			}},
+		},
+		{
+			"set-map-replace",
+			"MATCH (n) SET n = {a: 1}",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{Parts: []ast.PatternPart{part(node("n", nil, nil))}},
+				&ast.Set{Items: []ast.SetClause{
+					&ast.SetMap{Variable: "n", Replace: true, Value: &ast.MapLiteral{Entries: map[string]ast.Expr{"a": lit(int64(1))}}},
+				}},
+			}},
+		},
+		{
+			"set-map-merge",
+			"MATCH (n) SET n += {a: 1}",
+			&ast.Query{Clauses: []ast.Clause{
+				&ast.Match{Parts: []ast.PatternPart{part(node("n", nil, nil))}},
+				&ast.Set{Items: []ast.SetClause{
+					&ast.SetMap{Variable: "n", Replace: false, Value: &ast.MapLiteral{Entries: map[string]ast.Expr{"a": lit(int64(1))}}},
+				}},
+			}},
+		},
+		{
+			"union",
+			"MATCH (a) RETURN a UNION MATCH (b) RETURN b",
+			&ast.Query{
+				Clauses: []ast.Clause{
+					&ast.Match{Parts: []ast.PatternPart{part(node("a", nil, nil))}},
+					&ast.Return{Items: []ast.ReturnItem{{Expr: vr("a")}}},
+				},
+				Unions: []ast.QueryUnion{{
+					Clauses: []ast.Clause{
+						&ast.Match{Parts: []ast.PatternPart{part(node("b", nil, nil))}},
+						&ast.Return{Items: []ast.ReturnItem{{Expr: vr("b")}}},
+					},
+				}},
+			},
+		},
+		{
+			"union-all",
+			"MATCH (a) RETURN a UNION ALL MATCH (b) RETURN b",
+			&ast.Query{
+				Clauses: []ast.Clause{
+					&ast.Match{Parts: []ast.PatternPart{part(node("a", nil, nil))}},
+					&ast.Return{Items: []ast.ReturnItem{{Expr: vr("a")}}},
+				},
+				Unions: []ast.QueryUnion{{
+					All: true,
+					Clauses: []ast.Clause{
+						&ast.Match{Parts: []ast.PatternPart{part(node("b", nil, nil))}},
+						&ast.Return{Items: []ast.ReturnItem{{Expr: vr("b")}}},
+					},
+				}},
+			},
+		},
+		{
 			"with-chaining-and-order",
 			"MATCH (p)-[:KNOWS]->(f) WITH p, count(f) AS friends WHERE friends > 5 RETURN p.name AS name ORDER BY name DESC SKIP 2 LIMIT 10",
 			&ast.Query{Clauses: []ast.Clause{
@@ -256,6 +391,11 @@ func TestParseInvalid(t *testing.T) {
 		{"empty", "   ", 1, 0},
 		{"double-equals", "RETURN 1 = = 2", 1, 0},
 		{"unterminated-string", "RETURN 'abc", 1, 8},
+		{"case-missing-end", "RETURN CASE WHEN 1 = 1 THEN 1", 1, 0},
+		{"case-no-when", "RETURN CASE END AS r", 1, 0},
+		{"unwind-missing-as", "UNWIND [1] RETURN x", 1, 0},
+		{"union-empty-arm", "MATCH (n) RETURN n UNION", 1, 0},
+		{"set-labels-missing", "MATCH (n) SET n:", 1, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
