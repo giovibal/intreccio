@@ -135,6 +135,21 @@ func TestSetProperty(t *testing.T) {
 	}
 }
 
+func TestRemoveLabelAndProperty(t *testing.T) {
+	db := newDB(t)
+	mustQuery(t, db, "CREATE (:Person:Admin {name: 'Alice', email: 'a@x'})", nil)
+	mustQuery(t, db, "MATCH (n:Person) REMOVE n.email, n:Admin", nil)
+
+	admins := mustQuery(t, db, "MATCH (n:Admin) RETURN n.name AS n", nil)
+	if len(admins.Rows) != 0 {
+		t.Errorf("expected no admins, got %v", admins.Rows)
+	}
+	emails := mustQuery(t, db, "MATCH (n:Person) RETURN n.email AS e", nil)
+	if len(emails.Rows) != 1 || emails.Rows[0][0] != nil {
+		t.Errorf("expected email cleared, got %v", emails.Rows)
+	}
+}
+
 func TestDeleteEdge(t *testing.T) {
 	db := newDB(t)
 	mustQuery(t, db, "CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})", nil)
