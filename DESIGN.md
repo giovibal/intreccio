@@ -267,9 +267,14 @@ mycypher/
 > the root `mycypher` package. Module name: `github.com/giovibal/mycypher`.
 
 ## 12. Future evolution (outside v1)
-- **Replication / distribution**: NATS JetStream as a write-ahead/replication log
-  or event-sourced changefeed on top of the engine — *not* as a storage engine.
-  Keep it out of the single-binary v1.
+- **Replication / distribution (v2, opt-in)**: a Raft-replicated state machine
+  configured from the library, for high availability. A small quorum of data
+  nodes (3/5) holds the data; other instances join as stateless clients. One
+  Cypher write = one Raft log entry = one atomic apply on every replica, by
+  replicating the transaction's *effects* (write-set) rather than re-executing the
+  query. Lives in `internal/cluster` and is linked only when used, so the embedded
+  single-binary default stays pure Go and dependency-light. See ADR 0007. (NATS
+  JetStream was considered as the replication log and rejected for this purpose.)
 - Cost-based planner with statistics.
 - Full-text and vector indexes (for GraphRAG), if the use case requires it.
 - Extension toward GQL / post-9 constructs.
