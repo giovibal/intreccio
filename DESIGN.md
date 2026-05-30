@@ -272,7 +272,8 @@ mycypher/
   nodes (3/5) holds the data; other instances join as stateless clients. One
   Cypher write = one Raft log entry = one atomic apply on every replica, by
   replicating the transaction's *effects* (write-set) rather than re-executing the
-  query. Lives in `internal/cluster` and is linked only when used, so the embedded
+  query. Lives in the opt-in public `cluster` package and is linked only when
+  used, so the embedded
   single-binary default stays pure Go and dependency-light. See ADR 0007. (NATS
   JetStream was considered as the replication log and rejected for this purpose.)
 - Cost-based planner with statistics.

@@ -1,9 +1,21 @@
 package storage
 
-import "errors"
+import (
+	"errors"
+	"io"
+)
 
 // ErrNotFound is returned by Txn.Get when the key does not exist.
 var ErrNotFound = errors.New("storage: key not found")
+
+// Snapshotter is an optional capability for engines that can serialize and
+// restore their full contents. It is used by the clustering layer for Raft
+// snapshot/restore. Backup writes a consistent dump as of the call; Load
+// replaces the entire contents with the dump. Not every Store implements it.
+type Snapshotter interface {
+	Backup(w io.Writer) error
+	Load(r io.Reader) error
+}
 
 // Store is the minimal abstraction over the ordered KV engine. The upper layer
 // does not depend on the concrete engine (DESIGN §3).

@@ -3,10 +3,14 @@ package badger
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/giovibal/mycypher/internal/storage"
 )
+
+// loadPendingWrites bounds the concurrency of a restore Load.
+const loadPendingWrites = 256
 
 // maxRetries bounds the Update attempts on an SSI conflict.
 const maxRetries = 100
@@ -52,6 +56,29 @@ func (s *Store) Update(fn func(storage.Txn) error) error {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+var _ storage.Snapshotter = (*Store)(nil)
+
+// Backup writes a consistent dump of the whole database as of now.
+func (s *Store) Backup(w io.Writer) error {
+	_, err := s.db.Backup(w, 0)
+	if err != nil {
+		return fmt.Errorf("badger: backup: %w", err)
+	}
+	return nil
+}
+
+// Load replaces the entire database contents with the dump from r. Existing
+// data is dropped first so the result reflects exactly the snapshot.
+func (s *Store) Load(r io.Reader) error {
+	if err := s.db.DropAll(); err != nil {
+		return fmt.Errorf("badger: load: drop: %w", err)
+	}
+	if err := s.db.Load(r, loadPendingWrites); err != nil {
+		return fmt.Errorf("badger: load: %w", err)
+	}
+	return nil
+}
 
 type txn struct {
 	tx *badger.Txn

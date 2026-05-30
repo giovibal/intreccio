@@ -15,10 +15,29 @@ import (
 	badgerstore "github.com/giovibal/mycypher/internal/storage/badger"
 )
 
+// Backend is the storage/execution backend behind a DB. It is implemented by
+// the default local engine and by the optional clustering package; end users do
+// not implement it directly (use Open or cluster.Open). It exists so the
+// clustering code can route writes through Raft without the core package
+// depending on it.
+type Backend interface {
+	// View runs fn in a read-only transaction.
+	View(fn func(storage.Txn) error) error
+	// ApplyWrite executes a write via stage and durably commits/replicates its
+	// effects, returning whatever stage produced.
+	ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
+	// Close releases the backend.
+	Close() error
+}
+
 // DB is the database handle.
 type DB struct {
-	store storage.Store
+	be Backend
 }
+
+// New wraps a Backend in a DB. It is the seam used by the clustering package;
+// most callers use Open/OpenInMemory instead.
+func New(be Backend) *DB { return &DB{be: be} }
 
 // Open opens (or creates) the database in the given directory.
 func Open(path string) (*DB, error) {
@@ -26,7 +45,7 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{store: store}, nil
+	return &DB{be: &localBackend{store: store}}, nil
 }
 
 // OpenInMemory opens a fully in-RAM database (useful in tests).
@@ -35,12 +54,12 @@ func OpenInMemory() (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{store: store}, nil
+	return &DB{be: &localBackend{store: store}}, nil
 }
 
 // Close releases the database resources.
 func (db *DB) Close() error {
-	return db.store.Close()
+	return db.be.Close()
 }
 
 // Result is the outcome of a read query.
@@ -50,8 +69,8 @@ type Result struct {
 }
 
 // Query runs a Cypher query and returns the result. If the query contains any
-// write clauses (CREATE/MERGE/SET/DELETE) it runs inside a write transaction;
-// otherwise inside a read-only transaction.
+// write clauses (CREATE/MERGE/SET/DELETE) it runs as a write (committed locally,
+// or replicated when clustered); otherwise it runs as a read.
 func (db *DB) Query(ctx context.Context, cypher string, params map[string]any) (*Result, error) {
 	_ = ctx // reserved for cancellation; not consulted yet.
 	q, err := parser.Parse(cypher)
@@ -63,28 +82,46 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any) (
 		return nil, err
 	}
 
-	run := db.store.View
+	stage := func(txn storage.Txn) (any, error) {
+		return runQuery(txn, q, semaRes.Columns, params)
+	}
+
 	if isWriteQuery(q) {
-		run = db.store.Update
+		res, err := db.be.ApplyWrite(stage)
+		if err != nil {
+			return nil, fmt.Errorf("query: %w", err)
+		}
+		return res.(*Result), nil
 	}
 
 	var result *Result
-	err = run(func(txn storage.Txn) error {
-		p, err := plan.Plan(q, planCatalog{txn: txn})
+	err = db.be.View(func(txn storage.Txn) error {
+		r, err := runQuery(txn, q, semaRes.Columns, params)
 		if err != nil {
 			return err
 		}
-		rows, err := exec.Run(p, semaRes.Columns, &exec.Context{Txn: txn, Params: params})
-		if err != nil {
-			return err
-		}
-		result = &Result{Columns: semaRes.Columns, Rows: rows}
+		result = r
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	return result, nil
+}
+
+// runQuery plans and executes an already-parsed, already-analyzed query against
+// txn. It is the single execution path shared by the local and clustered
+// backends.
+func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any) (*Result, error) {
+	p, err := plan.Plan(q, planCatalog{txn: txn})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := exec.Run(p, columns, &exec.Context{Txn: txn, Params: params})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Columns: columns, Rows: rows}, nil
 }
 
 // Explain returns the textual physical plan for the given query without running
@@ -99,7 +136,7 @@ func (db *DB) Explain(ctx context.Context, cypher string) (string, error) {
 		return "", err
 	}
 	var out string
-	err = db.store.View(func(txn storage.Txn) error {
+	err = db.be.View(func(txn storage.Txn) error {
 		p, err := plan.Plan(q, planCatalog{txn: txn})
 		if err != nil {
 			return err
@@ -122,6 +159,34 @@ func isWriteQuery(q *ast.Query) bool {
 	}
 	return false
 }
+
+// localBackend is the default, non-clustered backend: a local store where writes
+// commit directly.
+type localBackend struct {
+	store storage.Store
+}
+
+var _ Backend = (*localBackend)(nil)
+
+func (b *localBackend) View(fn func(storage.Txn) error) error { return b.store.View(fn) }
+
+func (b *localBackend) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
+	var result any
+	err := b.store.Update(func(txn storage.Txn) error {
+		r, err := stage(txn)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (b *localBackend) Close() error { return b.store.Close() }
 
 // planCatalog adapts the catalog to plan.Catalog, resolving names within the
 // transaction. A missing label/key means no index, which is correct.
