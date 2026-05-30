@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/cypher/parser"
+	"github.com/giovibal/intreccio/internal/cypher/parser"
 )
 
 func analyze(t *testing.T, src string) (*Result, error) {

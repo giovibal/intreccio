@@ -4,7 +4,7 @@
 // directly.
 package plan
 
-import "github.com/giovibal/mycypher/internal/cypher/ast"
+import "github.com/giovibal/intreccio/internal/cypher/ast"
 
 // Op is a plan operator.
 type Op interface{ op() }

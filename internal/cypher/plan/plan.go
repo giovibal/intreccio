@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/giovibal/mycypher/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
 )
 
 // Catalog provides the planner with information about the available indexes. In

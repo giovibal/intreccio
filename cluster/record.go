@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/giovibal/mycypher/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 // errStaged is returned by the staging transaction to force the underlying

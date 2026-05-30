@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
 // TestSnapshotRestoreOnRestart forces a Raft snapshot, writes more, then restarts
@@ -33,7 +33,7 @@ func TestSnapshotRestoreOnRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newNode: %v", err)
 	}
-	db := mycypher.New(node)
+	db := intreccio.New(node)
 
 	// Writes that end up inside the snapshot.
 	for _, name := range []string{"A", "B"} {
@@ -66,7 +66,7 @@ func TestSnapshotRestoreOnRestart(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = node2.Close() }()
-	db2 := mycypher.New(node2)
+	db2 := intreccio.New(node2)
 
 	got := mustQuery(t, db2, matchNames)
 	if !equal(got, []string{"A", "B", "C", "D"}) {
@@ -140,7 +140,7 @@ func TestRejoinCatchUpAfterDowntime(t *testing.T) {
 	}
 	const total = 50
 
-	if got := personCount(t, tc.dbs[leader], mycypher.Linearizable()); got != total {
+	if got := personCount(t, tc.dbs[leader], intreccio.Linearizable()); got != total {
 		t.Fatalf("leader count = %d, want %d", got, total)
 	}
 
@@ -167,10 +167,10 @@ func (tc *testCluster) restart(t *testing.T, i int) {
 		t.Fatalf("restart node %d: %v", i, err)
 	}
 	tc.nodes[i] = node
-	tc.dbs[i] = mycypher.New(node)
+	tc.dbs[i] = intreccio.New(node)
 }
 
-func createPerson(t *testing.T, db *mycypher.DB, name string) {
+func createPerson(t *testing.T, db *intreccio.DB, name string) {
 	t.Helper()
 	if _, err := db.Query(context.Background(), "CREATE (n:Person {name: $n})",
 		map[string]any{"n": name}); err != nil {
@@ -178,7 +178,7 @@ func createPerson(t *testing.T, db *mycypher.DB, name string) {
 	}
 }
 
-func personCount(t *testing.T, db *mycypher.DB, opts ...mycypher.QueryOption) int64 {
+func personCount(t *testing.T, db *intreccio.DB, opts ...intreccio.QueryOption) int64 {
 	t.Helper()
 	res, err := db.Query(context.Background(), "MATCH (p:Person) RETURN count(p) AS c", nil, opts...)
 	if err != nil {
@@ -190,7 +190,7 @@ func personCount(t *testing.T, db *mycypher.DB, opts ...mycypher.QueryOption) in
 	return toInt64(t, res.Rows[0][0])
 }
 
-func waitForCountLocal(t *testing.T, db *mycypher.DB, want int64, timeout time.Duration) {
+func waitForCountLocal(t *testing.T, db *intreccio.DB, want int64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var got int64

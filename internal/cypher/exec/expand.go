@@ -3,10 +3,10 @@ package exec
 import (
 	"fmt"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/cypher/ast"
-	"github.com/giovibal/mycypher/internal/cypher/plan"
-	"github.com/giovibal/mycypher/internal/graph"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/plan"
+	"github.com/giovibal/intreccio/internal/graph"
 )
 
 func buildExpandWith(x *plan.Expand, ctx *Context, arg *argumentOp) (op, error) {

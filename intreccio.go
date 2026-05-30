@@ -1,18 +1,18 @@
-// Package mycypher is the public embeddable API of the graph DB.
-package mycypher
+// Package intreccio is the public embeddable API of the graph DB.
+package intreccio
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/cypher/ast"
-	"github.com/giovibal/mycypher/internal/cypher/exec"
-	"github.com/giovibal/mycypher/internal/cypher/parser"
-	"github.com/giovibal/mycypher/internal/cypher/plan"
-	"github.com/giovibal/mycypher/internal/cypher/sema"
-	"github.com/giovibal/mycypher/internal/storage"
-	badgerstore "github.com/giovibal/mycypher/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/exec"
+	"github.com/giovibal/intreccio/internal/cypher/parser"
+	"github.com/giovibal/intreccio/internal/cypher/plan"
+	"github.com/giovibal/intreccio/internal/cypher/sema"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 // Backend is the storage/execution backend behind a DB. It is implemented by

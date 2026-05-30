@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/hashicorp/raft"
 
-	"github.com/giovibal/mycypher/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 // fsm is the Raft finite state machine. It is the single writer to the local
@@ -19,12 +20,18 @@ type fsm struct {
 	store  storage.Store
 	snap   storage.Snapshotter
 	tmpDir string // where snapshot temp files are created
+	// storeMu guards the store against a Restore (Badger DropAll+Load, which is
+	// unsafe concurrent with any transaction) running while application reads are
+	// in flight. Restore takes it exclusively; reads take it shared. Shared with
+	// the owning Node. Apply and Snapshot run on Raft's single FSM goroutine, so
+	// they never overlap Restore and do not need it.
+	storeMu *sync.RWMutex
 }
 
 var _ raft.FSM = (*fsm)(nil)
 
-func newFSM(store storage.Store, snap storage.Snapshotter, tmpDir string) *fsm {
-	return &fsm{store: store, snap: snap, tmpDir: tmpDir}
+func newFSM(store storage.Store, snap storage.Snapshotter, tmpDir string, storeMu *sync.RWMutex) *fsm {
+	return &fsm{store: store, snap: snap, tmpDir: tmpDir, storeMu: storeMu}
 }
 
 // Apply applies one committed log entry (a write-set) to the local store.
@@ -58,9 +65,12 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	return &fsmSnapshot{path: tmp.Name()}, nil
 }
 
-// Restore replaces the entire store contents with a snapshot.
+// Restore replaces the entire store contents with a snapshot. It takes the store
+// lock exclusively so no read transaction is open during Badger's DropAll+Load.
 func (f *fsm) Restore(rc io.ReadCloser) error {
 	defer func() { _ = rc.Close() }()
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
 	if err := f.snap.Load(rc); err != nil {
 		return fmt.Errorf("fsm: restore: %w", err)
 	}

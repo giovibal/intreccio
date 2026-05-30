@@ -1,4 +1,4 @@
-module github.com/giovibal/mycypher
+module github.com/giovibal/intreccio
 
 go 1.26
 

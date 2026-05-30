@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/storage"
-	badgerstore "github.com/giovibal/mycypher/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 // TestRecordTxnStageReplay covers the recording transaction end to end:

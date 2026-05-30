@@ -12,7 +12,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
 // Build metadata. Overridden at release time via -ldflags "-X main.version=...";
@@ -39,14 +39,14 @@ func buildVersion() string {
 
 // versionString formats the full one-line version banner.
 func versionString() string {
-	return fmt.Sprintf("mycypher %s (commit %s, built %s)", buildVersion(), commit, date)
+	return fmt.Sprintf("intreccio %s (commit %s, built %s)", buildVersion(), commit, date)
 }
 
 func main() {
 	cmdline := flag.String("c", "", "execute a single query and exit")
 	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: mycypher [-c QUERY] [path]")
+		fmt.Fprintln(os.Stderr, "Usage: intreccio [-c QUERY] [path]")
 		fmt.Fprintln(os.Stderr, "If [path] is omitted, an in-memory database is opened.")
 		flag.PrintDefaults()
 	}
@@ -82,11 +82,11 @@ func main() {
 // DB. It stays nil in the default build, so the default binary never links the
 // clustering package or Raft. It returns (db, true) when cluster mode is
 // requested via flags.
-var clusterOpen func() (*mycypher.DB, bool, error)
+var clusterOpen func() (*intreccio.DB, bool, error)
 
 // openSelected opens a clustered DB when cluster flags are present (only in the
 // `-tags cluster` build), otherwise a local one.
-func openSelected(path string) (*mycypher.DB, error) {
+func openSelected(path string) (*intreccio.DB, error) {
 	if clusterOpen != nil {
 		if db, ok, err := clusterOpen(); ok || err != nil {
 			return db, err
@@ -95,22 +95,22 @@ func openSelected(path string) (*mycypher.DB, error) {
 	return openDB(path)
 }
 
-func openDB(path string) (*mycypher.DB, error) {
+func openDB(path string) (*intreccio.DB, error) {
 	if path == "" {
-		return mycypher.OpenInMemory()
+		return intreccio.OpenInMemory()
 	}
-	return mycypher.Open(path)
+	return intreccio.Open(path)
 }
 
 // repl runs the read-eval-print loop, reading multi-line statements terminated
 // by ';' from in and writing results to out / errors to errOut.
-func repl(db *mycypher.DB, in io.Reader, out, errOut io.Writer) {
+func repl(db *intreccio.DB, in io.Reader, out, errOut io.Writer) {
 	tty := false
 	if f, ok := in.(*os.File); ok {
 		tty = isTerminal(f)
 	}
 	if tty {
-		// _, _ = fmt.Fprintln(out, "mycypher REPL — end statements with ';', type :quit to exit, :help for help")
+		// _, _ = fmt.Fprintln(out, "intreccio REPL — end statements with ';', type :quit to exit, :help for help")
 		printHelp(out)
 	}
 
@@ -202,7 +202,7 @@ func openEditor(initial string) (string, error) {
 		editor = "vi"
 	}
 
-	f, err := os.CreateTemp("", "mycypher-*.cypher")
+	f, err := os.CreateTemp("", "intreccio-*.cypher")
 	if err != nil {
 		return "", fmt.Errorf("edit: create temp: %w", err)
 	}
@@ -236,7 +236,7 @@ func openEditor(initial string) (string, error) {
 
 // runBatch splits content on ';' and runs each non-empty statement in order.
 // Errors are reported on errOut but do not interrupt the batch.
-func runBatch(db *mycypher.DB, content string, out, errOut io.Writer) {
+func runBatch(db *intreccio.DB, content string, out, errOut io.Writer) {
 	for _, stmt := range strings.Split(content, ";") {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
@@ -249,7 +249,7 @@ func runBatch(db *mycypher.DB, content string, out, errOut io.Writer) {
 }
 
 // execute runs a single query and writes the formatted result to out.
-func execute(db *mycypher.DB, query string, out io.Writer) error {
+func execute(db *intreccio.DB, query string, out io.Writer) error {
 	res, err := db.Query(context.Background(), query, nil)
 	if err != nil {
 		return err
@@ -258,7 +258,7 @@ func execute(db *mycypher.DB, query string, out io.Writer) error {
 	return nil
 }
 
-func printResult(out io.Writer, res *mycypher.Result) {
+func printResult(out io.Writer, res *intreccio.Result) {
 	if len(res.Columns) == 0 {
 		_, _ = fmt.Fprintln(out, "OK")
 		return

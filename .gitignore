@@ -1,5 +1,5 @@
 /data/
 /dist/
-/mycypher
+/intreccio
 *.test
 *.out

@@ -36,7 +36,7 @@ tidy:
 	go mod tidy
 
 run:
-	go run ./cmd/mycypher
+	go run ./cmd/intreccio
 
 # dist cross-compiles the CLI for every target in PLATFORMS into $(DIST)/.
 # Pure Go: CGO_ENABLED=0 keeps the no-cgo invariant and makes cross-compilation
@@ -46,15 +46,15 @@ dist: clean-dist
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
 		ext=; if [ "$$os" = "windows" ]; then ext=.exe; fi; \
-		out=$(DIST)/mycypher_$(VERSION)_$${os}_$${arch}$$ext; \
+		out=$(DIST)/intreccio_$(VERSION)_$${os}_$${arch}$$ext; \
 		echo "building $$out"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
-			go build -trimpath -ldflags '$(LDFLAGS)' -o $$out ./cmd/mycypher || exit 1; \
+			go build -trimpath -ldflags '$(LDFLAGS)' -o $$out ./cmd/intreccio || exit 1; \
 	done
 
 # checksums writes a SHA-256 manifest of the dist artifacts.
 checksums:
-	@cd $(DIST) && $(SHASUM) mycypher_* > checksums.txt && echo "wrote $(DIST)/checksums.txt"
+	@cd $(DIST) && $(SHASUM) intreccio_* > checksums.txt && echo "wrote $(DIST)/checksums.txt"
 
 clean-dist:
 	rm -rf $(DIST)

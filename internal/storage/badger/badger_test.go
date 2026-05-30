@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 func newStore(t *testing.T) *Store {

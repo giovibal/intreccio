@@ -21,7 +21,7 @@
 - `go mod init`, package layout as in `DESIGN.md §11`.
 - Toolchain: `golangci-lint`, `go test`, `Makefile`/`Taskfile` targets.
 - Minimal CI (build + test + lint).
-- `cmd/mycypher` with a main that opens/closes an empty DB.
+- `cmd/intreccio` with a main that opens/closes an empty DB.
 
 **Done when:** `go build ./...`, `go test ./...`, `golangci-lint run` pass in CI.
 
@@ -159,7 +159,7 @@ cycles (verify no-repeated-relationship).
 **Deliverable:** indexes managed via Cypher and used by the planner.
 - `CREATE INDEX` on `(:Label).prop`; backfill of existing data.
 - The planner picks the index when available.
-- CLI/REPL in `cmd/mycypher` for interactive use.
+- CLI/REPL in `cmd/intreccio` for interactive use.
 
 **Tests:** after `CREATE INDEX`, a query with equality uses the index (verifiable
 via `EXPLAIN`) and the results stay identical.

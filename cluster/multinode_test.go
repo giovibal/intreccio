@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
 // testCluster is an in-process cluster of voters for integration tests.
 type testCluster struct {
 	nodes   []*Node
-	dbs     []*mycypher.DB
+	dbs     []*intreccio.DB
 	peers   []Peer
 	configs []Config
 }
@@ -49,7 +49,7 @@ func startCluster(t *testing.T, n int, opts ...func(*Config)) *testCluster {
 			t.Fatalf("start node %s: %v", cfg.NodeID, err)
 		}
 		tc.nodes = append(tc.nodes, node)
-		tc.dbs = append(tc.dbs, mycypher.New(node))
+		tc.dbs = append(tc.dbs, intreccio.New(node))
 		tc.configs = append(tc.configs, cfg)
 	}
 	t.Cleanup(func() {
@@ -91,7 +91,7 @@ func (tc *testCluster) aFollower(t *testing.T) int {
 	return -1
 }
 
-func mustQuery(t *testing.T, db *mycypher.DB, cypher string, opts ...mycypher.QueryOption) []string {
+func mustQuery(t *testing.T, db *intreccio.DB, cypher string, opts ...intreccio.QueryOption) []string {
 	t.Helper()
 	res, err := db.Query(context.Background(), cypher, nil, opts...)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestThreeVoterForwardingAndReplication(t *testing.T) {
 
 	// Linearizable read on another follower sees it (routed via the leader).
 	other := tc.aFollower(t)
-	if got := mustQuery(t, tc.dbs[other], matchNames, mycypher.Linearizable()); !equal(got, []string{"Alice"}) {
+	if got := mustQuery(t, tc.dbs[other], matchNames, intreccio.Linearizable()); !equal(got, []string{"Alice"}) {
 		t.Fatalf("linearizable read = %v, want [Alice]", got)
 	}
 
@@ -139,7 +139,7 @@ func TestLinearizableReadYourWrites(t *testing.T) {
 	}
 
 	follower := tc.aFollower(t)
-	if got := mustQuery(t, tc.dbs[follower], matchNames, mycypher.Linearizable()); !equal(got, []string{"Bob"}) {
+	if got := mustQuery(t, tc.dbs[follower], matchNames, intreccio.Linearizable()); !equal(got, []string{"Bob"}) {
 		t.Fatalf("read-your-writes (linearizable) = %v, want [Bob]", got)
 	}
 }
@@ -168,7 +168,7 @@ func TestLeaderFailover(t *testing.T) {
 	}
 
 	// Old data survives, readable via a surviving node (linearizable).
-	if got := mustQuery(t, tc.dbs[newLead], matchNames, mycypher.Linearizable()); !equal(got, []string{"Alice"}) {
+	if got := mustQuery(t, tc.dbs[newLead], matchNames, intreccio.Linearizable()); !equal(got, []string{"Alice"}) {
 		t.Fatalf("after failover read = %v, want [Alice]", got)
 	}
 
@@ -178,14 +178,14 @@ func TestLeaderFailover(t *testing.T) {
 		"CREATE (n:Person {name: 'Carol'})", nil); err != nil {
 		t.Fatalf("write after failover: %v", err)
 	}
-	if got := mustQuery(t, tc.dbs[newLead], matchNames, mycypher.Linearizable()); !equal(got, []string{"Alice", "Carol"}) {
+	if got := mustQuery(t, tc.dbs[newLead], matchNames, intreccio.Linearizable()); !equal(got, []string{"Alice", "Carol"}) {
 		t.Fatalf("after failover write = %v, want [Alice Carol]", got)
 	}
 }
 
 // waitForLocal polls a node's local (non-linearizable) read until it matches
 // want, proving the write replicated to that node's store.
-func waitForLocal(t *testing.T, db *mycypher.DB, want []string) {
+func waitForLocal(t *testing.T, db *intreccio.DB, want []string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	var got []string

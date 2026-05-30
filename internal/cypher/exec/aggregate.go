@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/mycypher/internal/cypher/ast"
-	"github.com/giovibal/mycypher/internal/cypher/plan"
-	"github.com/giovibal/mycypher/internal/graph"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/plan"
+	"github.com/giovibal/intreccio/internal/graph"
 )
 
 // aggregateOp implements grouped aggregation. It reads all input rows, places

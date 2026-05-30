@@ -1,4 +1,4 @@
-# DESIGN — Embedded graph DB in pure Go (`mycypher`)
+# DESIGN — Embedded graph DB in pure Go (`intreccio`)
 
 > High-level design document. It is the source of truth for the architecture.
 > `PLAN.md` translates this design into development phases; `CLAUDE.md` extracts
@@ -222,7 +222,7 @@ for v1.
 ## 10. Embeddable API (draft)
 
 ```go
-db, err := mycypher.Open("data/")   // open/create the database
+db, err := intreccio.Open("data/")   // open/create the database
 defer db.Close()
 
 res, err := db.Query(ctx, `
@@ -243,8 +243,8 @@ stay separate (`Query` read-only, `Execute` write). Decision in Phase 7.
 ## 11. Project layout (Go)
 
 ```
-mycypher/
-  cmd/mycypher/         # CLI/REPL entrypoint (single binary)
+intreccio/
+  cmd/intreccio/         # CLI/REPL entrypoint (single binary)
   internal/
     storage/            # Store interface + engine adapters
       codec/            # key & value encoding (order-preserving)
@@ -258,13 +258,13 @@ mycypher/
       sema/             # semantic analysis / binding
       plan/             # logical+physical plan, rule-based planner
       exec/             # executor operators (Volcano)
-  mycypher.go           # public embeddable API (package mycypher)
+  intreccio.go           # public embeddable API (package intreccio)
   CLAUDE.md DESIGN.md PLAN.md
   go.mod
 ```
 
 > `internal/` for everything that is not public API; the embeddable API lives in
-> the root `mycypher` package. Module name: `github.com/giovibal/mycypher`.
+> the root `intreccio` package. Module name: `github.com/giovibal/intreccio`.
 
 ## 12. Future evolution (outside v1)
 - **Replication / distribution (v2, opt-in)**: a Raft-replicated state machine

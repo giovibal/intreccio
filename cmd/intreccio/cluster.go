@@ -12,8 +12,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/giovibal/mycypher"
-	"github.com/giovibal/mycypher/cluster"
+	"github.com/giovibal/intreccio"
+	"github.com/giovibal/intreccio/cluster"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 func init() { clusterOpen = openCluster }
 
 // openCluster opens a clustered DB when -cluster-id is set.
-func openCluster() (*mycypher.DB, bool, error) {
+func openCluster() (*intreccio.DB, bool, error) {
 	if *clusterID == "" {
 		return nil, false, nil // not cluster mode
 	}

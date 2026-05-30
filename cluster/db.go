@@ -1,8 +1,8 @@
 package cluster
 
-import "github.com/giovibal/mycypher"
+import "github.com/giovibal/intreccio"
 
-// Open starts a clustered node and returns it as a ready-to-use *mycypher.DB.
+// Open starts a clustered node and returns it as a ready-to-use *intreccio.DB.
 // The returned DB has the same API as an embedded one (Query, Explain, Close).
 //
 // A RoleVoter node holds a replica and participates in consensus: writes are
@@ -11,19 +11,19 @@ import "github.com/giovibal/mycypher"
 // instances that should share the database without replicating it.
 //
 // This is the single public entry point for clustering. Importing this package
-// is what links the Raft stack; programs that only use mycypher.Open are
+// is what links the Raft stack; programs that only use intreccio.Open are
 // unaffected.
-func Open(cfg Config) (*mycypher.DB, error) {
+func Open(cfg Config) (*intreccio.DB, error) {
 	if cfg.Role == RoleClient {
 		c, err := newClient(cfg)
 		if err != nil {
 			return nil, err
 		}
-		return mycypher.New(c), nil
+		return intreccio.New(c), nil
 	}
 	node, err := newNode(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return mycypher.New(node), nil
+	return intreccio.New(node), nil
 }

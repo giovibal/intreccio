@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
-func newDB(t *testing.T) *mycypher.DB {
+func newDB(t *testing.T) *intreccio.DB {
 	t.Helper()
-	db, err := mycypher.OpenInMemory()
+	db, err := intreccio.OpenInMemory()
 	if err != nil {
 		t.Fatalf("OpenInMemory: %v", err)
 	}
@@ -127,8 +127,8 @@ func TestRunBatchSkipsEmptyAndContinuesOnError(t *testing.T) {
 
 func TestVersionString(t *testing.T) {
 	got := versionString()
-	if !strings.HasPrefix(got, "mycypher ") {
-		t.Errorf("version string = %q, want prefix %q", got, "mycypher ")
+	if !strings.HasPrefix(got, "intreccio ") {
+		t.Errorf("version string = %q, want prefix %q", got, "intreccio ")
 	}
 	for _, want := range []string{buildVersion(), "commit " + commit, "built " + date} {
 		if !strings.Contains(got, want) {

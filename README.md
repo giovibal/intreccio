@@ -1,4 +1,4 @@
-# mycypher
+# intreccio
 
 An **embedded**, **single-binary** graph database written in **pure Go** (no cgo)
 that speaks a useful subset of **openCypher 9**. It targets **OLTP /
@@ -31,14 +31,14 @@ Requirements: Go 1.26+ (for importers and for building from source).
 
 ```bash
 # use as a library in your own project
-go get github.com/giovibal/mycypher
+go get github.com/giovibal/intreccio
 
 # install the CLI/REPL
-go install github.com/giovibal/mycypher/cmd/mycypher@latest
+go install github.com/giovibal/intreccio/cmd/intreccio@latest
 ```
 
 Prebuilt CLI binaries for Linux, macOS and Windows (amd64/arm64) are attached to
-each [GitHub Release](https://github.com/giovibal/mycypher/releases); download the
+each [GitHub Release](https://github.com/giovibal/intreccio/releases); download the
 one for your platform and verify it against the published `checksums.txt`.
 
 ## Getting started
@@ -48,24 +48,24 @@ go build ./...        # build
 go test ./...         # run tests
 make race             # tests with the race detector
 make lint             # golangci-lint (v2)
-go run ./cmd/mycypher # interactive REPL on an in-memory database
+go run ./cmd/intreccio # interactive REPL on an in-memory database
 ```
 
 ### CLI / REPL
 
-The `mycypher` binary opens either a directory-backed database or an in-memory
+The `intreccio` binary opens either a directory-backed database or an in-memory
 one if no path is given, and accepts Cypher statements interactively (terminated
 by `;`) or as a one-shot via `-c`:
 
 ```bash
 # interactive REPL on an in-memory database
-mycypher
+intreccio
 
 # one-shot
-mycypher -c "CREATE (n:Person {name: 'Bob'}) RETURN n.name AS name"
+intreccio -c "CREATE (n:Person {name: 'Bob'}) RETURN n.name AS name"
 
 # persistent database under data/
-mycypher data/
+intreccio data/
 ```
 
 REPL commands: `:quit` / `:exit` to leave, `:help` for a short help. Statements
@@ -77,7 +77,7 @@ literal is not currently recognized as a statement boundary).
 The library supports both reads and writes through `Query`:
 
 ```go
-db, err := mycypher.Open("data/") // open/create the database
+db, err := intreccio.Open("data/") // open/create the database
 if err != nil {
     log.Fatal(err)
 }
@@ -94,17 +94,17 @@ res, err := db.Query(ctx, `
 
 ## Clustering (optional, high availability)
 
-For high availability, mycypher can run as a **Raft-replicated** cluster,
+For high availability, intreccio can run as a **Raft-replicated** cluster,
 configured entirely from the library. A small quorum of **voters** (3 or 5) holds
 the data and replicates every write through Raft; additional service instances
 join as dataless **clients** that forward queries to the voters — so you get HA
 without replicating to every instance. Clustering lives in the opt-in `cluster`
 package and is **linked only when you import it**: programs that use
-`mycypher.Open` stay embedded-only and never pull in Raft. See
+`intreccio.Open` stay embedded-only and never pull in Raft. See
 `docs/adr/0007-clustering-raft.md`.
 
 ```go
-import "github.com/giovibal/mycypher/cluster"
+import "github.com/giovibal/intreccio/cluster"
 
 voters := []cluster.Peer{
     {ID: "n1", RaftAddr: "10.0.0.1:7000", ForwardAddr: "10.0.0.1:7001"},
@@ -127,12 +127,12 @@ db, err := cluster.Open(cluster.Config{
 // Same query API. One Cypher write = one linearizable transaction.
 db.Query(ctx, "CREATE (n:Person {name: $n})", map[string]any{"n": "Bob"})
 db.Query(ctx, "MATCH (p:Person) RETURN p.name", nil)                    // fast local read
-db.Query(ctx, "MATCH (p:Person) RETURN p.name", nil, mycypher.Linearizable()) // strong read
+db.Query(ctx, "MATCH (p:Person) RETURN p.name", nil, intreccio.Linearizable()) // strong read
 ```
 
 Notes for operators:
 - **Reads** default to fast, possibly slightly stale local snapshots; pass
-  `mycypher.Linearizable()` for read-your-writes (served via the leader).
+  `intreccio.Linearizable()` for read-your-writes (served via the leader).
 - **Writes** are serialized through the leader and committed by a quorum; losing
   a minority of voters keeps the cluster available, losing a majority halts writes
   (safety over availability — no split brain).
@@ -145,8 +145,8 @@ A cluster-capable build of the CLI is available behind a build tag (it links Raf
 so it is not the default binary):
 
 ```bash
-go build -tags cluster ./cmd/mycypher
-mycypher -cluster-id n1 -cluster-data data/n1 \
+go build -tags cluster ./cmd/intreccio
+intreccio -cluster-id n1 -cluster-data data/n1 \
   -cluster-bind 10.0.0.1:7000 -cluster-forward 10.0.0.1:7001 \
   -cluster-bootstrap -cluster-peers 'n1=10.0.0.1:7000=10.0.0.1:7001,...'
 ```
@@ -176,7 +176,7 @@ range predicates.
 ## Project layout
 
 ```
-cmd/mycypher/            CLI/REPL entrypoint (single binary)
+cmd/intreccio/            CLI/REPL entrypoint (single binary)
 internal/
   storage/               Store interface + engine adapters
     codec/               order-preserving key & value encoding
@@ -190,11 +190,11 @@ internal/
     sema/                semantic analysis
     plan/                rule-based planner + EXPLAIN
     exec/                executor operators (Volcano)
-mycypher.go              public embeddable API (package mycypher)
+intreccio.go              public embeddable API (package intreccio)
 docs/adr/                architecture decision records
 ```
 
-The public, embeddable API lives in the root `mycypher` package; everything else
+The public, embeddable API lives in the root `intreccio` package; everything else
 is under `internal/`.
 
 ## Supported Cypher

@@ -1,4 +1,4 @@
-package mycypher
+package intreccio
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/graph"
-	"github.com/giovibal/mycypher/internal/storage"
+	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 func TestOpenClose(t *testing.T) {
