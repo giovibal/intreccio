@@ -9,30 +9,39 @@ const (
 	RoleVoter Role = iota
 	// RoleClient holds no data and forwards queries to a data node. Used by extra
 	// service instances so they share the database without replicating it.
-	// (Forwarding is implemented in Phase C/D; Phase B supports voters only.)
+	// (The client role arrives in Phase D; Phases B–C support voters.)
 	RoleClient
 )
 
-// Peer is a seed member used to form or join a cluster.
+// Peer identifies a voter in the cluster: its Raft server identity/address and
+// the address of its forwarding RPC endpoint. Every node is configured with the
+// full set of voters (including itself) so any node can locate the leader's
+// forwarding endpoint.
 type Peer struct {
-	ID      string
-	Address string
+	ID          string // Raft ServerID
+	RaftAddr    string // Raft transport address (host:port)
+	ForwardAddr string // forwarding RPC address (host:port)
 }
 
 // Config configures a clustered node. It is supplied from the library by the
 // embedding service (see cluster.Open).
 type Config struct {
-	// NodeID is a stable, cluster-unique identifier for this node.
+	// NodeID is a stable, cluster-unique identifier for this node (Raft ServerID).
 	NodeID string
 	// DataDir holds the local store and the Raft log/snapshots (voters only).
 	DataDir string
 	// BindAddr is the address the Raft transport listens on (host:port).
 	BindAddr string
-	// Role is the part this node plays. Phase B: RoleVoter only.
+	// ForwardAddr is the address the forwarding RPC server listens on (host:port).
+	// Followers forward writes (and linearizable reads) to the leader here.
+	ForwardAddr string
+	// Role is the part this node plays. Phases B–C: RoleVoter only.
 	Role Role
-	// Bootstrap forms a brand-new single-node cluster to grow from. Exactly one
-	// node bootstraps a fresh cluster; the rest join an existing one.
+	// Bootstrap forms a brand-new cluster. Exactly one node bootstraps; it then
+	// adds the other voters from Peers. On restart Bootstrap is ignored (the
+	// configuration is recovered from the Raft log).
 	Bootstrap bool
-	// Peers are seed members (used when joining; Phase C+).
+	// Peers is the full set of voters (including this node), used to add members
+	// after bootstrap and to resolve the leader's forwarding address.
 	Peers []Peer
 }

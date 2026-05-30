@@ -24,13 +24,13 @@ func freeAddr(t *testing.T) string {
 // has the data (durability + Raft restart).
 func TestSingleVoterReadWriteAndReopen(t *testing.T) {
 	dir := t.TempDir()
-	addr := freeAddr(t)
 	cfg := Config{
-		NodeID:    "n1",
-		DataDir:   dir,
-		BindAddr:  addr,
-		Role:      RoleVoter,
-		Bootstrap: true,
+		NodeID:      "n1",
+		DataDir:     dir,
+		BindAddr:    freeAddr(t),
+		ForwardAddr: freeAddr(t),
+		Role:        RoleVoter,
+		Bootstrap:   true,
 	}
 
 	ctx := context.Background()
