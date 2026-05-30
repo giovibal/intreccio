@@ -17,7 +17,10 @@ analytical OLAP engine.
 - **Storage engine**: BadgerDB by default, behind the `Store` interface. bbolt
   as an alternative adapter. The upper layer **must not** depend on the concrete
   engine.
-- No OLAP, no vectorization, no distribution in v1.
+- No OLAP, no vectorization. **Distribution/clustering is a v2, opt-in
+  capability** (Raft-replicated, the public `cluster` package; see ADR 0007): the embedded
+  single-binary default path must stay pure Go and must **not** link the
+  clustering code or its dependencies.
 
 ## Correctness invariants
 1. **Index consistency**: every mutation updates the base record **and all** of

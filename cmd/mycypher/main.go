@@ -57,7 +57,7 @@ func main() {
 		return
 	}
 
-	db, err := openDB(flag.Arg(0))
+	db, err := openSelected(flag.Arg(0))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 		os.Exit(1)
@@ -76,6 +76,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "(no path given: opened in-memory database)")
 	}
 	repl(db, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// clusterOpen is set by the `cluster` build tag (cluster.go) to open a clustered
+// DB. It stays nil in the default build, so the default binary never links the
+// clustering package or Raft. It returns (db, true) when cluster mode is
+// requested via flags.
+var clusterOpen func() (*mycypher.DB, bool, error)
+
+// openSelected opens a clustered DB when cluster flags are present (only in the
+// `-tags cluster` build), otherwise a local one.
+func openSelected(path string) (*mycypher.DB, error) {
+	if clusterOpen != nil {
+		if db, ok, err := clusterOpen(); ok || err != nil {
+			return db, err
+		}
+	}
+	return openDB(path)
 }
 
 func openDB(path string) (*mycypher.DB, error) {

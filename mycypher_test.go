@@ -30,6 +30,10 @@ func newDB(t *testing.T) *DB {
 	return db
 }
 
+// storeOf reaches the local backend's store for tests that seed via the graph
+// layer directly.
+func storeOf(db *DB) storage.Store { return db.be.(*localBackend).store }
+
 func mustQuery(t *testing.T, db *DB, cypher string, params map[string]any) *Result {
 	t.Helper()
 	res, err := db.Query(context.Background(), cypher, params)
@@ -42,7 +46,7 @@ func mustQuery(t *testing.T, db *DB, cypher string, params map[string]any) *Resu
 // TestQueryEndToEnd seeds via the graph layer (as before) and reads via Query.
 func TestQueryEndToEnd(t *testing.T) {
 	db := newDB(t)
-	if err := db.store.Update(func(tx storage.Txn) error {
+	if err := storeOf(db).Update(func(tx storage.Txn) error {
 		alice, err := graph.CreateNode(tx, []string{"Person"}, map[string]any{"name": "Alice", "email": "a@b.com"})
 		if err != nil {
 			return err
