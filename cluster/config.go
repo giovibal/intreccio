@@ -7,9 +7,9 @@ const (
 	// RoleVoter holds a full data replica and votes in consensus. The quorum of
 	// voters (typically 3 or 5) provides high availability.
 	RoleVoter Role = iota
-	// RoleClient holds no data and forwards queries to a data node. Used by extra
-	// service instances so they share the database without replicating it.
-	// (The client role arrives in Phase D; Phases B–C support voters.)
+	// RoleClient holds no data and forwards every query to a voter. Used by extra
+	// service instances so they share the database without replicating it. A
+	// client needs only NodeID and Peers (with ForwardAddr); it runs no Raft.
 	RoleClient
 )
 

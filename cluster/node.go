@@ -181,9 +181,12 @@ func (n *Node) ReadBarrier() error {
 
 // Forward sends a query to the leader for execution (used by followers for
 // writes and linearizable reads).
-func (n *Node) Forward(cypher string, params map[string]any, linearizable bool) ([]string, [][]any, error) {
-	return n.forwardToLeader(cypher, params, linearizable)
+func (n *Node) Forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+	return n.forward(cypher, params, write, linearizable)
 }
+
+// Local reports that a voter can serve reads from its local store.
+func (n *Node) Local() bool { return true }
 
 // SetLocalExecutor wires the root package's local query execution, used by the
 // leader to run forwarded queries.

@@ -13,6 +13,7 @@ import (
 type testCluster struct {
 	nodes []*Node
 	dbs   []*mycypher.DB
+	peers []Peer
 }
 
 // startCluster brings up n voters (node 0 bootstraps and adds the rest).
@@ -27,7 +28,7 @@ func startCluster(t *testing.T, n int) *testCluster {
 		}
 	}
 
-	tc := &testCluster{}
+	tc := &testCluster{peers: peers}
 	for i := range n {
 		cfg := Config{
 			NodeID:      peers[i].ID,

@@ -51,8 +51,11 @@ func New(be Backend) *DB {
 // an interface assertion so the embedded path is unaffected.
 type clusterBackend interface {
 	IsLeader() bool
+	// Local reports whether the backend can serve reads from a local store. A
+	// dataless client returns false, so every query is forwarded.
+	Local() bool
 	ReadBarrier() error
-	Forward(cypher string, params map[string]any, linearizable bool) ([]string, [][]any, error)
+	Forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error)
 }
 
 // localExecutorSetter lets a backend receive this DB's local executor (used by a
@@ -121,12 +124,15 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 	}
 	write := isWriteQuery(q)
 
-	// Clustered routing: writes and linearizable reads must be served by the
-	// leader. A follower forwards them; the leader serves them locally (issuing a
-	// read barrier first for linearizable reads).
+	// Clustered routing. A dataless client forwards everything. A voter serves
+	// reads locally and writes/linearizable reads via the leader (forwarding when
+	// it is not the leader; issuing a read barrier first when it is).
 	if cb, ok := db.be.(clusterBackend); ok {
-		if (write || o.linearizable) && !cb.IsLeader() {
-			cols, rows, err := cb.Forward(cypher, params, o.linearizable && !write)
+		forward := !cb.Local() ||
+			(write && !cb.IsLeader()) ||
+			(o.linearizable && !write && !cb.IsLeader())
+		if forward {
+			cols, rows, err := cb.Forward(cypher, params, write, o.linearizable && !write)
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
 			}

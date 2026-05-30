@@ -37,6 +37,7 @@ func init() {
 type ForwardArgs struct {
 	Cypher       string
 	Params       map[string]any
+	Write        bool
 	Linearizable bool
 }
 
@@ -48,24 +49,38 @@ type ForwardReply struct {
 	Err     string
 }
 
-// forwardService is the net/rpc receiver registered on every node. Followers
-// dial it on the leader.
+// needsLeader reports whether the request must be served by the leader: writes
+// (replicated) and linearizable reads. Default reads can be served by any voter.
+func (a *ForwardArgs) needsLeader() bool { return a.Write || a.Linearizable }
+
+// forwardService is the net/rpc receiver registered on every voter. Followers
+// dial the leader directly; dataless clients dial any voter, which serves
+// default reads locally and proxies leader-bound requests to the leader.
 type forwardService struct{ node *Node }
 
-// Query executes a forwarded query on the leader. Errors are returned in
-// reply.Err (not as the RPC error) so the client sees the original message.
+// Query serves a forwarded query. Errors are returned in reply.Err (not as the
+// RPC error) so the caller sees the original message.
 func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
-	if s.node.raft.State() != raft.Leader {
-		reply.Err = errNotLeader.Error()
+	n := s.node
+
+	// Leader-bound request received by a non-leader voter: proxy to the leader.
+	if args.needsLeader() && n.raft.State() != raft.Leader {
+		rep, err := n.callLeader(args)
+		if err != nil {
+			reply.Err = err.Error()
+			return nil
+		}
+		*reply = *rep
 		return nil
 	}
+
 	if args.Linearizable {
-		if err := s.node.raft.Barrier(applyTimeout).Error(); err != nil {
+		if err := n.raft.Barrier(applyTimeout).Error(); err != nil {
 			reply.Err = fmt.Sprintf("cluster: read barrier: %v", err)
 			return nil
 		}
 	}
-	exec := s.node.localExec
+	exec := n.localExec
 	if exec == nil {
 		reply.Err = "cluster: no local executor wired"
 		return nil
@@ -95,32 +110,52 @@ func (n *Node) startForwardServer() error {
 	return nil
 }
 
-// forwardToLeader sends a query to the current leader's forwarding endpoint.
-func (n *Node) forwardToLeader(cypher string, params map[string]any, linearizable bool) ([]string, [][]any, error) {
+// callLeader resolves the current leader's forwarding address and forwards args
+// to it unchanged (used by a follower/voter that received a leader-bound query).
+func (n *Node) callLeader(args *ForwardArgs) (*ForwardReply, error) {
 	_, leaderID := n.raft.LeaderWithID()
 	if leaderID == "" {
-		return nil, nil, errors.New("cluster: no leader available")
+		return nil, errors.New("cluster: no leader available")
 	}
 	addr, ok := n.forwardAddrByID[string(leaderID)]
 	if !ok {
-		return nil, nil, fmt.Errorf("cluster: no forwarding address for leader %q", leaderID)
+		return nil, fmt.Errorf("cluster: no forwarding address for leader %q", leaderID)
 	}
+	return dialAndCall(addr, args)
+}
 
+// forward is the voter-side entry used by the root router: it forwards a query
+// to the leader (writes, linearizable reads) and returns desanitized rows.
+func (n *Node) forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+	args := &ForwardArgs{
+		Cypher:       cypher,
+		Params:       sanitizeParams(params),
+		Write:        write,
+		Linearizable: linearizable,
+	}
+	rep, err := n.callLeader(args)
+	if err != nil {
+		return nil, nil, err
+	}
+	if rep.Err != "" {
+		return nil, nil, errors.New(rep.Err)
+	}
+	return rep.Columns, desanitizeRows(rep.Rows), nil
+}
+
+// dialAndCall performs a single forwarding RPC to addr.
+func dialAndCall(addr string, args *ForwardArgs) (*ForwardReply, error) {
 	client, err := rpc.Dial("tcp", addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cluster: dial leader: %w", err)
+		return nil, fmt.Errorf("cluster: dial %s: %w", addr, err)
 	}
 	defer func() { _ = client.Close() }()
 
-	args := &ForwardArgs{Cypher: cypher, Params: sanitizeParams(params), Linearizable: linearizable}
 	var reply ForwardReply
 	if err := client.Call("Forward.Query", args, &reply); err != nil {
-		return nil, nil, fmt.Errorf("cluster: forward call: %w", err)
+		return nil, fmt.Errorf("cluster: forward call: %w", err)
 	}
-	if reply.Err != "" {
-		return nil, nil, errors.New(reply.Err)
-	}
-	return reply.Columns, desanitizeRows(reply.Rows), nil
+	return &reply, nil
 }
 
 // --- nil-safe wire sanitization -------------------------------------------------
