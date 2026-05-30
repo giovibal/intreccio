@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/mark.svg" alt="intreccio" width="104" height="104">
+</p>
+
 # intreccio
 
 > **Intreccio** — Italian for *interweaving / interlacing*, and figuratively a

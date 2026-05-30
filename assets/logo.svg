@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 80" width="300" height="80" role="img" aria-label="intreccio">
+  <title>intreccio</title>
+  <!-- Mark: two interlocked, woven loops with graph nodes -->
+  <g transform="translate(8,8)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="14" y="14" width="26" height="26" rx="9" stroke="#7C5CFF" stroke-width="5"/>
+      <rect x="24" y="24" width="26" height="26" rx="9" stroke="#12C2A6" stroke-width="5"/>
+      <path d="M40 20.5 L40 27.5" stroke="#7C5CFF" stroke-width="5"/>
+    </g>
+    <g fill="#F6A833">
+      <circle cx="27" cy="14" r="2.8"/>
+      <circle cx="14" cy="37" r="2.8"/>
+      <circle cx="50" cy="27" r="2.8"/>
+      <circle cx="37" cy="50" r="2.8"/>
+    </g>
+  </g>
+  <!-- Wordmark -->
+  <text x="88" y="51" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="38" font-weight="700" letter-spacing="0.5">
+    <tspan fill="#7C5CFF">intre</tspan><tspan fill="#12C2A6">ccio</tspan>
+  </text>
+</svg>
