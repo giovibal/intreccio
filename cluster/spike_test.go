@@ -15,8 +15,8 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
-	"github.com/giovibal/mycypher/internal/storage"
-	badgerstore "github.com/giovibal/mycypher/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 // spikeFSM applies opaque commands by storing them in a local Badger store,

@@ -6,7 +6,7 @@ import (
 	"io"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/giovibal/mycypher/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 // loadPendingWrites bounds the concurrency of a restore Load.

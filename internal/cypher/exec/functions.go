@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/cypher/ast"
-	"github.com/giovibal/mycypher/internal/graph"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/graph"
 )
 
 // scalarFunc is the signature of all built-in scalar functions. It takes the

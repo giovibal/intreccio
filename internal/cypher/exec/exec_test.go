@@ -5,13 +5,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/cypher/parser"
-	"github.com/giovibal/mycypher/internal/cypher/plan"
-	"github.com/giovibal/mycypher/internal/cypher/sema"
-	"github.com/giovibal/mycypher/internal/graph"
-	"github.com/giovibal/mycypher/internal/storage"
-	badgerstore "github.com/giovibal/mycypher/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/cypher/parser"
+	"github.com/giovibal/intreccio/internal/cypher/plan"
+	"github.com/giovibal/intreccio/internal/cypher/sema"
+	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 // testCatalog adapts the catalog to plan.Catalog within a transaction.

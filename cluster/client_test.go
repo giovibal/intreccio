@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
 // openClient starts a dataless client against the cluster's voters.
-func (tc *testCluster) openClient(t *testing.T, id string) *mycypher.DB {
+func (tc *testCluster) openClient(t *testing.T, id string) *intreccio.DB {
 	t.Helper()
 	db, err := Open(Config{
 		NodeID: id,
@@ -36,7 +36,7 @@ func TestClientForwarding(t *testing.T) {
 	}
 
 	// Linearizable client read is deterministic (served via the leader).
-	if got := mustQuery(t, clientDB, matchNames, mycypher.Linearizable()); !equal(got, []string{"Alice"}) {
+	if got := mustQuery(t, clientDB, matchNames, intreccio.Linearizable()); !equal(got, []string{"Alice"}) {
 		t.Fatalf("client linearizable read = %v, want [Alice]", got)
 	}
 
@@ -54,7 +54,7 @@ func TestClientForwarding(t *testing.T) {
 	if _, err := clientDB.Query(ctx, "CREATE (n:Person {name: 'Bob'})", nil); err != nil {
 		t.Fatalf("client write after voter failure: %v", err)
 	}
-	if got := mustQuery(t, clientDB, matchNames, mycypher.Linearizable()); !equal(got, []string{"Alice", "Bob"}) {
+	if got := mustQuery(t, clientDB, matchNames, intreccio.Linearizable()); !equal(got, []string{"Alice", "Bob"}) {
 		t.Fatalf("client read after failover = %v, want [Alice Bob]", got)
 	}
 }

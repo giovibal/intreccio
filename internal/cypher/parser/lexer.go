@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/giovibal/mycypher/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
 )
 
 // ParseError is a parsing error with a position in the source.

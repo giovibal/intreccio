@@ -1,14 +1,14 @@
-package mycypher_test
+package intreccio_test
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
 func ExampleDB_Query() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -20,7 +20,7 @@ func ExampleDB_Query() {
 }
 
 func ExampleDB_Explain() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 
 	plan, _ := db.Explain(context.Background(), "MATCH (p:Person) RETURN p.name AS name")

@@ -10,9 +10,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/storage"
-	"github.com/giovibal/mycypher/internal/storage/codec"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage/codec"
 )
 
 // CreateNode creates a node with the given labels and properties (by name),

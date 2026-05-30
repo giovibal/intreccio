@@ -3,7 +3,7 @@ package exec
 import (
 	"fmt"
 
-	"github.com/giovibal/mycypher/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
 )
 
 // unwindOp expands a list expression into multiple rows: for each input row,

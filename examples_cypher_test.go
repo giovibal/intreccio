@@ -1,14 +1,14 @@
-package mycypher_test
+package intreccio_test
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/giovibal/mycypher"
+	"github.com/giovibal/intreccio"
 )
 
 func ExampleDB_Query_createAndMatch() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -20,7 +20,7 @@ func ExampleDB_Query_createAndMatch() {
 }
 
 func ExampleDB_Query_parameters() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -34,7 +34,7 @@ func ExampleDB_Query_parameters() {
 }
 
 func ExampleDB_Query_relationships() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -48,7 +48,7 @@ func ExampleDB_Query_relationships() {
 }
 
 func ExampleDB_Query_optionalMatch() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -67,7 +67,7 @@ func ExampleDB_Query_optionalMatch() {
 }
 
 func ExampleDB_Query_variableLengthPath() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -86,7 +86,7 @@ func ExampleDB_Query_variableLengthPath() {
 }
 
 func ExampleDB_Query_stringPredicates() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -103,7 +103,7 @@ func ExampleDB_Query_stringPredicates() {
 }
 
 func ExampleDB_Query_inList() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -122,7 +122,7 @@ func ExampleDB_Query_inList() {
 }
 
 func ExampleDB_Query_isNull() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -136,7 +136,7 @@ func ExampleDB_Query_isNull() {
 }
 
 func ExampleDB_Query_caseExpression() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -160,7 +160,7 @@ func ExampleDB_Query_caseExpression() {
 }
 
 func ExampleDB_Query_orderByLimitSkip() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -179,7 +179,7 @@ func ExampleDB_Query_orderByLimitSkip() {
 }
 
 func ExampleDB_Query_distinct() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -199,7 +199,7 @@ func ExampleDB_Query_distinct() {
 }
 
 func ExampleDB_Query_withChaining() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -223,7 +223,7 @@ func ExampleDB_Query_withChaining() {
 }
 
 func ExampleDB_Query_unwind() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -241,7 +241,7 @@ func ExampleDB_Query_unwind() {
 }
 
 func ExampleDB_Query_aggregations() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -259,7 +259,7 @@ func ExampleDB_Query_aggregations() {
 }
 
 func ExampleDB_Query_collect() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -277,24 +277,24 @@ func ExampleDB_Query_collect() {
 }
 
 func ExampleDB_Query_scalarFunctions() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
 	res, _ := db.Query(context.Background(), `
 		RETURN toUpper('alice') AS u,
-		       substring('mycypher', 2, 4) AS s,
+		       substring('intreccio', 2, 4) AS s,
 		       split('a,b,c', ',') AS parts,
 		       size(split('a,b,c', ',')) AS n`, nil)
 
 	r := res.Rows[0]
 	fmt.Println(r[0], r[1], r[2], r[3])
 	_ = ctx
-	// Output: ALICE cyph [a b c] 3
+	// Output: ALICE trec [a b c] 3
 }
 
 func ExampleDB_Query_merge() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -308,7 +308,7 @@ func ExampleDB_Query_merge() {
 }
 
 func ExampleDB_Query_mergeOnCreateOnMatch() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -330,7 +330,7 @@ func ExampleDB_Query_mergeOnCreateOnMatch() {
 }
 
 func ExampleDB_Query_setVariants() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -352,7 +352,7 @@ func ExampleDB_Query_setVariants() {
 }
 
 func ExampleDB_Query_removeAndDelete() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -375,7 +375,7 @@ func ExampleDB_Query_removeAndDelete() {
 }
 
 func ExampleDB_Query_union() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -403,7 +403,7 @@ func ExampleDB_Query_union() {
 }
 
 func ExampleDB_Query_createIndex() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
@@ -419,7 +419,7 @@ func ExampleDB_Query_createIndex() {
 // ExampleDB_Explain_withIndex shows EXPLAIN switching from a label scan to
 // an index-backed lookup once the matching index exists.
 func ExampleDB_Explain_withIndex() {
-	db, _ := mycypher.OpenInMemory()
+	db, _ := intreccio.OpenInMemory()
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 

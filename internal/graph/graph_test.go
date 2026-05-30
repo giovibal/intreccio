@@ -4,9 +4,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/storage"
-	badgeradapter "github.com/giovibal/mycypher/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgeradapter "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 func newStore(t *testing.T) storage.Store {

@@ -3,7 +3,7 @@ package graph
 import (
 	"errors"
 
-	"github.com/giovibal/mycypher/internal/storage/codec"
+	"github.com/giovibal/intreccio/internal/storage/codec"
 )
 
 // Graph layer sentinel errors.

@@ -1,4 +1,4 @@
-package mycypher
+package intreccio
 
 import (
 	"context"

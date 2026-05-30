@@ -6,9 +6,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/storage"
-	"github.com/giovibal/mycypher/internal/storage/codec"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage/codec"
 )
 
 // assertNodeIndexConsistency verifies Invariante #1 for a single node: the base

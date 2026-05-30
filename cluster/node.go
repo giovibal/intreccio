@@ -1,4 +1,4 @@
-// Package cluster provides optional Raft-replicated clustering for mycypher.
+// Package cluster provides optional Raft-replicated clustering for intreccio.
 // It is linked only when the embedding program imports it (via cluster.Open),
 // so the default embedded/single-binary path stays pure Go and
 // dependency-light. See docs/adr/0007-clustering-raft.md.
@@ -17,8 +17,8 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
-	"github.com/giovibal/mycypher/internal/storage"
-	badgerstore "github.com/giovibal/mycypher/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 const (
@@ -39,7 +39,7 @@ var ErrNotImplemented = errors.New("cluster: not implemented in this phase")
 // errNotLeader indicates a write reached a node that is not the leader.
 var errNotLeader = errors.New("cluster: not leader")
 
-// Node is a clustered mycypher node: a Raft replica wrapping a local store.
+// Node is a clustered intreccio node: a Raft replica wrapping a local store.
 type Node struct {
 	cfg   Config
 	raft  *raft.Raft
@@ -57,6 +57,11 @@ type Node struct {
 	// writeMu serializes the stage→propose→apply sequence so each statement sees
 	// the fully-applied state of all prior writes.
 	writeMu sync.Mutex
+
+	// storeMu guards local store access against a snapshot Restore (Badger
+	// DropAll+Load). Reads/staging take it shared; the FSM's Restore takes it
+	// exclusively. Shared with the fsm.
+	storeMu *sync.RWMutex
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -123,7 +128,8 @@ func newNode(cfg Config) (*Node, error) {
 		rcfg.SnapshotInterval = cfg.SnapshotInterval
 	}
 
-	f := newFSM(store, store, cfg.DataDir)
+	storeMu := new(sync.RWMutex)
+	f := newFSM(store, store, cfg.DataDir, storeMu)
 	r, err := raft.NewRaft(rcfg, f, boltStore, boltStore, snaps, trans)
 	if err != nil {
 		_ = trans.Close()
@@ -146,6 +152,7 @@ func newNode(cfg Config) (*Node, error) {
 		log:             boltStore,
 		forwardAddrByID: forwardAddrMap(cfg),
 		applyTimeout:    applyTimeout,
+		storeMu:         storeMu,
 		stop:            make(chan struct{}),
 	}
 
@@ -216,8 +223,13 @@ func (n *Node) SetLocalExecutor(fn func(cypher string, params map[string]any) ([
 }
 
 // View runs fn in a local read-only transaction (snapshot read; may be slightly
-// stale on a follower unless a ReadBarrier preceded it).
-func (n *Node) View(fn func(storage.Txn) error) error { return n.store.View(fn) }
+// stale on a follower unless a ReadBarrier preceded it). The shared read-lock
+// keeps it from overlapping a snapshot Restore.
+func (n *Node) View(fn func(storage.Txn) error) error {
+	n.storeMu.RLock()
+	defer n.storeMu.RUnlock()
+	return n.store.View(fn)
+}
 
 // ApplyWrite executes a write against a recording transaction on the leader,
 // then replicates its effects through Raft. The staging transaction is rolled
@@ -235,6 +247,7 @@ func (n *Node) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
 		result   any
 		writeSet []byte
 	)
+	n.storeMu.RLock()
 	err := n.store.Update(func(real storage.Txn) error {
 		rec := newRecordTxn(real)
 		r, err := stage(rec)
@@ -248,6 +261,7 @@ func (n *Node) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
 		writeSet = rec.encode()
 		return errStaged // roll back; effects are replicated, not committed here
 	})
+	n.storeMu.RUnlock()
 	if err != nil && !errors.Is(err, errStaged) {
 		return nil, err
 	}

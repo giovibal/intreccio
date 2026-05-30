@@ -1,9 +1,9 @@
 package graph
 
 import (
-	"github.com/giovibal/mycypher/internal/catalog"
-	"github.com/giovibal/mycypher/internal/storage"
-	"github.com/giovibal/mycypher/internal/storage/codec"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage/codec"
 )
 
 // AllNodes returns the IDs of all nodes (prefix scan on `n`). It is the fallback

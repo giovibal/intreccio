@@ -5,7 +5,7 @@ Project context for Claude Code. Read `DESIGN.md` for the architecture and
 **invariants** that must never be violated.
 
 ## What it is
-`mycypher` — an **embedded**, **single-binary** graph DB in **pure Go** that
+`intreccio` — an **embedded**, **single-binary** graph DB in **pure Go** that
 speaks a subset of **openCypher 9**. Target workload: **OLTP / knowledge-graph**
 (lookups and few-hop traversals over medium-sized graphs). It is not an
 analytical OLAP engine.
@@ -37,12 +37,12 @@ analytical OLAP engine.
 
 ## Layout
 ```
-cmd/mycypher/         CLI/REPL entrypoint
+cmd/intreccio/         CLI/REPL entrypoint
 internal/storage/     Store interface + codec + adapters (badger, bolt)
 internal/catalog/     dictionaries, ID counters, index registry
 internal/graph/       model + transactional CRUD + traversal primitives
 internal/cypher/      ast, parser, sema, plan, exec
-mycypher.go           public embeddable API (package mycypher)
+intreccio.go           public embeddable API (package intreccio)
 ```
 Public API only in the root package; everything else under `internal/`.
 

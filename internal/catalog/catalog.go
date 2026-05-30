@@ -17,7 +17,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/giovibal/mycypher/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 const (

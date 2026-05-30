@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/mycypher/internal/cypher/ast"
+	"github.com/giovibal/intreccio/internal/cypher/ast"
 )
 
 // Parse parses a Cypher query and returns the AST, or a *ParseError.
