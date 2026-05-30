@@ -75,7 +75,7 @@ func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
 	}
 
 	if args.Linearizable {
-		if err := n.raft.Barrier(applyTimeout).Error(); err != nil {
+		if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
 			reply.Err = fmt.Sprintf("cluster: read barrier: %v", err)
 			return nil
 		}

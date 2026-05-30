@@ -1,5 +1,10 @@
 package cluster
 
+import (
+	"io"
+	"time"
+)
+
 // Role is the part a node plays in the cluster.
 type Role int
 
@@ -44,4 +49,11 @@ type Config struct {
 	// Peers is the full set of voters (including this node), used to add members
 	// after bootstrap and to resolve the leader's forwarding address.
 	Peers []Peer
+
+	// LogOutput receives Raft's logs. Nil means silent (io.Discard); set it to
+	// os.Stderr (or a file) for operational visibility.
+	LogOutput io.Writer
+	// ApplyTimeout bounds a single replicated write, read barrier and add-voter.
+	// Zero uses defaultApplyTimeout.
+	ApplyTimeout time.Duration
 }

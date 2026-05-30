@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	// applyTimeout bounds a single replicated write or read barrier.
-	applyTimeout = 10 * time.Second
+	// defaultApplyTimeout bounds a single replicated write or read barrier when
+	// Config.ApplyTimeout is zero.
+	defaultApplyTimeout = 10 * time.Second
 	// snapshotsRetained is how many Raft snapshots to keep on disk.
 	snapshotsRetained = 2
 	// leaderWaitTimeout bounds startup until a leader exists.
@@ -51,6 +52,7 @@ type Node struct {
 	forwardAddrByID map[string]string
 	fwdListener     net.Listener
 	localExec       localExecutor
+	applyTimeout    time.Duration
 
 	// writeMu serializes the stage→propose→apply sequence so each statement sees
 	// the fully-applied state of all prior writes.
@@ -97,7 +99,11 @@ func newNode(cfg Config) (*Node, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("cluster: resolve bind addr: %w", err)
 	}
-	trans, err := raft.NewTCPTransport(cfg.BindAddr, addr, 3, 10*time.Second, io.Discard)
+	logOutput := cfg.LogOutput
+	if logOutput == nil {
+		logOutput = io.Discard
+	}
+	trans, err := raft.NewTCPTransport(cfg.BindAddr, addr, 3, 10*time.Second, logOutput)
 	if err != nil {
 		_ = boltStore.Close()
 		_ = store.Close()
@@ -106,15 +112,20 @@ func newNode(cfg Config) (*Node, error) {
 
 	rcfg := raft.DefaultConfig()
 	rcfg.LocalID = raft.ServerID(cfg.NodeID)
-	rcfg.LogOutput = io.Discard
+	rcfg.LogOutput = logOutput
 
-	f := newFSM(store, store)
+	f := newFSM(store, store, cfg.DataDir)
 	r, err := raft.NewRaft(rcfg, f, boltStore, boltStore, snaps, trans)
 	if err != nil {
 		_ = trans.Close()
 		_ = boltStore.Close()
 		_ = store.Close()
 		return nil, fmt.Errorf("cluster: raft: %w", err)
+	}
+
+	applyTimeout := cfg.ApplyTimeout
+	if applyTimeout <= 0 {
+		applyTimeout = defaultApplyTimeout
 	}
 
 	n := &Node{
@@ -125,6 +136,7 @@ func newNode(cfg Config) (*Node, error) {
 		trans:           trans,
 		log:             boltStore,
 		forwardAddrByID: forwardAddrMap(cfg),
+		applyTimeout:    applyTimeout,
 		stop:            make(chan struct{}),
 	}
 
@@ -173,7 +185,7 @@ func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
 // ReadBarrier blocks until this leader has applied everything committed as of
 // the call, providing linearizable reads when followed by a local read.
 func (n *Node) ReadBarrier() error {
-	if err := n.raft.Barrier(applyTimeout).Error(); err != nil {
+	if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
 		return fmt.Errorf("cluster: read barrier: %w", err)
 	}
 	return nil
@@ -234,7 +246,7 @@ func (n *Node) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
 		return result, nil // no mutations to replicate
 	}
 
-	if err := n.raft.Apply(writeSet, applyTimeout).Error(); err != nil {
+	if err := n.raft.Apply(writeSet, n.applyTimeout).Error(); err != nil {
 		return nil, fmt.Errorf("cluster: replicate write: %w", err)
 	}
 	return result, nil
@@ -291,7 +303,7 @@ func (n *Node) addVoters() {
 					continue
 				}
 				missing = true
-				_ = n.raft.AddVoter(raft.ServerID(p.ID), raft.ServerAddress(p.RaftAddr), 0, applyTimeout).Error()
+				_ = n.raft.AddVoter(raft.ServerID(p.ID), raft.ServerAddress(p.RaftAddr), 0, n.applyTimeout).Error()
 			}
 		}
 		if !missing {

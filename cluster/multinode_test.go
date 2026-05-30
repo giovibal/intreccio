@@ -16,8 +16,9 @@ type testCluster struct {
 	peers []Peer
 }
 
-// startCluster brings up n voters (node 0 bootstraps and adds the rest).
-func startCluster(t *testing.T, n int) *testCluster {
+// startCluster brings up n voters (node 0 bootstraps and adds the rest). Each
+// node's Config can be tweaked via the optional mutators.
+func startCluster(t *testing.T, n int, opts ...func(*Config)) *testCluster {
 	t.Helper()
 	peers := make([]Peer, n)
 	for i := range n {
@@ -38,6 +39,9 @@ func startCluster(t *testing.T, n int) *testCluster {
 			Role:        RoleVoter,
 			Bootstrap:   i == 0,
 			Peers:       peers,
+		}
+		for _, o := range opts {
+			o(&cfg)
 		}
 		node, err := newNode(cfg)
 		if err != nil {

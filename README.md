@@ -91,6 +91,65 @@ res, err := db.Query(ctx, `
 // res.Columns is []string; res.Rows is [][]any in column order.
 ```
 
+## Clustering (optional, high availability)
+
+For high availability, mycypher can run as a **Raft-replicated** cluster,
+configured entirely from the library. A small quorum of **voters** (3 or 5) holds
+the data and replicates every write through Raft; additional service instances
+join as dataless **clients** that forward queries to the voters — so you get HA
+without replicating to every instance. Clustering lives in the opt-in `cluster`
+package and is **linked only when you import it**: programs that use
+`mycypher.Open` stay embedded-only and never pull in Raft. See
+`docs/adr/0007-clustering-raft.md`.
+
+```go
+import "github.com/giovibal/mycypher/cluster"
+
+voters := []cluster.Peer{
+    {ID: "n1", RaftAddr: "10.0.0.1:7000", ForwardAddr: "10.0.0.1:7001"},
+    {ID: "n2", RaftAddr: "10.0.0.2:7000", ForwardAddr: "10.0.0.2:7001"},
+    {ID: "n3", RaftAddr: "10.0.0.3:7000", ForwardAddr: "10.0.0.3:7001"},
+}
+
+// On each voter (exactly one sets Bootstrap: true to form the cluster):
+db, err := cluster.Open(cluster.Config{
+    NodeID: "n1", DataDir: "data/n1",
+    BindAddr: "10.0.0.1:7000", ForwardAddr: "10.0.0.1:7001",
+    Role: cluster.RoleVoter, Bootstrap: true, Peers: voters,
+})
+
+// On an extra app instance that should share the DB without storing it:
+db, err := cluster.Open(cluster.Config{
+    NodeID: "app-7", Role: cluster.RoleClient, Peers: voters,
+})
+
+// Same query API. One Cypher write = one linearizable transaction.
+db.Query(ctx, "CREATE (n:Person {name: $n})", map[string]any{"n": "Bob"})
+db.Query(ctx, "MATCH (p:Person) RETURN p.name", nil)                    // fast local read
+db.Query(ctx, "MATCH (p:Person) RETURN p.name", nil, mycypher.Linearizable()) // strong read
+```
+
+Notes for operators:
+- **Reads** default to fast, possibly slightly stale local snapshots; pass
+  `mycypher.Linearizable()` for read-your-writes (served via the leader).
+- **Writes** are serialized through the leader and committed by a quorum; losing
+  a minority of voters keeps the cluster available, losing a majority halts writes
+  (safety over availability — no split brain).
+- Set `Config.LogOutput` (e.g. `os.Stderr`) for Raft logs and `Config.ApplyTimeout`
+  to tune write/read-barrier deadlines.
+- v1 uses **full replication** to the quorum (each voter holds the whole graph);
+  sharding is out of scope.
+
+A cluster-capable build of the CLI is available behind a build tag (it links Raft,
+so it is not the default binary):
+
+```bash
+go build -tags cluster ./cmd/mycypher
+mycypher -cluster-id n1 -cluster-data data/n1 \
+  -cluster-bind 10.0.0.1:7000 -cluster-forward 10.0.0.1:7001 \
+  -cluster-bootstrap -cluster-peers 'n1=10.0.0.1:7000=10.0.0.1:7001,...'
+```
+
 ## Architecture
 
 The query pipeline runs entirely in-process, top to bottom:
