@@ -24,9 +24,23 @@ medium-sized graphs. It is *not* an analytical (OLAP) engine.
   the base record and all of its index keys in the same transaction).
 - **Rule-based query planner** with an inspectable textual `EXPLAIN`.
 
-## Getting started
+## Install
 
-Requirements: Go 1.26+.
+Requirements: Go 1.26+ (for importers and for building from source).
+
+```bash
+# use as a library in your own project
+go get github.com/giovibal/mycypher
+
+# install the CLI/REPL
+go install github.com/giovibal/mycypher/cmd/mycypher@latest
+```
+
+Prebuilt CLI binaries for Linux, macOS and Windows (amd64/arm64) are attached to
+each [GitHub Release](https://github.com/giovibal/mycypher/releases); download the
+one for your platform and verify it against the published `checksums.txt`.
+
+## Getting started
 
 ```bash
 go build ./...        # build
@@ -174,10 +188,24 @@ Development proceeds in phases (details in `PLAN.md`):
   reopen, and godoc examples. The openCypher TCK subset is deferred as future
   work.
 
+## Versioning
+
+Releases follow [Semantic Versioning](https://semver.org/) with a `v` prefix
+(`vMAJOR.MINOR.PATCH`). The project is **pre-1.0**: within the `0.x` range a
+**minor** bump may include breaking changes and a **patch** bump is reserved for
+fixes and backward-compatible additions. The **on-disk storage format is not yet
+frozen**, so a database created by one `0.x` version is not guaranteed to be
+readable by another. A release is cut by pushing a tag; see
+`docs/adr/0006-versioning-and-release.md` for the rationale.
+
 ## Documentation
 
-- `DESIGN.md` — high-level architecture (source of truth). *(in Italian)*
-- `PLAN.md` — phased development plan. *(in Italian)*
-- `docs/adr/` — architecture decision records. *(in Italian)*
+- `DESIGN.md` — high-level architecture (source of truth).
+- `PLAN.md` — phased development plan.
+- `docs/adr/` — architecture decision records.
 
-Code (identifiers, comments and strings) is in English.
+All documentation and code (identifiers, comments and strings) is in English.
+
+## License
+
+Released under the [MIT License](LICENSE).

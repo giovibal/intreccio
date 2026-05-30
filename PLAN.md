@@ -1,187 +1,191 @@
-# PLAN — Piano di sviluppo a fasi
+# PLAN — Phased development plan
 
-> Ogni fase ha un deliverable concreto e un criterio di "fatto quando…".
-> Filosofia: **storage-first**, poi una **vertical slice** end-to-end il prima
-> possibile (una query che gira davvero), poi si allarga la copertura.
-> Riferimento architetturale: `DESIGN.md`.
+> Each phase has a concrete deliverable and a "done when…" criterion.
+> Philosophy: **storage-first**, then an end-to-end **vertical slice** as soon as
+> possible (a query that actually runs), then widen the coverage.
+> Architectural reference: `DESIGN.md`.
 
-## Principi di lavoro
-- **Test-first sul codec**: il key/value encoding è la fondazione; ogni bug qui si
-  propaga ovunque. Scrivere prima i test (round-trip + ordinamento).
-- **Vertical slice presto**: appena lo storage regge, far girare `MATCH (n:L)
-  RETURN n` end-to-end. Avere qualcosa di eseguibile guida tutto il resto.
-- **Una mutazione, un punto**: tutte le scritture passano da un unico API del
-  graph layer che mantiene record + indici nella stessa transazione.
-- Ogni fase chiude con test verdi e, dove indicato, un benchmark.
-
----
-
-## Fase 0 — Scaffolding
-**Deliverable:** progetto compilabile e vuoto ma strutturato.
-- `go mod init`, layout package come in `DESIGN.md §11`.
-- Toolchain: `golangci-lint`, `go test`, target `Makefile`/`Taskfile`.
-- CI minima (build + test + lint).
-- `cmd/mycypher` con un main che apre/chiude un DB vuoto.
-
-**Fatto quando:** `go build ./...`, `go test ./...`, `golangci-lint run` passano in CI.
+## Working principles
+- **Test-first on the codec**: the key/value encoding is the foundation; any bug
+  here propagates everywhere. Write the tests first (round-trip + ordering).
+- **Vertical slice early**: as soon as the storage holds up, run `MATCH (n:L)
+  RETURN n` end-to-end. Having something executable guides everything else.
+- **One mutation, one point**: all writes go through a single graph-layer API
+  that keeps record + indexes in the same transaction.
+- Every phase closes with green tests and, where indicated, a benchmark.
 
 ---
 
-## Fase 1 — Storage layer + codec
-**Deliverable:** persistenza KV transazionale con encoding corretto.
-- Interfaccia `Store`/`Txn`/`Iterator` (`internal/storage`).
-- Adapter Badger (`internal/storage/badger`).
+## Phase 0 — Scaffolding
+**Deliverable:** a compilable, empty but structured project.
+- `go mod init`, package layout as in `DESIGN.md §11`.
+- Toolchain: `golangci-lint`, `go test`, `Makefile`/`Taskfile` targets.
+- Minimal CI (build + test + lint).
+- `cmd/mycypher` with a main that opens/closes an empty DB.
+
+**Done when:** `go build ./...`, `go test ./...`, `golangci-lint run` pass in CI.
+
+---
+
+## Phase 1 — Storage layer + codec
+**Deliverable:** transactional KV persistence with correct encoding.
+- `Store`/`Txn`/`Iterator` interface (`internal/storage`).
+- Badger adapter (`internal/storage/badger`).
 - `internal/storage/codec`:
-  - encoding chiavi (tag + ID big-endian, helper per ogni keyspace `n/e/o/i/l/p`).
-  - encoding valori order-preserving (int/float/string con escape `0x00`).
-  - encoding/decoding record nodo e arco.
-- `internal/catalog`: dizionari name↔id, contatori ID, registry indici.
+  - key encoding (tag + big-endian ID, helper for each `n/e/o/i/l/p` keyspace).
+  - order-preserving value encoding (int/float/string with `0x00` escape).
+  - encoding/decoding of node and edge records.
+- `internal/catalog`: name↔id dictionaries, ID counters, index registry.
 
-**Test:**
-- Round-trip di ogni encoding.
-- **Property test sull'ordinamento**: per valori generati casualmente,
-  `bytes.Compare(enc(a), enc(b))` rispetta l'ordine logico di `a,b` (per tipo).
-- Internamento dizionari idempotente e concorrente.
+**Tests:**
+- Round-trip of every encoding.
+- **Property test on ordering**: for randomly generated values,
+  `bytes.Compare(enc(a), enc(b))` respects the logical order of `a,b` (per type).
+- Idempotent and concurrent dictionary interning.
 
-**Fatto quando:** i property test sull'ordine passano per int, float, string, e i
-record fanno round-trip senza perdita.
+**Done when:** the ordering property tests pass for int, float, string, and the
+records round-trip without loss.
 
 ---
 
-## Fase 2 — Graph layer (CRUD + primitive di traversal)
-**Deliverable:** API interna per manipolare il grafo, indici sempre coerenti.
+## Phase 2 — Graph layer (CRUD + traversal primitives)
+**Deliverable:** an internal API to manipulate the graph, with always-consistent
+indexes.
 - `internal/graph`: `CreateNode`, `CreateEdge`, `SetProperty`, `DeleteNode`,
   `DeleteEdge`, `GetNode`, `GetEdge`.
-- Ogni mutazione aggiorna record + `l`/`p`/`o`/`i` nella **stessa** `Update`.
-- Primitive di traversal: `OutEdges(nodeID, typeID)`, `InEdges(...)`,
+- Every mutation updates record + `l`/`p`/`o`/`i` in the **same** `Update`.
+- Traversal primitives: `OutEdges(nodeID, typeID)`, `InEdges(...)`,
   `NodesByLabel(labelID)`, `NodesByProperty(labelID, keyID, value)`.
 
-**Test:**
-- Creazione nodo con label → compare in `NodesByLabel`.
-- Creazione arco → compare sia in `OutEdges(src)` sia in `InEdges(dst)`.
-- Cancellazione nodo/arco → spariscono record **e** tutte le entry indice
-  (verifica esplicita dell'Invariante #1).
+**Tests:**
+- Creating a node with a label → it shows up in `NodesByLabel`.
+- Creating an edge → it shows up both in `OutEdges(src)` and `InEdges(dst)`.
+- Deleting a node/edge → records **and** all index entries disappear (explicit
+  check of Invariant #1).
 
-**Fatto quando:** un test costruisce un piccolo grafo e tutte le primitive di
-lettura restituiscono risultati coerenti dopo create/update/delete.
-
----
-
-## Fase 3 — Parser → AST
-**Deliverable:** dal testo Cypher all'AST per lo slice MVP.
-- `internal/cypher/ast`: tipi dell'AST (query, clausole, pattern, espressioni).
-- `internal/cypher/parser`: scelta tra
-  - **ANTLR-gen** dalla grammatica ufficiale openCypher (parser completo "gratis",
-    poi visitor → AST custom), oppure
-  - **a mano** (recursive descent + Pratt per le espressioni) limitato allo slice.
-  - *Decisione consigliata:* iniziare ANTLR-gen per coprire la grammatica, oppure
-    a mano se si vuole AST pulito e zero dipendenze fin da subito. Annotare la
-    scelta in un breve ADR.
-
-**Test:** parse di un corpus di query MVP valide → AST atteso; query invalide →
-errori con posizione.
-
-**Fatto quando:** tutte le query del corpus MVP producono l'AST corretto.
+**Done when:** a test builds a small graph and all read primitives return
+consistent results after create/update/delete.
 
 ---
 
-## Fase 4 — Analisi semantica
-**Deliverable:** AST risolto e validato.
-- `internal/cypher/sema`: risoluzione scope variabili (incluso reset su `WITH`),
-  binding di label/tipi/proprietà agli ID di dizionario, type-check di base.
-- Errori semantici chiari (variabile non definita, ecc.).
+## Phase 3 — Parser → AST
+**Deliverable:** from Cypher text to the AST for the MVP slice.
+- `internal/cypher/ast`: AST types (query, clauses, patterns, expressions).
+- `internal/cypher/parser`: choice between
+  - **ANTLR-gen** from the official openCypher grammar (a full parser "for free",
+    then visitor → custom AST), or
+  - **hand-written** (recursive descent + Pratt for expressions) limited to the
+    slice.
+  - *Recommended decision:* start with ANTLR-gen to cover the grammar, or
+    hand-written if you want a clean AST and zero dependencies from the start.
+    Record the choice in a short ADR.
 
-**Test:** scoping corretto attraverso `WITH`; errori su variabili non legate.
+**Tests:** parse a corpus of valid MVP queries → expected AST; invalid queries →
+errors with position.
 
-**Fatto quando:** lo scoping `WITH` è corretto e i binding agli ID interni sono
-risolti.
-
----
-
-## Fase 5 — Piano logico + planner a regole
-**Deliverable:** dall'AST risolto a un piano fisico eseguibile.
-- `internal/cypher/plan`: operatori logici, traduzione pattern→piano,
-  scelta anchor per selettività, push-down filtri, binding agli access method.
-
-**Test:** per query note, il piano sceglie l'anchor atteso (es. usa l'indice `p`
-quando c'è equality su proprietà indicizzata anziché un label scan).
-
-**Fatto quando:** le query MVP producono piani fisici sensati e ispezionabili
-(utile un `EXPLAIN` testuale).
+**Done when:** all queries in the MVP corpus produce the correct AST.
 
 ---
 
-## Fase 6 — Executor (read path)
-**Deliverable:** **vertical slice** — query di lettura che gira end-to-end.
-- `internal/cypher/exec`: operatori iterator (`NodeByLabelScan`,
+## Phase 4 — Semantic analysis
+**Deliverable:** a resolved and validated AST.
+- `internal/cypher/sema`: variable scope resolution (including reset on `WITH`),
+  binding of labels/types/properties to dictionary IDs, basic type-checking.
+- Clear semantic errors (undefined variable, etc.).
+
+**Tests:** correct scoping across `WITH`; errors on unbound variables.
+
+**Done when:** `WITH` scoping is correct and bindings to internal IDs are
+resolved.
+
+---
+
+## Phase 5 — Logical plan + rule-based planner
+**Deliverable:** from the resolved AST to an executable physical plan.
+- `internal/cypher/plan`: logical operators, pattern→plan translation, anchor
+  selection by selectivity, filter push-down, binding to access methods.
+
+**Tests:** for known queries, the plan picks the expected anchor (e.g. uses the
+`p` index when there is equality on an indexed property instead of a label scan).
+
+**Done when:** the MVP queries produce sensible, inspectable physical plans (a
+textual `EXPLAIN` is useful).
+
+---
+
+## Phase 6 — Executor (read path)
+**Deliverable:** **vertical slice** — a read query that runs end-to-end.
+- `internal/cypher/exec`: iterator operators (`NodeByLabelScan`,
   `NodeByProperty`, `NodeById`, `Expand`, `Filter`, `Project`, `Limit`).
-- Collegamento `Query` pubblico → parser → sema → plan → exec → risultati.
+- Wiring of the public `Query` → parser → sema → plan → exec → results.
 
-**Test:** su un grafo seed, `MATCH (p:Person)-[:KNOWS]->(f) WHERE p.email=$e
-RETURN f.name` restituisce i risultati corretti.
+**Tests:** on a seed graph, `MATCH (p:Person)-[:KNOWS]->(f) WHERE p.email=$e
+RETURN f.name` returns the correct results.
 
-**Fatto quando:** la prima query end-to-end con un `Expand` restituisce risultati
-corretti dal disco.
+**Done when:** the first end-to-end query with an `Expand` returns correct
+results from disk.
 
 ---
 
-## Fase 7 — Write path (Cypher)
-**Deliverable:** mutazioni via Cypher.
+## Phase 7 — Write path (Cypher)
+**Deliverable:** mutations via Cypher.
 - `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `MERGE`.
-- Decisione `Query` unico vs `Query`/`Execute` separati.
-- `MERGE` con semantica match-or-create corretta.
+- Decision between a single `Query` vs separate `Query`/`Execute`.
+- `MERGE` with correct match-or-create semantics.
 
-**Test:** create+match nello stesso flusso; `MERGE` non duplica; `DETACH DELETE`
-rimuove nodo e archi incidenti con indici coerenti.
+**Tests:** create+match in the same flow; `MERGE` does not duplicate;
+`DETACH DELETE` removes a node and its incident edges with consistent indexes.
 
-**Fatto quando:** si può popolare e modificare il grafo interamente in Cypher.
+**Done when:** the graph can be populated and modified entirely in Cypher.
 
 ---
 
-## Fase 8 — Proiezione avanzata e traversal
-**Deliverable:** copertura delle query analitiche leggere dello slice MVP.
+## Phase 8 — Advanced projection and traversal
+**Deliverable:** coverage of the light analytical queries of the MVP slice.
 - `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`.
-- `WITH` chaining completo.
-- Aggregazioni (`count`/`collect`/`sum`/`avg`/`min`/`max`) con grouping implicito.
-- `VarLengthExpand` `*lo..hi` con tracciamento ID relazione (no-repeat).
+- Full `WITH` chaining.
+- Aggregations (`count`/`collect`/`sum`/`avg`/`min`/`max`) with implicit
+  grouping.
+- `VarLengthExpand` `*lo..hi` with relationship-ID tracking (no-repeat).
 
-**Test:** aggregazioni con grouping; path a lunghezza variabile su grafo con cicli
-(verifica no-repeated-relationship).
+**Tests:** aggregations with grouping; variable-length paths over a graph with
+cycles (verify no-repeated-relationship).
 
-**Fatto quando:** lo slice MVP di `DESIGN.md §8` è coperto e testato.
-
----
-
-## Fase 9 — Indici e integrazione
-**Deliverable:** indici gestiti via Cypher e usati dal planner.
-- `CREATE INDEX` su `(:Label).prop`; backfill degli esistenti.
-- Il planner sceglie l'indice quando disponibile.
-- CLI/REPL in `cmd/mycypher` per uso interattivo.
-
-**Test:** dopo `CREATE INDEX`, una query con equality usa l'indice (verificabile
-via `EXPLAIN`) e i risultati restano identici.
-
-**Fatto quando:** creare un indice cambia il piano e velocizza la query a parità
-di risultati.
+**Done when:** the MVP slice of `DESIGN.md §8` is covered and tested.
 
 ---
 
-## Fase 10 — Hardening
-**Deliverable:** robustezza e fiducia.
-- Property/fuzz test sul parser e sul codec.
-- Sottoinsieme dei test TCK openCypher (i `.feature` Cucumber pertinenti).
-- Benchmark: insert throughput, latenza traversal 1–3 hop, query con indice.
-- Crash-recovery test (riapertura dopo kill durante scrittura).
-- Documentazione API pubblica + esempi.
+## Phase 9 — Indexes and integration
+**Deliverable:** indexes managed via Cypher and used by the planner.
+- `CREATE INDEX` on `(:Label).prop`; backfill of existing data.
+- The planner picks the index when available.
+- CLI/REPL in `cmd/mycypher` for interactive use.
 
-**Fatto quando:** il sottoinsieme TCK scelto è verde, i benchmark sono tracciati e
-la riapertura dopo crash è consistente.
+**Tests:** after `CREATE INDEX`, a query with equality uses the index (verifiable
+via `EXPLAIN`) and the results stay identical.
+
+**Done when:** creating an index changes the plan and speeds up the query with
+identical results.
 
 ---
 
-## Ordine di attacco consigliato per CC
-1. Fasi 0–2 in sequenza stretta (fondazione; non saltare i property test del codec).
-2. Fasi 3→6 puntando alla **prima query end-to-end** (vertical slice) il prima
-   possibile, anche con copertura Cypher minima.
-3. Da lì allargare (7→9) una clausola alla volta, sempre con test.
-4. Fase 10 in continuo, non solo alla fine.
+## Phase 10 — Hardening
+**Deliverable:** robustness and confidence.
+- Property/fuzz tests on the parser and the codec.
+- A subset of the openCypher TCK tests (the relevant Cucumber `.feature` files).
+- Benchmarks: insert throughput, 1–3 hop traversal latency, indexed query.
+- Crash-recovery test (reopen after a kill during a write).
+- Public API documentation + examples.
+
+**Done when:** the chosen TCK subset is green, the benchmarks are tracked and the
+reopen after crash is consistent.
+
+---
+
+## Recommended order of attack for CC
+1. Phases 0–2 in tight sequence (foundation; do not skip the codec property
+   tests).
+2. Phases 3→6 aiming for the **first end-to-end query** (vertical slice) as soon
+   as possible, even with minimal Cypher coverage.
+3. From there widen (7→9) one clause at a time, always with tests.
+4. Phase 10 continuously, not only at the end.

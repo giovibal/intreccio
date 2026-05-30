@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      # Test gate: nothing is published unless the suite is green.
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      # Cross-compile the CLI for all targets via the Makefile.
+      - run: make dist checksums VERSION=${GITHUB_REF_NAME}
+
+      # Publish the GitHub Release with the binaries + checksums attached.
+      # Tags containing -rc/-beta/-alpha are marked as pre-releases.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prerelease=
+          case "$GITHUB_REF_NAME" in
+            *-rc*|*-beta*|*-alpha*) prerelease=--prerelease ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease

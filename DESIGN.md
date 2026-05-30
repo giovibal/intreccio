@@ -1,230 +1,228 @@
-# DESIGN — Graph DB embedded in puro Go (`mycypher`)
+# DESIGN — Embedded graph DB in pure Go (`mycypher`)
 
-> Documento di design di alto livello. È la fonte di verità dell'architettura.
-> `PLAN.md` traduce questo design in fasi di sviluppo; `CLAUDE.md` ne estrae le
-> convenzioni e gli invarianti operativi per l'agente.
+> High-level design document. It is the source of truth for the architecture.
+> `PLAN.md` translates this design into development phases; `CLAUDE.md` extracts
+> the conventions and operating invariants for the agent.
 
-## 1. Obiettivo e scope
+## 1. Goal and scope
 
-Un database a grafo **embedded**, **single-binary**, in **puro Go**, che parla un
-sottoinsieme di **openCypher 9**. Pensato per carichi **OLTP / knowledge-graph**:
-lookup puntuali e traversal a poche hop su grafi di dimensione media.
+An **embedded**, **single-binary** graph database in **pure Go** that speaks a
+subset of **openCypher 9**. Designed for **OLTP / knowledge-graph** workloads:
+point lookups and few-hop traversals over medium-sized graphs.
 
 ### Goals
-- Puro Go, **niente cgo**, deploy come singolo binario.
-- Property graph (nodi con label e proprietà, archi tipizzati con proprietà).
-- Sottoinsieme utile e solido di openCypher 9 (vedi §8).
-- Transazioni ACID con indici sempre coerenti.
-- API embeddable pulita + una CLI/REPL.
+- Pure Go, **no cgo**, deploy as a single binary.
+- Property graph (nodes with labels and properties, typed edges with properties).
+- A useful and solid subset of openCypher 9 (see §8).
+- ACID transactions with always-consistent indexes.
+- A clean embeddable API + a CLI/REPL.
 
-### Non-goals (espliciti)
-- **Niente OLAP**: nessun processore vettorizzato/fattorizzato, nessun join
-  analitico massivo. Quello era il valore di Kùzu ed è la parte che non ha senso
-  reimplementare in Go.
-- Niente conformità TCK completa a openCypher 9 in v1 (vedi §8).
-- Niente distribuzione/replica in v1 (vedi §11, evoluzione futura via NATS).
-- Niente estensioni post-9 / GQL (`CALL { }`, `EXISTS { }`, quantified path
+### Non-goals (explicit)
+- **No OLAP**: no vectorized/factorized processor, no massive analytical joins.
+  That was Kùzu's value and it is the part that makes no sense to reimplement in
+  Go.
+- No full openCypher 9 TCK conformance in v1 (see §8).
+- No distribution/replication in v1 (see §11, future evolution via NATS).
+- No post-9 / GQL extensions (`CALL { }`, `EXISTS { }`, quantified path
   patterns).
 
-## 2. Architettura a livelli
+## 2. Layered architecture
 
-Pipeline di query dall'alto verso il basso, tutto in-process:
+Query pipeline top to bottom, entirely in-process:
 
 ```
-Query Cypher (testo)
+Cypher query (text)
    → Parser            → AST
-   → Analisi semantica  (scoping, binding label/tipi/proprietà a ID interni)
-   → Piano logico       (albero di operatori logici)
-   → Planner a regole   (scelta anchor, push-down dei filtri)
-   → Piano fisico       (operatori legati ad access method concreti)
-   → Executor           (modello iterator / Volcano: Next())
-   → Graph storage API  (CRUD transazionale di nodi/archi/indici)
-   → Key encoding       (tabelle prefissate su KV ordinato)
-   → Storage engine     (Badger; puro Go; ACID SSI)
+   → Semantic analysis  (scoping, binding labels/types/properties to internal IDs)
+   → Logical plan       (tree of logical operators)
+   → Rule-based planner (anchor selection, filter push-down)
+   → Physical plan      (operators bound to concrete access methods)
+   → Executor           (iterator / Volcano model: Next())
+   → Graph storage API  (transactional CRUD of nodes/edges/indexes)
+   → Key encoding       (prefixed tables over an ordered KV store)
+   → Storage engine     (Badger; pure Go; ACID SSI)
 ```
 
-## 3. Decisione: storage engine
+## 3. Decision: storage engine
 
-**Default: BadgerDB.** LSM puro Go, scritture veloci, transazioni ACID con
-serializable snapshot isolation, iterator con prefix scan ordinati — esattamente
-ciò che serve per l'adiacenza.
+**Default: BadgerDB.** Pure Go LSM, fast writes, ACID transactions with
+serializable snapshot isolation, iterators with ordered prefix scans — exactly
+what is needed for adjacency.
 
-**Alternativa: bbolt.** B+tree mmap, letture eccellenti, range scan ordinati
-nativi, massima stabilità (storage di etcd). Limite: single-writer (una sola
-transazione in scrittura per volta), accettabile per carichi read-heavy.
+**Alternative: bbolt.** mmap B+tree, excellent reads, native ordered range scans,
+maximum stability (etcd's storage). Limitation: single-writer (one write
+transaction at a time), acceptable for read-heavy workloads.
 
-**Astrazione.** Lo strato superiore non deve dipendere dall'engine concreto. Si
-definisce un'interfaccia `Store` minimale (Get/Set/Delete/Iterator a prefisso +
-transazioni read/write) e si fornisce un adapter Badger (default) e, se serve, un
-adapter bbolt. Questo permette di cambiare engine senza toccare il graph layer.
+**Abstraction.** The upper layer must not depend on the concrete engine. We
+define a minimal `Store` interface (Get/Set/Delete/prefix Iterator + read/write
+transactions) and provide a Badger adapter (default) and, if needed, a bbolt
+adapter. This makes it possible to swap engines without touching the graph layer.
 
 ```go
 type Store interface {
     View(func(Txn) error) error          // read-only
-    Update(func(Txn) error) error        // read-write, atomica
+    Update(func(Txn) error) error        // read-write, atomic
     Close() error
 }
 type Txn interface {
     Get(key []byte) ([]byte, error)
     Set(key, val []byte) error
     Delete(key []byte) error
-    Scan(prefix []byte) Iterator         // ordine lessicografico
+    Scan(prefix []byte) Iterator         // lexicographic order
 }
 ```
 
-## 4. Modello dati
+## 4. Data model
 
 Property graph:
-- **Nodo**: ID interno `uint64`, insieme di **label**, mappa di **proprietà**.
-- **Arco** (relazione): ID interno `uint64`, **tipo** singolo, nodo sorgente e
-  destinazione, mappa di **proprietà**, direzione.
-- **Valori di proprietà**: null, bool, int64, float64, string, list, map
-  (le ultime due solo come valore serializzato, non indicizzabili in v1).
+- **Node**: internal `uint64` ID, set of **labels**, map of **properties**.
+- **Edge** (relationship): internal `uint64` ID, single **type**, source and
+  destination nodes, map of **properties**, direction.
+- **Property values**: null, bool, int64, float64, string, list, map (the last
+  two only as a serialized value, not indexable in v1).
 
-Label, tipi di relazione e chiavi di proprietà sono **stringhe internate** in ID
-interi (`uint32`) tramite dizionari (§6), così da entrare a larghezza fissa nelle
-chiavi.
+Labels, relationship types and property keys are **interned strings** into
+integer IDs (`uint32`) via dictionaries (§6), so they fit fixed-width into keys.
 
-## 5. Key encoding — il cuore del design
+## 5. Key encoding — the heart of the design
 
-Principio: su un KV ordinato lessicograficamente, scegliere encoding in cui
-**l'ordine dei byte coincide con l'ordine logico desiderato**, e **raggruppare per
-prefisso** così che le query calde siano un singolo range scan.
+Principle: over a lexicographically ordered KV store, choose an encoding where
+**the byte order coincides with the desired logical order**, and **group by
+prefix** so that hot queries become a single range scan.
 
-Convenzioni:
-- ID interni nodo/arco: `uint64` **big-endian** (8 byte) → ordine byte = ordine
-  numerico.
-- ID di dizionario (label/tipo/propKey): `uint32` big-endian (4 byte).
-- Primo byte = **tag della tabella**.
+Conventions:
+- Internal node/edge IDs: `uint64` **big-endian** (8 bytes) → byte order = numeric
+  order.
+- Dictionary IDs (label/type/propKey): `uint32` big-endian (4 bytes).
+- First byte = **table tag**.
 
-| Tag | Chiave | Valore | Scopo |
-|-----|--------|--------|-------|
-| `n` | `n` + nodeID(8) | record nodo (label + proprietà) | record nodo |
-| `e` | `e` + edgeID(8) | typeID, srcID, dstID, proprietà | record arco |
-| `o` | `o` + srcID(8) + typeID(4) + dstID(8) + edgeID(8) | ∅ | **archi uscenti** (hot path) |
-| `i` | `i` + dstID(8) + typeID(4) + srcID(8) + edgeID(8) | ∅ | archi entranti |
-| `l` | `l` + labelID(4) + nodeID(8) | ∅ | indice per label |
-| `p` | `p` + labelID(4) + propKeyID(4) + valEnc + nodeID(8) | ∅ | indice secondario su proprietà |
+| Tag | Key | Value | Purpose |
+|-----|-----|-------|---------|
+| `n` | `n` + nodeID(8) | node record (labels + properties) | node record |
+| `e` | `e` + edgeID(8) | typeID, srcID, dstID, properties | edge record |
+| `o` | `o` + srcID(8) + typeID(4) + dstID(8) + edgeID(8) | ∅ | **outgoing edges** (hot path) |
+| `i` | `i` + dstID(8) + typeID(4) + srcID(8) + edgeID(8) | ∅ | incoming edges |
+| `l` | `l` + labelID(4) + nodeID(8) | ∅ | label index |
+| `p` | `p` + labelID(4) + propKeyID(4) + valEnc + nodeID(8) | ∅ | secondary property index |
 
-### Adiacenza (le righe `o` e `i`)
-Ogni arco è scritto **due volte**: una in `o` (per i traversal uscenti) e una in
-`i` (per gli entranti). "Tutti gli archi uscenti di X di tipo KNOWS" diventa un
-prefix scan su `o` + X.id + KNOWS.typeID, in tempo proporzionale al fan-out e non
-alla dimensione del grafo. `edgeID` come ultimo componente garantisce chiavi
-uniche anche nei multigrafi (più archi dello stesso tipo tra la stessa coppia).
+### Adjacency (the `o` and `i` rows)
+Every edge is written **twice**: once in `o` (for outgoing traversals) and once
+in `i` (for incoming ones). "All outgoing KNOWS edges of X" becomes a prefix scan
+on `o` + X.id + KNOWS.typeID, in time proportional to the fan-out and not to the
+graph size. `edgeID` as the last component guarantees unique keys even in
+multigraphs (multiple edges of the same type between the same pair).
 
-### Record (le righe `n` ed `e`)
-Il valore è una serializzazione compatta (es. un encoding binario custom o un
-formato come MessagePack/CBOR — da decidere in Fase 1; preferire qualcosa
-zero-alloc in lettura). I record contengono i dati "pesanti"; gli indici
-contengono solo le chiavi necessarie a trovarli.
+### Records (the `n` and `e` rows)
+The value is a compact serialization (e.g. a custom binary encoding or a format
+like MessagePack/CBOR — to be decided in Phase 1; prefer something zero-alloc on
+read). Records hold the "heavy" data; indexes hold only the keys needed to find
+them.
 
-### Encoding order-preserving dei valori (`valEnc`)
-È l'unico encoding davvero delicato. Serve se si vogliono range query
-(`age > 30`) e non solo equality. Schema:
-- 1 byte di **tag di tipo**, in bande ordinate: `NULL(0x00) < BOOL(0x01) <
-  INT(0x02) < FLOAT(0x03) < STRING(0x04)`.
-- **int64**: `binary.BigEndian(uint64(v) ^ (1<<63))` — il flip del bit di segno
-  rende il complemento a due ordinabile come unsigned.
-- **float64**: `bits = math.Float64bits(v)`; se segno negativo `bits = ^bits`,
-  altrimenti `bits |= 1<<63`; poi big-endian.
-- **string**: UTF-8 grezzo. Poiché nella chiave `p` la stringa è **seguita** dal
-  nodeID, serve un confine non ambiguo che preservi l'ordine: escape `0x00` →
-  `0x00 0xFF`, terminatore `0x00 0x00` (encoding "ordered bytes" stile
-  CockroachDB/FoundationDB). **Non** usare length-prefix: rompe l'ordine
-  lessicografico.
+### Order-preserving value encoding (`valEnc`)
+This is the only truly delicate encoding. It is needed if you want range queries
+(`age > 30`) and not just equality. Scheme:
+- 1 **type tag** byte, in ordered bands: `NULL(0x00) < BOOL(0x01) < INT(0x02) <
+  FLOAT(0x03) < STRING(0x04)`.
+- **int64**: `binary.BigEndian(uint64(v) ^ (1<<63))` — flipping the sign bit
+  makes two's complement orderable as unsigned.
+- **float64**: `bits = math.Float64bits(v)`; if the sign is negative
+  `bits = ^bits`, otherwise `bits |= 1<<63`; then big-endian.
+- **string**: raw UTF-8. Since in the `p` key the string is **followed** by the
+  nodeID, an unambiguous boundary that preserves order is required: escape
+  `0x00` → `0x00 0xFF`, terminator `0x00 0x00` ("ordered bytes" encoding in the
+  style of CockroachDB/FoundationDB). **Do not** use a length-prefix: it breaks
+  lexicographic order.
 
-Per la sola equality (lookup puntuale, es. trova nodo per `email`) si può anche
-hashare il valore: più semplice, ma niente range. Iniziare con order-preserving
-solo dove serve.
+For equality only (point lookup, e.g. find a node by `email`) the value can also
+be hashed: simpler, but no ranges. Start with order-preserving only where it is
+needed.
 
-## 6. Catalog, dizionari, ID allocation
-- **Dizionari** name↔id per label, tipi, chiavi-proprietà (keyspace dedicati,
-  es. `L`/`T`/`K` per name→id e i reverse). Internamento idempotente in
-  transazione.
-- **Contatori** per l'allocazione di nodeID/edgeID monotòni (`uint64`), in un
-  keyspace `c`.
-- **Registry degli indici**: quali `(label, propKey)` hanno un indice `p` attivo,
-  così il write path sa quali indici mantenere.
+## 6. Catalog, dictionaries, ID allocation
+- **Dictionaries** name↔id for labels, types, property keys (dedicated
+  keyspaces, e.g. `L`/`T`/`K` for name→id and the reverses). Idempotent interning
+  within a transaction.
+- **Counters** for allocating monotonic nodeID/edgeID (`uint64`), in a keyspace
+  `c`.
+- **Index registry**: which `(label, propKey)` pairs have an active `p` index, so
+  the write path knows which indexes to maintain.
 
-## 7. Transazioni e invarianti di consistenza
+## 7. Transactions and consistency invariants
 
-> **Invariante #1 (non negoziabile):** ogni scrittura aggiorna il record base
-> **e tutte** le sue chiavi-indice derivate (`l`, `p`, `o`, `i`) **dentro la
-> stessa transazione**. Se record e indici non commitano atomicamente, gli indici
-> divergono e le query mentono.
+> **Invariant #1 (non-negotiable):** every write updates the base record **and
+> all** of its derived index keys (`l`, `p`, `o`, `i`) **within the same
+> transaction**. If record and indexes do not commit atomically, the indexes
+> diverge and the queries lie.
 
-- Le scritture girano in `Store.Update` (transazione atomica).
-- Le letture girano in `Store.View` (snapshot coerente).
-- Su Badger la SSI fornisce isolamento serializzabile; su bbolt il single-writer
-  serializza naturalmente le scritture.
+- Writes run in `Store.Update` (atomic transaction).
+- Reads run in `Store.View` (consistent snapshot).
+- On Badger, SSI provides serializable isolation; on bbolt the single-writer
+  naturally serializes writes.
 
-## 8. Sottoinsieme openCypher (scope MVP)
+## 8. openCypher subset (MVP scope)
 
-Incluso in v1:
+Included in v1:
 - DML: `CREATE`, `MERGE`, `SET`, `DELETE`, `DETACH DELETE`.
-- `MATCH` con pattern di nodi/archi, direzioni, label e tipi.
-- `WHERE`: confronti, `AND`/`OR`/`NOT`, accesso a proprietà, predicati di label.
-- `RETURN` con proiezione, alias, `DISTINCT`.
+- `MATCH` with node/edge patterns, directions, labels and types.
+- `WHERE`: comparisons, `AND`/`OR`/`NOT`, property access, label predicates.
+- `RETURN` with projection, aliases, `DISTINCT`.
 - `ORDER BY`, `SKIP`, `LIMIT`.
-- `WITH` per il chaining e il reset dello scope.
-- Path a lunghezza variabile **limitata**: `-[:T*1..3]->`.
-- Aggregazioni: `count`, `collect`, `sum`, `avg`, `min`, `max` con
-  raggruppamento implicito (chiavi = item di proiezione non aggregati).
-- `CREATE INDEX` su `(:Label).prop`.
-- Parametri: `$param`.
+- `WITH` for chaining and scope reset.
+- **Bounded** variable-length paths: `-[:T*1..3]->`.
+- Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` with implicit
+  grouping (keys = non-aggregated projection items).
+- `CREATE INDEX` on `(:Label).prop`.
+- Parameters: `$param`.
 
-Rimandato (post-v1, in ordine di probabile priorità):
-- Libreria di funzioni completa (aggiunta incrementale).
+Deferred (post-v1, in likely priority order):
+- A complete function library (added incrementally).
 - `shortestPath` / `allShortestPaths`.
-- Subquery: `EXISTS { }`, `CALL { }`.
-- `CALL` su procedure / funzioni definite.
-- Conformità TCK completa.
+- Subqueries: `EXISTS { }`, `CALL { }`.
+- `CALL` on defined procedures / functions.
+- Full TCK conformance.
 
-### Semantica da non sbagliare
-- **No relazioni ripetute** nello stesso path di un `MATCH` (semantica "trail" di
-  openCypher 9): durante l'espansione di path a lunghezza variabile si tracciano
-  gli **ID di relazione** già attraversati, non i nodi.
-- `MERGE` = match-or-create: prima tenta il match completo del pattern, e solo se
-  fallisce crea; attenzione alle race con la transazione.
-- `WITH` introduce un nuovo scope: le variabili non riproiettate non sono visibili
-  a valle.
-- `OPTIONAL MATCH` produce `null` sui binding non trovati.
+### Semantics not to get wrong
+- **No repeated relationships** within the same path of a `MATCH` (openCypher 9
+  "trail" semantics): while expanding variable-length paths, track the
+  **relationship IDs** already traversed, not the nodes.
+- `MERGE` = match-or-create: it first attempts a full match of the pattern, and
+  only creates if that fails; mind the races with the transaction.
+- `WITH` introduces a new scope: variables that are not re-projected are not
+  visible downstream.
+- `OPTIONAL MATCH` produces `null` on bindings that are not found.
 
-## 9. Pipeline di query — operatori e mappatura sui keyspace
+## 9. Query pipeline — operators and mapping onto keyspaces
 
-Modello **iterator (Volcano)**: ogni operatore espone `Next() (Record, bool)`, il
-root tira. Niente vettorizzazione: per poche hop il pull model è adeguato.
+**Iterator (Volcano)** model: each operator exposes `Next() (Record, bool)`, the
+root pulls. No vectorization: for a few hops the pull model is adequate.
 
-Operatori e access method:
-- `NodeByLabelScan(:L)` → prefix scan su `l` + labelID.
-- `NodeByProperty(:L, k=v)` → prefix scan su `p` + labelID + keyID + valEnc.
-- `NodeById(id)` → get diretto su `n` + id.
-- `AllNodesScan` → prefix scan su `n` (fallback, evitare se possibile).
-- `Expand(a)-[:T]->(b)` → per ogni `a`, prefix scan su `o` + a.id + typeID →
-  produce i `b`; fetch `n` + b.id solo se servono proprietà.
-- `Expand` inverso → stesso meccanismo su `i`.
-- `VarLengthExpand(*lo..hi)` → BFS/DFS limitato in profondità su `o`/`i`,
-  tracciando gli ID di relazione (vedi §8).
-- `Filter`, `Project`, `OrderBy`, `Skip`, `Limit`, `Aggregate` → operatori
-  in-memory sopra lo stream.
+Operators and access methods:
+- `NodeByLabelScan(:L)` → prefix scan on `l` + labelID.
+- `NodeByProperty(:L, k=v)` → prefix scan on `p` + labelID + keyID + valEnc.
+- `NodeById(id)` → direct get on `n` + id.
+- `AllNodesScan` → prefix scan on `n` (fallback, avoid if possible).
+- `Expand(a)-[:T]->(b)` → for each `a`, prefix scan on `o` + a.id + typeID →
+  produces the `b`; fetch `n` + b.id only if properties are needed.
+- Reverse `Expand` → same mechanism on `i`.
+- `VarLengthExpand(*lo..hi)` → depth-bounded BFS/DFS on `o`/`i`, tracking
+  relationship IDs (see §8).
+- `Filter`, `Project`, `OrderBy`, `Skip`, `Limit`, `Aggregate` → in-memory
+  operators over the stream.
 
-### Planner a regole (v1)
-Sufficiente per essere usabile. Euristica:
-1. **Scelta dell'anchor** per selettività decrescente:
-   `NodeById` > equality su proprietà indicizzata (`p`) > `NodeByLabelScan` (`l`)
+### Rule-based planner (v1)
+Sufficient to be usable. Heuristic:
+1. **Anchor selection** by decreasing selectivity:
+   `NodeById` > equality on an indexed property (`p`) > `NodeByLabelScan` (`l`)
    > `AllNodesScan`.
-2. **Espansione** verso l'esterno seguendo gli archi a partire dall'anchor più
-   economico.
-3. **Push-down** dei predicati `WHERE` sugli scan il più in basso possibile.
+2. **Expansion** outward following edges starting from the cheapest anchor.
+3. **Push-down** of `WHERE` predicates onto scans as low as possible.
 
-Il cost-based con statistiche (cardinalità, istogrammi) è **fase 2**, non serve
-per la v1.
+Cost-based with statistics (cardinalities, histograms) is **phase 2**, not needed
+for v1.
 
-## 10. API embeddable (bozza)
+## 10. Embeddable API (draft)
 
 ```go
-db, err := mycypher.Open("data/")   // apre/crea il database
+db, err := mycypher.Open("data/")   // open/create the database
 defer db.Close()
 
 res, err := db.Query(ctx, `
@@ -239,49 +237,49 @@ for res.Next() {
 }
 ```
 
-Read e write possono condividere `Query` (il planner sa se il piano scrive) oppure
-restare separati (`Query` read-only, `Execute` write). Decisione in Fase 7.
+Reads and writes can share `Query` (the planner knows whether the plan writes) or
+stay separate (`Query` read-only, `Execute` write). Decision in Phase 7.
 
-## 11. Layout del progetto (Go)
+## 11. Project layout (Go)
 
 ```
 mycypher/
-  cmd/mycypher/         # entrypoint CLI/REPL (single binary)
+  cmd/mycypher/         # CLI/REPL entrypoint (single binary)
   internal/
-    storage/            # interfaccia Store + adapter engine
+    storage/            # Store interface + engine adapters
       codec/            # key & value encoding (order-preserving)
-      badger/           # adapter BadgerDB (default)
-      bolt/             # adapter bbolt (opzionale)
-    catalog/            # dizionari, contatori, registry indici
-    graph/              # modello + CRUD transazionale + primitive di traversal
+      badger/           # BadgerDB adapter (default)
+      bolt/             # bbolt adapter (optional)
+    catalog/            # dictionaries, counters, index registry
+    graph/              # model + transactional CRUD + traversal primitives
     cypher/
-      ast/              # tipi dell'AST
-      parser/           # parser (ANTLR-gen o a mano)
-      sema/             # analisi semantica / binding
-      plan/             # piano logico+fisico, planner a regole
-      exec/             # operatori executor (Volcano)
-  mycypher.go           # API pubblica embeddable (package mycypher)
+      ast/              # AST types
+      parser/           # parser (ANTLR-gen or hand-written)
+      sema/             # semantic analysis / binding
+      plan/             # logical+physical plan, rule-based planner
+      exec/             # executor operators (Volcano)
+  mycypher.go           # public embeddable API (package mycypher)
   CLAUDE.md DESIGN.md PLAN.md
   go.mod
 ```
 
-> `internal/` per ciò che non è API pubblica; l'API embeddable vive nel package
-> radice `mycypher`. Nome modulo: `github.com/giovibal/mycypher`.
+> `internal/` for everything that is not public API; the embeddable API lives in
+> the root `mycypher` package. Module name: `github.com/giovibal/mycypher`.
 
-## 12. Evoluzione futura (fuori v1)
-- **Replica / distribuzione**: NATS JetStream come write-ahead/replication log o
-  changefeed event-sourced sopra l'engine — *non* come storage engine. Tenere
-  fuori dalla v1 single-binary.
-- Planner cost-based con statistiche.
-- Indici full-text e vettoriali (per GraphRAG), se il caso d'uso lo richiede.
-- Estensione verso GQL / costrutti post-9.
+## 12. Future evolution (outside v1)
+- **Replication / distribution**: NATS JetStream as a write-ahead/replication log
+  or event-sourced changefeed on top of the engine — *not* as a storage engine.
+  Keep it out of the single-binary v1.
+- Cost-based planner with statistics.
+- Full-text and vector indexes (for GraphRAG), if the use case requires it.
+- Extension toward GQL / post-9 constructs.
 
-## 13. Rischi principali
-- **Planner**: è dove vive ~70% dell'ingegneria. Mitigazione: vertical slice
-  precoce (un solo pattern end-to-end) prima di allargare la copertura Cypher.
-- **Encoding order-preserving delle stringhe**: facile sbagliare il confine.
-  Mitigazione: property-test dedicati sul codec (round-trip + ordinamento).
-- **Coerenza indici**: vedi Invariante #1. Mitigazione: tutte le mutazioni
-  passano da un unico punto del graph layer che aggiorna record + indici insieme.
-- **Scope creep su Cypher**: tentazione di implementare tutto. Mitigazione:
-  attenersi allo slice MVP di §8.
+## 13. Main risks
+- **Planner**: where ~70% of the engineering lives. Mitigation: an early vertical
+  slice (a single pattern end-to-end) before widening Cypher coverage.
+- **Order-preserving string encoding**: easy to get the boundary wrong.
+  Mitigation: dedicated property tests on the codec (round-trip + ordering).
+- **Index consistency**: see Invariant #1. Mitigation: all mutations go through a
+  single point of the graph layer that updates record + indexes together.
+- **Cypher scope creep**: the temptation to implement everything. Mitigation:
+  stick to the MVP slice of §8.

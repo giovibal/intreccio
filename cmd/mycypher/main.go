@@ -8,20 +8,54 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/giovibal/mycypher"
 )
 
+// Build metadata. Overridden at release time via -ldflags "-X main.version=...";
+// for a plain `go install ...@vX.Y.Z` the version falls back to the module
+// version read from the embedded build info (see buildVersion).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// buildVersion returns the version string to report. When the binary was not
+// stamped at release time (version == "dev"), it falls back to the module
+// version recorded in the build info, so `go install ...@vX.Y.Z` still reports
+// a meaningful version.
+func buildVersion() string {
+	if version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
+		}
+	}
+	return version
+}
+
+// versionString formats the full one-line version banner.
+func versionString() string {
+	return fmt.Sprintf("mycypher %s (commit %s, built %s)", buildVersion(), commit, date)
+}
+
 func main() {
 	cmdline := flag.String("c", "", "execute a single query and exit")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: mycypher [-c QUERY] [path]")
 		fmt.Fprintln(os.Stderr, "If [path] is omitted, an in-memory database is opened.")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	db, err := openDB(flag.Arg(0))
 	if err != nil {

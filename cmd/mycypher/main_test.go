@@ -125,6 +125,18 @@ func TestRunBatchSkipsEmptyAndContinuesOnError(t *testing.T) {
 	}
 }
 
+func TestVersionString(t *testing.T) {
+	got := versionString()
+	if !strings.HasPrefix(got, "mycypher ") {
+		t.Errorf("version string = %q, want prefix %q", got, "mycypher ")
+	}
+	for _, want := range []string{buildVersion(), "commit " + commit, "built " + date} {
+		if !strings.Contains(got, want) {
+			t.Errorf("version string %q missing %q", got, want)
+		}
+	}
+}
+
 func TestReplPropagatesErrors(t *testing.T) {
 	db := newDB(t)
 	var out, errOut bytes.Buffer

@@ -1,93 +1,94 @@
 # CLAUDE.md
 
-Contesto di progetto per Claude Code. Leggere `DESIGN.md` per l'architettura e
-`PLAN.md` per le fasi. Questo file contiene le **regole operative** e gli
-**invarianti** da non violare mai.
+Project context for Claude Code. Read `DESIGN.md` for the architecture and
+`PLAN.md` for the phases. This file holds the **operating rules** and the
+**invariants** that must never be violated.
 
-## Cos'è
-`mycypher` — graph DB **embedded**, **single-binary**, in **puro Go**, che parla un
-sottoinsieme di **openCypher 9**. Carico target: **OLTP / knowledge-graph**
-(lookup e traversal a poche hop su grafi medi). Non è un motore analitico OLAP.
+## What it is
+`mycypher` — an **embedded**, **single-binary** graph DB in **pure Go** that
+speaks a subset of **openCypher 9**. Target workload: **OLTP / knowledge-graph**
+(lookups and few-hop traversals over medium-sized graphs). It is not an
+analytical OLAP engine.
 
-## Vincoli rigidi (non negoziabili)
-- **Puro Go. Niente cgo.** Nessuna dipendenza che richieda un toolchain C.
-  Se una libreria utile richiede cgo, va scartata o sostituita.
-- **Single binary**: deve compilare in un eseguibile autosufficiente.
-- **Storage engine**: BadgerDB di default, dietro l'interfaccia `Store`. bbolt
-  come adapter alternativo. Lo strato superiore **non** dipende dall'engine
-  concreto.
-- Niente OLAP, niente vettorizzazione, niente distribuzione in v1.
+## Hard constraints (non-negotiable)
+- **Pure Go. No cgo.** No dependency that requires a C toolchain. If a useful
+  library requires cgo, it must be dropped or replaced.
+- **Single binary**: must compile into a self-contained executable.
+- **Storage engine**: BadgerDB by default, behind the `Store` interface. bbolt
+  as an alternative adapter. The upper layer **must not** depend on the concrete
+  engine.
+- No OLAP, no vectorization, no distribution in v1.
 
-## Invarianti di correttezza
-1. **Coerenza indici**: ogni mutazione aggiorna il record base **e tutte** le sue
-   chiavi-indice (`l`, `p`, `o`, `i`) **nella stessa transazione** (`Store.Update`).
-   Tutte le scritture passano da un unico punto in `internal/graph`. Mai scrivere
-   un record senza aggiornare i suoi indici nello stesso atto.
-2. **Encoding ordinabile**: le chiavi usano ID big-endian; i valori in `valEnc`
-   usano l'encoding order-preserving definito in `DESIGN.md §5`. Mai introdurre
-   length-prefix sulle stringhe indicizzate (rompe l'ordine).
-3. **No relazioni ripetute** nei path a lunghezza variabile (semantica trail di
-   openCypher 9): tracciare gli **ID di relazione** attraversati, non i nodi.
-4. **Adiacenza doppia**: ogni arco è scritto sia in `o` (uscenti) sia in `i`
-   (entranti). Le due viste devono restare sincronizzate.
+## Correctness invariants
+1. **Index consistency**: every mutation updates the base record **and all** of
+   its index keys (`l`, `p`, `o`, `i`) **in the same transaction**
+   (`Store.Update`). All writes go through a single point in `internal/graph`.
+   Never write a record without updating its indexes in the same act.
+2. **Order-preserving encoding**: keys use big-endian IDs; values in `valEnc`
+   use the order-preserving encoding defined in `DESIGN.md §5`. Never introduce
+   a length-prefix on indexed strings (it breaks ordering).
+3. **No repeated relationships** in variable-length paths (openCypher 9 trail
+   semantics): track the **relationship IDs** traversed, not the nodes.
+4. **Double adjacency**: every edge is written both in `o` (outgoing) and in `i`
+   (incoming). The two views must stay in sync.
 
 ## Layout
 ```
-cmd/mycypher/         entrypoint CLI/REPL
-internal/storage/     interfaccia Store + codec + adapter (badger, bolt)
-internal/catalog/     dizionari, contatori ID, registry indici
-internal/graph/       modello + CRUD transazionale + primitive traversal
+cmd/mycypher/         CLI/REPL entrypoint
+internal/storage/     Store interface + codec + adapters (badger, bolt)
+internal/catalog/     dictionaries, ID counters, index registry
+internal/graph/       model + transactional CRUD + traversal primitives
 internal/cypher/      ast, parser, sema, plan, exec
-mycypher.go           API pubblica embeddable (package mycypher)
+mycypher.go           public embeddable API (package mycypher)
 ```
-API pubblica solo nel package radice; tutto il resto in `internal/`.
+Public API only in the root package; everything else under `internal/`.
 
-## Comandi
+## Commands
 ```bash
 go build ./...                # build
 go test ./...                 # test
-go test -race ./...           # test con race detector (usare spesso)
-go test -run TestCodec ./internal/storage/codec   # singolo pacchetto
+go test -race ./...           # test with the race detector (use often)
+go test -run TestCodec ./internal/storage/codec   # single package
 golangci-lint run             # lint
 go test -bench . ./...        # benchmark
 ```
 
-## Convenzioni di codice
-- Errori: wrapping con `fmt.Errorf("...: %w", err)`; errori sentinella per i casi
-  gestibili (es. `ErrNotFound`). Niente `panic` nel percorso normale.
-- `context.Context` come primo parametro nei metodi pubblici di query.
-- Niente stato globale; il `*DB` incapsula lo `Store`.
-- Test: table-driven dove sensato; **property test** per il codec (round-trip +
-  ordinamento); usare `testing/quick` o `gopkg.in/check` solo puro Go.
-- Niente dipendenze inutili: preferire stdlib. Ogni nuova dipendenza va
-  giustificata e verificata che sia puro Go.
-- Tutto il codice in inglese: nomi, identificatori, commenti e stringhe
-  (messaggi d'errore, log, messaggi dei test). I documenti `DESIGN.md`/`PLAN.md`
-  e gli ADR restano in italiano.
+## Code conventions
+- Errors: wrap with `fmt.Errorf("...: %w", err)`; sentinel errors for
+  recoverable cases (e.g. `ErrNotFound`). No `panic` on the normal path.
+- `context.Context` as the first parameter in public query methods.
+- No global state; the `*DB` encapsulates the `Store`.
+- Tests: table-driven where it makes sense; **property tests** for the codec
+  (round-trip + ordering); use `testing/quick` or `gopkg.in/check`, pure Go only.
+- No needless dependencies: prefer the stdlib. Every new dependency must be
+  justified and verified to be pure Go.
+- All code in English: names, identifiers, comments and strings (error messages,
+  logs, test messages). Documentation (`DESIGN.md`/`PLAN.md`) and the ADRs are
+  also in English.
 
-## Come lavorare (per l'agente)
-- Procedere per **fasi** come in `PLAN.md`; non saltare i test di fondazione del
-  codec (Fase 1).
-- Puntare presto a una **vertical slice** end-to-end (Fase 6) anche con copertura
-  Cypher minima, poi allargare una clausola alla volta.
-- Prima di estendere la copertura Cypher, controllare che lo slice in
-  `DESIGN.md §8` non sia già sufficiente: **evitare scope creep**.
-- Per ogni nuovo operatore o encoding: scrivere prima il test, poi
-  l'implementazione.
-- Quando una scelta architetturale non è ovvia (es. parser ANTLR-gen vs a mano,
-  formato di serializzazione dei record), annotarla in un breve ADR in
-  `docs/adr/` e procedere.
+## How to work (for the agent)
+- Proceed by **phases** as in `PLAN.md`; do not skip the codec foundation tests
+  (Phase 1).
+- Aim early for an end-to-end **vertical slice** (Phase 6) even with minimal
+  Cypher coverage, then widen one clause at a time.
+- Before extending Cypher coverage, check that the slice in `DESIGN.md §8` is not
+  already sufficient: **avoid scope creep**.
+- For each new operator or encoding: write the test first, then the
+  implementation.
+- When an architectural choice is not obvious (e.g. ANTLR-gen vs hand-written
+  parser, record serialization format), record it in a short ADR under
+  `docs/adr/` and proceed.
 
-## Dipendenze previste (tutte puro Go)
-- `github.com/dgraph-io/badger/v4` — storage engine default.
-- `go.etcd.io/bbolt` — adapter alternativo (opzionale).
-- Parser: runtime ANTLR Go (`github.com/antlr4-go/antlr/v4`) **se** si sceglie la
-  via ANTLR-gen; altrimenti nessuna dipendenza (parser a mano).
-- Serializzazione record: da decidere (stdlib `encoding/binary` custom, o un
-  CBOR/MessagePack puro Go).
+## Expected dependencies (all pure Go)
+- `github.com/dgraph-io/badger/v4` — default storage engine.
+- `go.etcd.io/bbolt` — alternative adapter (optional).
+- Parser: ANTLR Go runtime (`github.com/antlr4-go/antlr/v4`) **if** the ANTLR-gen
+  route is chosen; otherwise no dependency (hand-written parser).
+- Record serialization: to be decided (custom stdlib `encoding/binary`, or a pure
+  Go CBOR/MessagePack).
 
-## Cosa NON fare
-- Non introdurre cgo per nessun motivo.
-- Non scrivere record senza aggiornarne gli indici nella stessa transazione.
-- Non implementare costrutti fuori dallo slice MVP finché lo slice non è solido.
-- Non aggiungere un processore vettorizzato/colonnare: fuori scope per design.
+## What NOT to do
+- Do not introduce cgo for any reason.
+- Do not write a record without updating its indexes in the same transaction.
+- Do not implement constructs outside the MVP slice until the slice is solid.
+- Do not add a vectorized/columnar processor: out of scope by design.

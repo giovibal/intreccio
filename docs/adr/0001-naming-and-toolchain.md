@@ -1,27 +1,28 @@
-# ADR 0001 — Naming e toolchain di base
+# ADR 0001 — Base naming and toolchain
 
-Stato: accettato — 2026-05-25
+Status: accepted — 2026-05-25
 
-## Contesto
-Avvio del progetto (Fase 0 di `PLAN.md`). I documenti di design usavano il nome di
-lavoro `grafo`, ma la repository è `github.com/giovibal/mycypher`. Vanno fissati
-module path, nome del package pubblico/binario e gli strumenti di build/lint/CI.
+## Context
+Project bootstrap (Phase 0 of `PLAN.md`). The design documents used the working
+name `grafo`, but the repository is `github.com/giovibal/mycypher`. The module
+path, the public package/binary name and the build/lint/CI tooling need to be
+fixed.
 
-## Decisione
-- **Naming uniforme su `mycypher`**: module `github.com/giovibal/mycypher`,
-  package pubblico `mycypher` (`mycypher.go`), binario `cmd/mycypher`. I
-  riferimenti a `grafo` nei documenti sono stati aggiornati. Motivazione:
-  coerenza con il nome della repository ed eliminazione del doppio nome.
-- **Task runner: Makefile**. Nessuna dipendenza extra (a differenza di Taskfile,
-  che richiede il binario `task`), in linea con "niente dipendenze inutili".
-- **Lint: golangci-lint v2** (config `version: "2"`). La CI scarica il binario v2
-  tramite l'action ufficiale, in modo deterministico e indipendente dall'ambiente
-  locale.
+## Decision
+- **Uniform naming on `mycypher`**: module `github.com/giovibal/mycypher`, public
+  package `mycypher` (`mycypher.go`), binary `cmd/mycypher`. References to `grafo`
+  in the documents have been updated. Rationale: consistency with the repository
+  name and elimination of the double name.
+- **Task runner: Makefile**. No extra dependency (unlike Taskfile, which requires
+  the `task` binary), in line with "no needless dependencies".
+- **Lint: golangci-lint v2** (config `version: "2"`). CI downloads the v2 binary
+  via the official action, deterministically and independently of the local
+  environment.
 
-## Conseguenze
-- Il package radice si chiama `mycypher` pur essendo alla radice del modulo
-  `.../mycypher`: import path e package name coincidono.
-- Il binario locale `golangci-lint 1.59.1` è troppo vecchio per Go 1.26 e per il
-  formato di config v2: va aggiornato a una release v2 per usare `make lint` in
-  locale. La CI non è impattata (usa la versione pinnata nell'action).
-- `go.mod` resta senza dipendenze fino alla Fase 1 (introduzione di BadgerDB).
+## Consequences
+- The root package is named `mycypher` even though it is at the root of the
+  `.../mycypher` module: import path and package name coincide.
+- The local `golangci-lint 1.59.1` binary is too old for Go 1.26 and the v2
+  config format: it must be upgraded to a v2 release to use `make lint` locally.
+  CI is unaffected (it uses the version pinned in the action).
+- `go.mod` stays dependency-free until Phase 1 (introduction of BadgerDB).
