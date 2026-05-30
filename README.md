@@ -5,11 +5,12 @@ that speaks a useful subset of **openCypher 9**. It targets **OLTP /
 knowledge-graph** workloads: point lookups and few-hop traversals over
 medium-sized graphs. It is *not* an analytical (OLAP) engine.
 
-> Work in progress. Cypher reads and writes, aggregations
-> (count/sum/avg/min/max/collect) with implicit grouping, `DISTINCT`, ORDER BY,
-> SKIP, LIMIT, WITH chaining and variable-length traversal (with trail
-> semantics — no repeated relationships) all run end-to-end through the public
-> API. See the roadmap below.
+> Pre-1.0 and under active development, but functional end-to-end: reads,
+> writes, aggregations (count/sum/avg/min/max/collect), `DISTINCT`,
+> `ORDER BY`/`SKIP`/`LIMIT`, `WITH` chaining, variable-length traversal (trail
+> semantics — no repeated relationships) and Cypher-managed indexes all run
+> through the public API. An optional **Raft-replicated cluster mode** adds high
+> availability (see [Clustering](#clustering-optional-high-availability)).
 
 ## Highlights
 
@@ -228,25 +229,6 @@ Write side:
 `shortestPath`/`allShortestPaths`, subqueries (`EXISTS { }`, `CALL { }`), user-defined
 procedures, path variables (`p = (...)`) and full TCK conformance.
 
-## Roadmap
-
-Development proceeds in phases (details in `PLAN.md`):
-
-- [x] Phase 0 — Scaffolding
-- [x] Phase 1 — Storage layer + codec
-- [x] Phase 2 — Graph layer (CRUD + traversal primitives)
-- [x] Phase 3 — Parser → AST
-- [x] Phase 4 — Semantic analysis
-- [x] Phase 5 — Logical plan + rule-based planner
-- [x] Phase 6 — Executor (read path): first end-to-end query
-- [x] Phase 7 — Write path (Cypher)
-- [x] Phase 8 — Advanced projection and traversal
-- [x] Phase 9 — Indexes managed via Cypher + CLI/REPL
-- [x] Phase 10 — Hardening: fuzz tests on parser + codec, benchmarks
-  (insert/traversal/indexed lookup, end-to-end query), persistence test across
-  reopen, and godoc examples. The openCypher TCK subset is deferred as future
-  work.
-
 ## Versioning
 
 Releases follow [Semantic Versioning](https://semver.org/) with a `v` prefix
@@ -260,7 +242,6 @@ readable by another. A release is cut by pushing a tag; see
 ## Documentation
 
 - `DESIGN.md` — high-level architecture (source of truth).
-- `PLAN.md` — phased development plan.
 - `docs/adr/` — architecture decision records.
 
 All documentation and code (identifiers, comments and strings) is in English.
