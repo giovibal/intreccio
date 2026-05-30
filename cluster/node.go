@@ -113,6 +113,15 @@ func newNode(cfg Config) (*Node, error) {
 	rcfg := raft.DefaultConfig()
 	rcfg.LocalID = raft.ServerID(cfg.NodeID)
 	rcfg.LogOutput = logOutput
+	if cfg.SnapshotThreshold > 0 {
+		rcfg.SnapshotThreshold = cfg.SnapshotThreshold
+	}
+	if cfg.TrailingLogs > 0 {
+		rcfg.TrailingLogs = cfg.TrailingLogs
+	}
+	if cfg.SnapshotInterval > 0 {
+		rcfg.SnapshotInterval = cfg.SnapshotInterval
+	}
 
 	f := newFSM(store, store, cfg.DataDir)
 	r, err := raft.NewRaft(rcfg, f, boltStore, boltStore, snaps, trans)

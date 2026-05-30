@@ -11,9 +11,10 @@ import (
 
 // testCluster is an in-process cluster of voters for integration tests.
 type testCluster struct {
-	nodes []*Node
-	dbs   []*mycypher.DB
-	peers []Peer
+	nodes   []*Node
+	dbs     []*mycypher.DB
+	peers   []Peer
+	configs []Config
 }
 
 // startCluster brings up n voters (node 0 bootstraps and adds the rest). Each
@@ -49,6 +50,7 @@ func startCluster(t *testing.T, n int, opts ...func(*Config)) *testCluster {
 		}
 		tc.nodes = append(tc.nodes, node)
 		tc.dbs = append(tc.dbs, mycypher.New(node))
+		tc.configs = append(tc.configs, cfg)
 	}
 	t.Cleanup(func() {
 		for _, nd := range tc.nodes {

@@ -56,4 +56,15 @@ type Config struct {
 	// ApplyTimeout bounds a single replicated write, read barrier and add-voter.
 	// Zero uses defaultApplyTimeout.
 	ApplyTimeout time.Duration
+
+	// SnapshotThreshold is the number of committed log entries since the last
+	// snapshot that triggers a new automatic snapshot. Zero uses the Raft default.
+	SnapshotThreshold uint64
+	// TrailingLogs is how many log entries to retain after a snapshot. A behind
+	// follower within this window catches up by log replication; further behind it
+	// receives a full snapshot (InstallSnapshot). Zero uses the Raft default.
+	TrailingLogs uint64
+	// SnapshotInterval is how often Raft checks whether to take a snapshot. Zero
+	// uses the Raft default.
+	SnapshotInterval time.Duration
 }
