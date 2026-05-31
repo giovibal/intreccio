@@ -121,7 +121,7 @@ func (n *Node) callLeader(args *ForwardArgs) (*ForwardReply, error) {
 	if !ok {
 		return nil, fmt.Errorf("cluster: no forwarding address for leader %q", leaderID)
 	}
-	return dialAndCall(addr, args)
+	return n.pool.call(addr, args)
 }
 
 // forward is the voter-side entry used by the root router: it forwards a query
@@ -141,21 +141,6 @@ func (n *Node) forward(cypher string, params map[string]any, write, linearizable
 		return nil, nil, errors.New(rep.Err)
 	}
 	return rep.Columns, desanitizeRows(rep.Rows), nil
-}
-
-// dialAndCall performs a single forwarding RPC to addr.
-func dialAndCall(addr string, args *ForwardArgs) (*ForwardReply, error) {
-	client, err := rpc.Dial("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("cluster: dial %s: %w", addr, err)
-	}
-	defer func() { _ = client.Close() }()
-
-	var reply ForwardReply
-	if err := client.Call("Forward.Query", args, &reply); err != nil {
-		return nil, fmt.Errorf("cluster: forward call: %w", err)
-	}
-	return &reply, nil
 }
 
 // --- nil-safe wire sanitization -------------------------------------------------

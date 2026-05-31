@@ -53,6 +53,8 @@ type Node struct {
 	fwdListener     net.Listener
 	localExec       localExecutor
 	applyTimeout    time.Duration
+	// pool reuses outbound forwarding connections (to the leader when proxying).
+	pool *connPool
 
 	// writeMu serializes the stage→propose→apply sequence so each statement sees
 	// the fully-applied state of all prior writes.
@@ -153,6 +155,7 @@ func newNode(cfg Config) (*Node, error) {
 		forwardAddrByID: forwardAddrMap(cfg),
 		applyTimeout:    applyTimeout,
 		storeMu:         storeMu,
+		pool:            newConnPool(0),
 		stop:            make(chan struct{}),
 	}
 
@@ -288,6 +291,9 @@ func (n *Node) Close() error {
 	}
 	if n.fwdListener != nil {
 		keep(n.fwdListener.Close())
+	}
+	if n.pool != nil {
+		keep(n.pool.Close())
 	}
 	if n.raft != nil {
 		keep(n.raft.Shutdown().Error())

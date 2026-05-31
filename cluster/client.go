@@ -14,6 +14,7 @@ import (
 type client struct {
 	peers []Peer // voters to contact (each with a ForwardAddr)
 	next  atomic.Uint64
+	pool  *connPool
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -29,7 +30,7 @@ func newClient(cfg Config) (*client, error) {
 	if len(voters) == 0 {
 		return nil, errors.New("cluster: client requires at least one peer with a ForwardAddr")
 	}
-	return &client{peers: voters}, nil
+	return &client{peers: voters, pool: newConnPool(0)}, nil
 }
 
 // IsLeader is always false for a client.
@@ -55,7 +56,7 @@ func (c *client) Forward(cypher string, params map[string]any, write, linearizab
 	var lastErr error
 	for i := range c.peers {
 		p := c.peers[(start+i)%len(c.peers)]
-		rep, err := dialAndCall(p.ForwardAddr, args)
+		rep, err := c.pool.call(p.ForwardAddr, args)
 		if err != nil {
 			lastErr = err
 			continue // voter unreachable: try the next one
@@ -82,5 +83,5 @@ func (c *client) ApplyWrite(func(storage.Txn) (any, error)) (any, error) {
 	return nil, errors.New("cluster: client has no local store")
 }
 
-// Close releases the client (nothing to release).
-func (c *client) Close() error { return nil }
+// Close releases the client's pooled connections.
+func (c *client) Close() error { return c.pool.Close() }
