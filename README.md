@@ -159,15 +159,61 @@ Notes for operators:
 - It uses **full replication** to the quorum (each voter holds the whole graph);
   sharding is out of scope.
 
-A cluster-capable build of the CLI is available behind a build tag (it links Raft,
-so it is not the default binary):
+### Try a cluster locally (multiple terminals)
+
+The CLI can run a cluster node per process behind the `cluster` build tag (it
+links Raft, so it is not the default binary). Build it once:
 
 ```bash
-go build -tags cluster ./cmd/intreccio
-intreccio -cluster-id n1 -cluster-data data/n1 \
-  -cluster-bind 10.0.0.1:7000 -cluster-forward 10.0.0.1:7001 \
-  -cluster-bootstrap -cluster-peers 'n1=10.0.0.1:7000=10.0.0.1:7001,...'
+make cluster-cli      # or: go build -tags cluster -o intreccio ./cmd/intreccio
 ```
+
+All nodes share one **peer string** listing every voter as
+`id=raftAddr=forwardAddr`:
+
+```bash
+export PEERS='n1=127.0.0.1:7001=127.0.0.1:8001,n2=127.0.0.1:7002=127.0.0.1:8002,n3=127.0.0.1:7003=127.0.0.1:8003'
+```
+
+Open a terminal per node. Without `-c`, each becomes an interactive REPL on that
+node; statements end with `;`.
+
+```bash
+# terminal 1 — voter n1 (exactly one voter bootstraps the cluster)
+./intreccio -cluster-id n1 -cluster-data /tmp/intreccio/n1 \
+  -cluster-bind 127.0.0.1:7001 -cluster-forward 127.0.0.1:8001 \
+  -cluster-bootstrap -cluster-peers "$PEERS"
+
+# terminal 2 — voter n2 (same, no -cluster-bootstrap, ports …2)
+./intreccio -cluster-id n2 -cluster-data /tmp/intreccio/n2 \
+  -cluster-bind 127.0.0.1:7002 -cluster-forward 127.0.0.1:8002 -cluster-peers "$PEERS"
+
+# terminal 3 — voter n3 (ports …3)
+./intreccio -cluster-id n3 -cluster-data /tmp/intreccio/n3 \
+  -cluster-bind 127.0.0.1:7003 -cluster-forward 127.0.0.1:8003 -cluster-peers "$PEERS"
+
+# terminal 4+ — a dataless client (needs only id, role and the peers)
+./intreccio -cluster-id c1 -cluster-role client -cluster-peers "$PEERS"
+```
+
+Type Cypher in any terminal — writes are forwarded to the leader, reads are
+served by the node you typed into:
+
+```cypher
+CREATE (n:Person {name: 'Bob'}) RETURN n.name AS name;
+MATCH (p:Person) RETURN p.name AS name;
+```
+
+- **One-shot:** append `-c "QUERY"` to run a single statement and exit (handy for
+  scripts or quick checks from a client).
+- **Failover:** stopping the leader's terminal (`:quit`, Ctrl-D, or Ctrl-C) drops
+  that node; the remaining voters re-elect and clients keep working (a 3-voter
+  cluster tolerates losing one). Restart it with the same command **without**
+  `-cluster-bootstrap` and it rejoins and catches up.
+- A voter process runs only while its terminal/REPL is open.
+- **Consistency:** the REPL does default (local, possibly slightly stale) reads;
+  strongly-consistent read-your-writes (`intreccio.Linearizable()`) is available
+  through the library API, not as a REPL flag.
 
 ## Architecture
 
