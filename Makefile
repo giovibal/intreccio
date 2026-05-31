@@ -1,4 +1,4 @@
-.PHONY: build test race lint bench fmt tidy run dist checksums clean-dist
+.PHONY: build cluster-cli test race lint bench fmt tidy run dist checksums clean-dist
 
 # Release build configuration. VERSION defaults to the current git description and
 # can be overridden (the release workflow passes the tag, e.g. VERSION=v0.1.0).
@@ -16,6 +16,11 @@ SHASUM    := $(shell command -v sha256sum >/dev/null 2>&1 && echo "sha256sum" ||
 
 build:
 	go build ./...
+
+# cluster-cli builds the cluster-capable CLI (links Raft). The default `build`
+# target stays embedded-only and Raft-free.
+cluster-cli:
+	go build -tags cluster -o intreccio ./cmd/intreccio
 
 test:
 	go test ./...

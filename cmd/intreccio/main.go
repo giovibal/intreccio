@@ -57,7 +57,7 @@ func main() {
 		return
 	}
 
-	db, err := openSelected(flag.Arg(0))
+	db, clustered, err := openSelected(flag.Arg(0))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 		os.Exit(1)
@@ -72,7 +72,7 @@ func main() {
 		return
 	}
 
-	if flag.Arg(0) == "" && isTerminal(os.Stdin) {
+	if !clustered && flag.Arg(0) == "" && isTerminal(os.Stdin) {
 		fmt.Fprintln(os.Stderr, "(no path given: opened in-memory database)")
 	}
 	repl(db, os.Stdin, os.Stdout, os.Stderr)
@@ -85,14 +85,16 @@ func main() {
 var clusterOpen func() (*intreccio.DB, bool, error)
 
 // openSelected opens a clustered DB when cluster flags are present (only in the
-// `-tags cluster` build), otherwise a local one.
-func openSelected(path string) (*intreccio.DB, error) {
+// `-tags cluster` build), otherwise a local one. The bool reports whether a
+// clustered DB was opened.
+func openSelected(path string) (*intreccio.DB, bool, error) {
 	if clusterOpen != nil {
 		if db, ok, err := clusterOpen(); ok || err != nil {
-			return db, err
+			return db, true, err
 		}
 	}
-	return openDB(path)
+	db, err := openDB(path)
+	return db, false, err
 }
 
 func openDB(path string) (*intreccio.DB, error) {

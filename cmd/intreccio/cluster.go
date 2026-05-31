@@ -58,6 +58,9 @@ func openCluster() (*intreccio.DB, bool, error) {
 		Peers:       peers,
 		LogOutput:   os.Stderr,
 	})
+	if err == nil {
+		fmt.Fprintf(os.Stderr, "connected to cluster node %q (%s)\n", *clusterID, *clusterRole)
+	}
 	return db, true, err
 }
 
