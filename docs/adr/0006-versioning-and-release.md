@@ -4,7 +4,7 @@ Status: accepted — 2026-05-30
 
 ## Context
 The project must be made consumable by other projects, both as a **library**
-(`github.com/giovibal/mycypher`) and as a **CLI** (`cmd/mycypher`). We need to fix:
+(`github.com/giovibal/intreccio`) and as a **CLI** (`cmd/intreccio`). We need to fix:
 (a) the versioning strategy and the git tag conventions, (b) the build and binary
 publishing mechanism, (c) the level of automation. Current state: no tags, no
 version plumbing in the binary, CI already in place (build, vet, `go test -race`,
