@@ -3,7 +3,7 @@
 Status: accepted — 2026-05-30
 
 ## Context
-`mycypher` is an embedded, single-binary, pure-Go graph DB. DESIGN §12 listed
+`intreccio` is an embedded, single-binary, pure-Go graph DB. DESIGN §12 listed
 distribution as future work and CLAUDE.md stated "no distribution in v1". We now
 want multiple services that embed the library to **share one logical database**
 with **high availability (HA)**, configured **from the library** (no separate
@@ -20,10 +20,10 @@ Requirements that shape the decision:
 ## Decisions
 
 ### Clustering is an opt-in capability, not a core change
-The default embedded path (`mycypher.Open`/`OpenInMemory`, the CLI) is unchanged
+The default embedded path (`intreccio.Open`/`OpenInMemory`, the CLI) is unchanged
 and **does not link** the clustering code or its dependencies. Clustering lives in
 the opt-in public `cluster` package (`cluster.Open`, `cluster.Config`), wired into
-the core through a small `mycypher.Backend` seam so the core package never imports
+the core through a small `intreccio.Backend` seam so the core package never imports
 the clustering code. This keeps the single-binary, minimal-dependency identity
 intact for embedded users. CLAUDE.md and DESIGN §12 are updated to reposition distribution as a **v2,
 opt-in** capability rather than a forbidden one.
@@ -97,7 +97,7 @@ A spike (`cluster/spike_test.go`) confirmed, under `-race` and with
   brings `go.etcd.io/bbolt`, aligning with the planned bbolt adapter). All pure Go.
   Linked only when the `cluster` package is imported.
 - The public API gains the `cluster` package (`cluster.Open`/`cluster.Config`) and
-  a `mycypher.Backend` extension seam; a per-query read consistency option arrives
+  a `intreccio.Backend` extension seam; a per-query read consistency option arrives
   in Phase C. `Open`/`Query` semantics for embedded use are unchanged.
 - Scope boundaries (see the plan): no sharding, no multi-statement interactive
   transactions across round-trips, no WAN/dynamic discovery in this iteration.
