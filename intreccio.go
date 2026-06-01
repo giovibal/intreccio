@@ -7,7 +7,7 @@ import (
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/query/ast"
-	"github.com/giovibal/intreccio/internal/cypher/exec"
+	"github.com/giovibal/intreccio/internal/exec"
 	"github.com/giovibal/intreccio/query/parser"
 	"github.com/giovibal/intreccio/query/plan"
 	"github.com/giovibal/intreccio/query/sema"

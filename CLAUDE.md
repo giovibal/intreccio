@@ -41,13 +41,13 @@ cmd/intreccio/         CLI/REPL entrypoint
 internal/storage/     Store interface + codec + adapters (badger, bolt)
 internal/catalog/     dictionaries, ID counters, index registry
 internal/graph/       model + transactional CRUD + traversal primitives
-internal/cypher/exec/ executor operators (Volcano) — the engine
+internal/exec/        executor operators (Volcano) — the engine
 query/                public openCypher front-end: ast, parser, sema, plan
 intreccio.go           public embeddable API (package intreccio)
 cluster/               opt-in Raft clustering (public, built only when imported)
 ```
 Public surface = the root `intreccio` package + the `query/*` openCypher
-front-end + the opt-in `cluster` package. The engine (`internal/cypher/exec`)
+front-end + the opt-in `cluster` package. The engine (`internal/exec`)
 and the write path (`internal/graph`, `internal/catalog`, `internal/storage`,
 `internal/storage/codec`) stay under `internal/` — this is what keeps the
 write-path invariants (below) enforceable and the on-disk format private.

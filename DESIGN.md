@@ -257,8 +257,7 @@ intreccio/
       bolt/             # bbolt adapter (optional)
     catalog/            # dictionaries, counters, index registry
     graph/              # model + transactional CRUD + traversal primitives
-    cypher/
-      exec/             # executor operators (Volcano) — the engine
+    exec/               # executor operators (Volcano) — the engine
   intreccio.go           # public embeddable API (package intreccio)
   cluster/               # opt-in Raft clustering (linked only when imported)
   CLAUDE.md DESIGN.md PLAN.md
@@ -267,7 +266,7 @@ intreccio/
 
 > Public surface: the root `intreccio` embeddable API, the `query/*` openCypher
 > front-end (a pure-Go parser/analyzer/planner usable without a database), and
-> the opt-in `cluster` package. The engine (`internal/cypher/exec`) and the
+> the opt-in `cluster` package. The engine (`internal/exec`) and the
 > write path (`graph`, `catalog`, `storage`, `codec`) stay under `internal/`, so
 > the write-path invariants stay enforceable and the on-disk format stays
 > private. Module name: `github.com/giovibal/intreccio`.
