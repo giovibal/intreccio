@@ -68,10 +68,29 @@ func TestSnapshotRestoreOnRestart(t *testing.T) {
 	defer func() { _ = node2.Close() }()
 	db2 := intreccio.New(node2)
 
-	got := mustQuery(t, db2, matchNames)
-	if !equal(got, []string{"A", "B", "C", "D"}) {
-		t.Fatalf("after snapshot+restart: %v, want [A B C D]", got)
+	// Recovery (restore snapshot + replay trailing log) runs asynchronously after
+	// newNode returns, so poll the local replica until it converges rather than
+	// reading once — an immediate read can race ahead of the trailing-log replay.
+	waitForNamesLocal(t, db2, []string{"A", "B", "C", "D"}, 20*time.Second)
+}
+
+// waitForNamesLocal polls a local (non-linearizable) read until the names match
+// want, or the timeout elapses.
+func waitForNamesLocal(t *testing.T, db *intreccio.DB, want []string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var got []string
+	for time.Now().Before(deadline) {
+		res, err := db.Query(context.Background(), matchNames, nil)
+		if err == nil {
+			got = names(res.Rows)
+			if equal(got, want) {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
+	t.Fatalf("after snapshot+restart: %v, want %v", got, want)
 }
 
 // TestQuorumLossHaltsWrites verifies the cluster preserves safety: with a
