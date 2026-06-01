@@ -276,8 +276,7 @@ internal/
     bolt/                bbolt adapter (optional)
   catalog/               dictionaries, ID counters, index registry
   graph/                 model + transactional CRUD + traversal primitives
-  cypher/
-    exec/                executor operators (Volcano) — the engine
+  exec/                  executor operators (Volcano) — the engine
 cluster/                 optional Raft-replicated clustering (opt-in)
 intreccio.go             public embeddable API (package intreccio)
 docs/adr/                architecture decision records
