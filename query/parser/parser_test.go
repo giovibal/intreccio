@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // --- AST constructor helpers ---

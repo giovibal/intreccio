@@ -1,6 +1,6 @@
 package sema
 
-import "github.com/giovibal/intreccio/internal/cypher/ast"
+import "github.com/giovibal/intreccio/query/ast"
 
 // scope is the ordered set of variables visible at a point in the query.
 type scope struct {

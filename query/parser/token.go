@@ -1,6 +1,6 @@
 package parser
 
-import "github.com/giovibal/intreccio/internal/cypher/ast"
+import "github.com/giovibal/intreccio/query/ast"
 
 type tokenType int
 

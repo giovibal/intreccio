@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // SemaError is a semantic error with a position in the source.

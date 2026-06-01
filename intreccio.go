@@ -6,11 +6,11 @@ import (
 	"fmt"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/cypher/exec"
-	"github.com/giovibal/intreccio/internal/cypher/parser"
-	"github.com/giovibal/intreccio/internal/cypher/plan"
-	"github.com/giovibal/intreccio/internal/cypher/sema"
+	"github.com/giovibal/intreccio/query/parser"
+	"github.com/giovibal/intreccio/query/plan"
+	"github.com/giovibal/intreccio/query/sema"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )

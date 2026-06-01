@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // Explain renders the plan as an indented text tree (root at the top).

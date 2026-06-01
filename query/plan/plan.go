@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // Catalog provides the planner with information about the available indexes. In
@@ -14,6 +14,15 @@ import (
 type Catalog interface {
 	HasIndex(label, propKey string) bool
 }
+
+// NoIndexes is a Catalog that reports no indexes. It is the convenient choice
+// for callers that plan a query without a database — e.g. parsing and inspecting
+// the plan of an openCypher query as a standalone library.
+var NoIndexes Catalog = noIndexes{}
+
+type noIndexes struct{}
+
+func (noIndexes) HasIndex(_, _ string) bool { return false }
 
 // Plan builds the physical plan for the query (read path; writing is Phase 7).
 func Plan(q *ast.Query, cat Catalog) (Op, error) {

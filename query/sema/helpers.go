@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 func clausePos(c ast.Clause) ast.Pos {

@@ -3,7 +3,7 @@ package exec
 import (
 	"fmt"
 
-	"github.com/giovibal/intreccio/internal/cypher/plan"
+	"github.com/giovibal/intreccio/query/plan"
 )
 
 // argumentOp is the single-row source that backs the Inner subtree of an
