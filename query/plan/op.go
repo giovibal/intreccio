@@ -2,9 +2,13 @@
 // (iterator/Volcano model) using a rule-based planner (DESIGN §9). In v1 there is
 // no cost-based planning: the rules produce operators bound to access methods
 // directly.
+//
+// The planner is decoupled from storage through the [Catalog] interface, so it
+// can be used as a standalone library. Callers without a database can pass
+// [NoIndexes]. Render a plan as text with [Explain].
 package plan
 
-import "github.com/giovibal/intreccio/internal/cypher/ast"
+import "github.com/giovibal/intreccio/query/ast"
 
 // Op is a plan operator.
 type Op interface{ op() }

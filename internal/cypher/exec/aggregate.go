@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
-	"github.com/giovibal/intreccio/internal/cypher/plan"
+	"github.com/giovibal/intreccio/query/ast"
+	"github.com/giovibal/intreccio/query/plan"
 	"github.com/giovibal/intreccio/internal/graph"
 )
 

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
-	"github.com/giovibal/intreccio/internal/cypher/parser"
+	"github.com/giovibal/intreccio/query/ast"
+	"github.com/giovibal/intreccio/query/parser"
 )
 
 type fakeCatalog struct{ idx map[string]bool }

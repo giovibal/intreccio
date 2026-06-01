@@ -110,6 +110,29 @@ REPL commands: `:quit` / `:exit` to leave, `:help` for help. Statements can span
 multiple lines; the terminator is `;` (a `;` inside a string literal is not
 currently recognized as a boundary).
 
+### Use the Cypher parser standalone
+
+The openCypher front-end lives in `query/*` and is importable on its own — a
+pure-Go parser, analyzer and planner with **no database attached**. Useful for
+linting or formatting queries, IDE/tooling, or building on top of the plan tree.
+Callers without an index catalog pass `plan.NoIndexes`:
+
+```go
+import (
+    "fmt"
+
+    "github.com/giovibal/intreccio/query/parser"
+    "github.com/giovibal/intreccio/query/plan"
+)
+
+q, _ := parser.Parse("MATCH (p:Person) WHERE p.age > 30 RETURN p.name AS name")
+op, _ := plan.Plan(q, plan.NoIndexes)
+fmt.Print(plan.Explain(op))
+// Project(p.name AS name)
+//   Filter(p.age > 30)
+//     NodeByLabelScan(p:Person)
+```
+
 ## Clustering (optional, high availability)
 
 For high availability, intreccio can run as a **Raft-replicated** cluster,
@@ -241,6 +264,11 @@ range predicates.
 
 ```
 cmd/intreccio/            CLI/REPL entrypoint (single binary)
+query/                    public openCypher front-end (importable standalone)
+  ast/                   AST types
+  parser/                hand-written lexer + recursive-descent/Pratt parser
+  sema/                  semantic analysis
+  plan/                  rule-based planner + EXPLAIN
 internal/
   storage/               Store interface + engine adapters
     codec/               order-preserving key & value encoding
@@ -249,18 +277,15 @@ internal/
   catalog/               dictionaries, ID counters, index registry
   graph/                 model + transactional CRUD + traversal primitives
   cypher/
-    ast/                 AST types
-    parser/              hand-written lexer + recursive-descent/Pratt parser
-    sema/                semantic analysis
-    plan/                rule-based planner + EXPLAIN
-    exec/                executor operators (Volcano)
+    exec/                executor operators (Volcano) — the engine
 cluster/                 optional Raft-replicated clustering (opt-in)
 intreccio.go             public embeddable API (package intreccio)
 docs/adr/                architecture decision records
 ```
 
-The public, embeddable API lives in the root `intreccio` package (plus the opt-in
-`cluster` package); everything else is under `internal/`.
+The public surface is the root `intreccio` package, the `query/*` openCypher
+front-end (usable without a database), and the opt-in `cluster` package; the
+engine and the write path stay under `internal/`.
 
 ## Supported Cypher
 

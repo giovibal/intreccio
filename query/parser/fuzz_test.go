@@ -3,8 +3,8 @@ package parser
 import (
 	"testing"
 
-	"github.com/giovibal/intreccio/internal/cypher/plan"
-	"github.com/giovibal/intreccio/internal/cypher/sema"
+	"github.com/giovibal/intreccio/query/plan"
+	"github.com/giovibal/intreccio/query/sema"
 )
 
 // noIndexCatalog satisfies plan.Catalog for fuzzing without touching storage.

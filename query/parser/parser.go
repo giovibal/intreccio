@@ -1,12 +1,17 @@
-// Package parser translates Cypher text into an AST (recursive descent + Pratt for
-// expressions), limited to the MVP slice (DESIGN §8).
+// Package parser translates openCypher 9 query text into an AST (recursive
+// descent + Pratt for expressions), limited to the supported slice (DESIGN §8).
+//
+// It is a pure-Go, dependency-free front-end and can be used on its own — no
+// database required. Pair it with [github.com/giovibal/intreccio/query/sema] to
+// validate a query and with [github.com/giovibal/intreccio/query/plan] to build
+// and inspect a physical plan.
 package parser
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/cypher/ast"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // Parse parses a Cypher query and returns the AST, or a *ParseError.

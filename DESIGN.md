@@ -245,6 +245,11 @@ stay separate (`Query` read-only, `Execute` write). Decision in Phase 7.
 ```
 intreccio/
   cmd/intreccio/         # CLI/REPL entrypoint (single binary)
+  query/                 # public openCypher front-end (importable standalone)
+    ast/                # AST types
+    parser/             # parser (hand-written, recursive descent + Pratt)
+    sema/               # semantic analysis / scope resolution
+    plan/               # logical+physical plan, rule-based planner
   internal/
     storage/            # Store interface + engine adapters
       codec/            # key & value encoding (order-preserving)
@@ -253,18 +258,19 @@ intreccio/
     catalog/            # dictionaries, counters, index registry
     graph/              # model + transactional CRUD + traversal primitives
     cypher/
-      ast/              # AST types
-      parser/           # parser (ANTLR-gen or hand-written)
-      sema/             # semantic analysis / binding
-      plan/             # logical+physical plan, rule-based planner
-      exec/             # executor operators (Volcano)
+      exec/             # executor operators (Volcano) — the engine
   intreccio.go           # public embeddable API (package intreccio)
+  cluster/               # opt-in Raft clustering (linked only when imported)
   CLAUDE.md DESIGN.md PLAN.md
   go.mod
 ```
 
-> `internal/` for everything that is not public API; the embeddable API lives in
-> the root `intreccio` package. Module name: `github.com/giovibal/intreccio`.
+> Public surface: the root `intreccio` embeddable API, the `query/*` openCypher
+> front-end (a pure-Go parser/analyzer/planner usable without a database), and
+> the opt-in `cluster` package. The engine (`internal/cypher/exec`) and the
+> write path (`graph`, `catalog`, `storage`, `codec`) stay under `internal/`, so
+> the write-path invariants stay enforceable and the on-disk format stays
+> private. Module name: `github.com/giovibal/intreccio`.
 
 ## 12. Future evolution (outside v1)
 - **Replication / distribution (v2, opt-in)**: a Raft-replicated state machine
