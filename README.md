@@ -27,6 +27,9 @@ medium-sized graphs. It is *not* an analytical (OLAP) engine.
   scan, and secondary property indexes support range queries.
 - **ACID transactions** with always-consistent indexes (every mutation updates
   the base record and all of its index keys in the same transaction).
+- **Durable writes by default** — committed writes are fsynced before `Query`
+  returns, so they survive an OS crash or power loss (`WithSyncWrites(false)`
+  opts out for higher throughput).
 - **Rule-based query planner** with an inspectable textual `EXPLAIN`.
 
 ## Quickstart
@@ -93,6 +96,12 @@ func main() {
 	}
 }
 ```
+
+By default every committed write is made durable (fsynced) before `Query`
+returns, so it survives an OS crash or power loss. If you prefer higher write
+throughput and can tolerate losing the most recent writes on such a crash, open
+the database with `intreccio.Open("data/", intreccio.WithSyncWrites(false))`.
+The store stays consistent either way. (In-memory databases are unaffected.)
 
 ### Use the CLI / REPL
 

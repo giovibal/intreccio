@@ -74,9 +74,28 @@ type queryOptions struct{ linearizable bool }
 // non-clustered database (local reads are already consistent there).
 func Linearizable() QueryOption { return func(o *queryOptions) { o.linearizable = true } }
 
-// Open opens (or creates) the database in the given directory.
-func Open(path string) (*DB, error) {
-	store, err := badgerstore.Open(path)
+// OpenOption configures how Open opens a database.
+type OpenOption func(*openOptions)
+
+type openOptions struct{ syncWrites bool }
+
+// WithSyncWrites controls whether committed writes are made durable (fsynced)
+// before Query returns. It is enabled by default, so writes survive an OS crash
+// or power loss. Passing false trades that durability for higher write
+// throughput: recent writes may then be lost after a crash, though the store
+// itself stays consistent. It has no effect on an in-memory database.
+func WithSyncWrites(on bool) OpenOption {
+	return func(o *openOptions) { o.syncWrites = on }
+}
+
+// Open opens (or creates) the database in the given directory. Writes are made
+// durable by default; pass WithSyncWrites(false) to trade durability for speed.
+func Open(path string, opts ...OpenOption) (*DB, error) {
+	o := openOptions{syncWrites: true}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	store, err := badgerstore.OpenWithOptions(path, badgerstore.Options{SyncWrites: o.syncWrites})
 	if err != nil {
 		return nil, err
 	}

@@ -20,11 +20,27 @@ type Store struct {
 	db *badger.DB
 }
 
+// Options tunes the Badger engine. The zero value is the durable default, so a
+// plain Options{} fsyncs committed writes.
+type Options struct {
+	// SyncWrites makes every committed write durable (fsync) before Update
+	// returns, at some throughput cost. When false, recent writes may be lost
+	// after an OS crash or power loss; the store stays consistent either way.
+	SyncWrites bool
+}
+
 var _ storage.Store = (*Store)(nil)
 
-// Open opens (or creates) a Badger database in the given directory.
+// Open opens (or creates) a durable Badger database in the given directory.
+// It is equivalent to OpenWithOptions with the durable defaults.
 func Open(path string) (*Store, error) {
-	return open(badger.DefaultOptions(path))
+	return OpenWithOptions(path, Options{SyncWrites: true})
+}
+
+// OpenWithOptions opens (or creates) a Badger database in the given directory
+// with explicit engine options.
+func OpenWithOptions(path string, opts Options) (*Store, error) {
+	return open(badger.DefaultOptions(path).WithSyncWrites(opts.SyncWrites))
 }
 
 // OpenInMemory opens a fully in-RAM Badger database (useful in tests).

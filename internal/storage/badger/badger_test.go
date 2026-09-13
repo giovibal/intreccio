@@ -54,6 +54,46 @@ func TestSetGetDelete(t *testing.T) {
 	}
 }
 
+// OpenWithOptions must plumb SyncWrites through and persist data across a
+// close/reopen for both settings.
+func TestOpenWithOptionsPersists(t *testing.T) {
+	for _, syncWrites := range []bool{true, false} {
+		t.Run(fmt.Sprintf("sync=%v", syncWrites), func(t *testing.T) {
+			dir := t.TempDir()
+			s, err := OpenWithOptions(dir, Options{SyncWrites: syncWrites})
+			if err != nil {
+				t.Fatalf("OpenWithOptions: %v", err)
+			}
+			if err := s.Update(func(tx storage.Txn) error {
+				return tx.Set([]byte("k"), []byte("v"))
+			}); err != nil {
+				t.Fatalf("set: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			s2, err := OpenWithOptions(dir, Options{SyncWrites: syncWrites})
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer func() { _ = s2.Close() }()
+			if err := s2.View(func(tx storage.Txn) error {
+				got, err := tx.Get([]byte("k"))
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(got, []byte("v")) {
+					t.Errorf("got %q want %q", got, "v")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestGetNotFound(t *testing.T) {
 	s := newStore(t)
 	err := s.View(func(tx storage.Txn) error {
