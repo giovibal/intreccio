@@ -6,13 +6,13 @@ import (
 	"fmt"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/exec"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
+	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/parser"
 	"github.com/giovibal/intreccio/query/plan"
 	"github.com/giovibal/intreccio/query/sema"
-	"github.com/giovibal/intreccio/internal/storage"
-	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 // Backend is the storage/execution backend behind a DB. It is implemented by
@@ -55,7 +55,7 @@ type clusterBackend interface {
 	// dataless client returns false, so every query is forwarded.
 	Local() bool
 	ReadBarrier() error
-	Forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error)
+	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error)
 }
 
 // localExecutorSetter lets a backend receive this DB's local executor (used by a
@@ -67,12 +67,30 @@ type localExecutorSetter interface {
 // QueryOption configures a single Query call.
 type QueryOption func(*queryOptions)
 
-type queryOptions struct{ linearizable bool }
+type queryOptions struct {
+	linearizable bool
+	maxRows      int64
+}
 
 // Linearizable requests a strongly-consistent read (read-your-writes across the
 // cluster), served via the leader. It has no effect on writes or on a
 // non-clustered database (local reads are already consistent there).
 func Linearizable() QueryOption { return func(o *queryOptions) { o.linearizable = true } }
+
+// WithMaxRows caps the number of rows a read query may produce. If the query
+// yields more, it aborts with ErrResultLimit. It is a safety net against
+// unbounded result sets (mind the memory an ORDER BY or aggregation still needs
+// before rows are emitted). A limit <= 0 means no cap, which is the default.
+func WithMaxRows(limit int) QueryOption {
+	return func(o *queryOptions) {
+		if limit > 0 {
+			o.maxRows = int64(limit)
+		}
+	}
+}
+
+// ErrResultLimit is returned by Query when a result exceeds WithMaxRows.
+var ErrResultLimit = exec.ErrResultLimit
 
 // OpenOption configures how Open opens a database.
 type OpenOption func(*openOptions)
@@ -127,7 +145,12 @@ type Result struct {
 // or replicated through the leader when clustered); otherwise it runs as a read.
 // Pass Linearizable() for a strongly-consistent clustered read.
 func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, opts ...QueryOption) (*Result, error) {
-	_ = ctx // reserved for cancellation; not consulted yet.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
 	var o queryOptions
 	for _, opt := range opts {
 		opt(&o)
@@ -151,7 +174,7 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 			(write && !cb.IsLeader()) ||
 			(o.linearizable && !write && !cb.IsLeader())
 		if forward {
-			cols, rows, err := cb.Forward(cypher, params, write, o.linearizable && !write)
+			cols, rows, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write)
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
 			}
@@ -164,7 +187,7 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 		}
 	}
 
-	res, err := db.runLocal(q, semaRes.Columns, params, write)
+	res, err := db.runLocal(ctx, q, semaRes.Columns, params, write, o.maxRows)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
@@ -173,11 +196,11 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 
 // runLocal executes an already-parsed query against the local backend: writes go
 // through ApplyWrite (replicated when clustered, committed when embedded), reads
-// through View.
-func (db *DB) runLocal(q *ast.Query, columns []string, params map[string]any, write bool) (*Result, error) {
+// through View. ctx bounds execution and maxRows caps the result.
+func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, params map[string]any, write bool, maxRows int64) (*Result, error) {
 	if write {
 		res, err := db.be.ApplyWrite(func(txn storage.Txn) (any, error) {
-			return runQuery(txn, q, columns, params)
+			return runQuery(txn, q, columns, params, ctx, 0)
 		})
 		if err != nil {
 			return nil, err
@@ -186,7 +209,7 @@ func (db *DB) runLocal(q *ast.Query, columns []string, params map[string]any, wr
 	}
 	var result *Result
 	err := db.be.View(func(txn storage.Txn) error {
-		r, err := runQuery(txn, q, columns, params)
+		r, err := runQuery(txn, q, columns, params, ctx, maxRows)
 		if err != nil {
 			return err
 		}
@@ -211,7 +234,7 @@ func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err := db.runLocal(q, semaRes.Columns, params, isWriteQuery(q))
+	res, err := db.runLocal(context.Background(), q, semaRes.Columns, params, isWriteQuery(q), 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -221,12 +244,12 @@ func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, 
 // runQuery plans and executes an already-parsed, already-analyzed query against
 // txn. It is the single execution path shared by the local and clustered
 // backends.
-func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any) (*Result, error) {
+func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any, ctx context.Context, maxRows int64) (*Result, error) {
 	p, err := plan.Plan(q, planCatalog{txn: txn})
 	if err != nil {
 		return nil, err
 	}
-	rows, err := exec.Run(p, columns, &exec.Context{Txn: txn, Params: params})
+	rows, err := exec.Run(p, columns, &exec.Context{Txn: txn, Params: params, Ctx: ctx, MaxRows: maxRows})
 	if err != nil {
 		return nil, err
 	}

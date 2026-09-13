@@ -4,6 +4,7 @@ package exec
 // (UNION without ALL), rows are de-duplicated by the projected columns using a
 // canonical string key.
 type unionOp struct {
+	ctx     *Context
 	parts   []op
 	columns []string
 	dedup   bool
@@ -14,6 +15,9 @@ type unionOp struct {
 
 func (u *unionOp) next() (binding, bool, error) {
 	for u.idx < len(u.parts) {
+		if err := u.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		b, ok, err := u.parts[u.idx].next()
 		if err != nil {
 			return nil, false, err

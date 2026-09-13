@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/rpc"
 	"testing"
@@ -40,7 +42,7 @@ func TestConnPoolReuseAndRecovery(t *testing.T) {
 	args := &ForwardArgs{Cypher: "ping"}
 
 	// First call: dials, succeeds, returns the connection to the pool.
-	rep, err := pool.call(addr, args)
+	rep, err := pool.call(context.Background(), addr, args)
 	if err != nil || len(rep.Columns) != 1 || rep.Columns[0] != "ping" {
 		t.Fatalf("call 1 = %v, %v", rep, err)
 	}
@@ -56,7 +58,7 @@ func TestConnPoolReuseAndRecovery(t *testing.T) {
 	}
 
 	// Second call must reuse the very same pooled connection.
-	if _, err := pool.call(addr, args); err != nil {
+	if _, err := pool.call(context.Background(), addr, args); err != nil {
 		t.Fatalf("call 2: %v", err)
 	}
 	pool.mu.Lock()
@@ -68,9 +70,22 @@ func TestConnPoolReuseAndRecovery(t *testing.T) {
 
 	// Kill the pooled connection; the next call must retry on a fresh one.
 	_ = c2.Close()
-	rep, err = pool.call(addr, args)
+	rep, err = pool.call(context.Background(), addr, args)
 	if err != nil || len(rep.Columns) != 1 || rep.Columns[0] != "ping" {
 		t.Fatalf("recovery call = %v, %v", rep, err)
+	}
+}
+
+// TestConnPoolCallCanceledContext returns promptly without dialing when the
+// context is already done.
+func TestConnPoolCallCanceledContext(t *testing.T) {
+	pool := newConnPool(0)
+	defer func() { _ = pool.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := pool.call(ctx, "127.0.0.1:1", &ForwardArgs{Cypher: "x"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
 
@@ -78,7 +93,7 @@ func TestConnPoolReuseAndRecovery(t *testing.T) {
 func TestConnPoolDialError(t *testing.T) {
 	pool := newConnPool(0)
 	defer func() { _ = pool.Close() }()
-	if _, err := pool.call("127.0.0.1:1", &ForwardArgs{Cypher: "x"}); err == nil {
+	if _, err := pool.call(context.Background(), "127.0.0.1:1", &ForwardArgs{Cypher: "x"}); err == nil {
 		t.Fatal("expected a dial error against an unused port")
 	}
 }

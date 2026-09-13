@@ -42,6 +42,9 @@ type outerApplyOp struct {
 
 func (o *outerApplyOp) next() (binding, bool, error) {
 	for {
+		if err := o.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		if o.pendingEmpty {
 			o.pendingEmpty = false
 			r := o.curOuter.clone()

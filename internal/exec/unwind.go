@@ -22,6 +22,9 @@ type unwindOp struct {
 
 func (u *unwindOp) next() (binding, bool, error) {
 	for {
+		if err := u.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		if u.pidx < len(u.pending) {
 			out := u.cur.clone()
 			out[u.alias] = u.pending[u.pidx]

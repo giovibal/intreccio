@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/gob"
 	"errors"
@@ -65,8 +66,11 @@ func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
 	n := s.node
 
 	// Leader-bound request received by a non-leader voter: proxy to the leader.
+	// Bound the proxy wait by the apply timeout.
 	if args.needsLeader() && n.raft.State() != raft.Leader {
-		rep, err := n.callLeader(args)
+		ctx, cancel := context.WithTimeout(context.Background(), n.applyTimeout)
+		defer cancel()
+		rep, err := n.callLeader(ctx, args)
 		if err != nil {
 			reply.Err = err.Error()
 			return nil
@@ -121,7 +125,7 @@ func (n *Node) startForwardServer() error {
 
 // callLeader resolves the current leader's forwarding address and forwards args
 // to it unchanged (used by a follower/voter that received a leader-bound query).
-func (n *Node) callLeader(args *ForwardArgs) (*ForwardReply, error) {
+func (n *Node) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply, error) {
 	_, leaderID := n.raft.LeaderWithID()
 	if leaderID == "" {
 		return nil, errors.New("cluster: no leader available")
@@ -130,19 +134,19 @@ func (n *Node) callLeader(args *ForwardArgs) (*ForwardReply, error) {
 	if !ok {
 		return nil, fmt.Errorf("cluster: no forwarding address for leader %q", leaderID)
 	}
-	return n.pool.call(addr, args)
+	return n.pool.call(ctx, addr, args)
 }
 
 // forward is the voter-side entry used by the root router: it forwards a query
 // to the leader (writes, linearizable reads) and returns desanitized rows.
-func (n *Node) forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
 	args := &ForwardArgs{
 		Cypher:       cypher,
 		Params:       sanitizeParams(params),
 		Write:        write,
 		Linearizable: linearizable,
 	}
-	rep, err := n.callLeader(args)
+	rep, err := n.callLeader(ctx, args)
 	if err != nil {
 		return nil, nil, err
 	}

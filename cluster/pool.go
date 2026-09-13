@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -81,22 +82,37 @@ func (p *connPool) put(addr string, c *rpc.Client) {
 }
 
 // call performs a forwarding RPC to addr over a pooled connection, retrying once
-// on a fresh connection if a pooled one turns out to be broken.
-func (p *connPool) call(addr string, args *ForwardArgs) (*ForwardReply, error) {
+// on a fresh connection if a pooled one turns out to be broken. ctx bounds the
+// wait for a reply: if it is done first the call returns ctx.Err() and the
+// connection is dropped.
+func (p *connPool) call(ctx context.Context, addr string, args *ForwardArgs) (*ForwardReply, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		c, err := p.get(addr)
 		if err != nil {
 			return nil, err
 		}
 		var reply ForwardReply
-		if err := c.Call("Forward.Query", args, &reply); err != nil {
-			_ = c.Close() // broken connection: drop it, don't return it to the pool
-			lastErr = err
-			continue
+		call := c.Go("Forward.Query", args, &reply, nil)
+		select {
+		case <-call.Done:
+			if call.Error != nil {
+				_ = c.Close() // broken connection: drop it, don't return it to the pool
+				lastErr = call.Error
+				continue
+			}
+			p.put(addr, c)
+			return &reply, nil
+		case <-ctx.Done():
+			_ = c.Close()
+			return nil, ctx.Err()
 		}
-		p.put(addr, c)
-		return &reply, nil
 	}
 	return nil, fmt.Errorf("cluster: forward call: %w", lastErr)
 }
