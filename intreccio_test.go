@@ -2,6 +2,7 @@ package intreccio
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -17,6 +18,40 @@ func TestOpenClose(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestOpenWithSyncWrites verifies that the durability option is accepted and
+// that data written through either setting survives a close/reopen cycle.
+func TestOpenWithSyncWrites(t *testing.T) {
+	ctx := context.Background()
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("sync=%v", on), func(t *testing.T) {
+			dir := t.TempDir()
+			db, err := Open(dir, WithSyncWrites(on))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if _, err := db.Query(ctx, "CREATE (n:Person {name: 'Alice'})", nil); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			db2, err := Open(dir, WithSyncWrites(on))
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer func() { _ = db2.Close() }()
+			res, err := db2.Query(ctx, "MATCH (n:Person) RETURN n.name AS name", nil)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			if len(res.Rows) != 1 || res.Rows[0][0] != "Alice" {
+				t.Errorf("rows = %v, want [[Alice]]", res.Rows)
+			}
+		})
 	}
 }
 
