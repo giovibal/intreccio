@@ -169,3 +169,32 @@ func TestInternConcurrent(t *testing.T) {
 		seen[id] = name
 	}
 }
+
+// TestMalformedValuesRejected corrupts a dictionary entry and the ID counter and
+// verifies the readers return an error instead of panicking.
+func TestMalformedValuesRejected(t *testing.T) {
+	s := newStore(t)
+
+	if err := s.Update(func(tx storage.Txn) error {
+		if err := tx.Set(append([]byte{tagLabelFwd}, "Person"...), []byte{1, 2}); err != nil {
+			return err
+		}
+		if _, _, err := LookupLabel(tx, "Person"); err == nil {
+			t.Error("LookupLabel accepted a malformed dictionary value")
+		}
+		if _, err := InternLabel(tx, "Person"); err == nil {
+			t.Error("InternLabel accepted a malformed dictionary value")
+		}
+
+		key := []byte{tagCounter, kindNode}
+		if err := tx.Set(key, []byte{1, 2, 3}); err != nil {
+			return err
+		}
+		if _, err := NextNodeID(tx); err == nil {
+			t.Error("NextNodeID accepted a malformed counter value")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

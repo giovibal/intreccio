@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"encoding/binary"
 	"reflect"
 	"testing"
 )
@@ -82,6 +83,32 @@ func TestEncodeDeterministic(t *testing.T) {
 		}
 		if !reflect.DeepEqual(first, b) {
 			t.Fatal("non-deterministic encoding")
+		}
+	}
+}
+
+// TestDecodeRejectsImplausibleLengths feeds counts/lengths far larger than the
+// remaining buffer and expects an error (never a panic or a huge allocation).
+func TestDecodeRejectsImplausibleLengths(t *testing.T) {
+	const huge = uint64(1) << 40
+
+	cases := map[string][]byte{
+		"label count": binary.AppendUvarint(nil, huge),
+		"prop count": func() []byte {
+			b := binary.AppendUvarint(nil, 0) // zero labels
+			return binary.AppendUvarint(b, huge)
+		}(),
+		"string length": func() []byte {
+			b := binary.AppendUvarint(nil, 0) // zero labels
+			b = binary.AppendUvarint(b, 1)    // one property
+			b = binary.AppendUvarint(b, 1)    // key id
+			b = append(b, recStr)
+			return binary.AppendUvarint(b, huge)
+		}(),
+	}
+	for name, b := range cases {
+		if _, err := DecodeNode(b); err == nil {
+			t.Errorf("%s: DecodeNode accepted an implausible length", name)
 		}
 	}
 }

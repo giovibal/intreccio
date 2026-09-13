@@ -71,14 +71,37 @@ func LookupKey(txn storage.Txn, name string) (id uint32, found bool, err error) 
 
 func lookupDict(txn storage.Txn, fwdTag byte, name string) (uint32, bool, error) {
 	fwd := append([]byte{fwdTag}, name...)
-	switch v, err := txn.Get(fwd); {
+	v, err := txn.Get(fwd)
+	switch {
 	case err == nil:
-		return binary.BigEndian.Uint32(v), true, nil
+		id, err := decodeU32(v)
+		if err != nil {
+			return 0, false, err
+		}
+		return id, true, nil
 	case errors.Is(err, storage.ErrNotFound):
 		return 0, false, nil
 	default:
 		return 0, false, err
 	}
+}
+
+// decodeU32 decodes a 4-byte big-endian dictionary ID, rejecting malformed
+// (truncated or oversized) values instead of panicking.
+func decodeU32(v []byte) (uint32, error) {
+	if len(v) != 4 {
+		return 0, fmt.Errorf("catalog: malformed dictionary id (len=%d)", len(v))
+	}
+	return binary.BigEndian.Uint32(v), nil
+}
+
+// decodeU64 decodes an 8-byte big-endian counter value, rejecting malformed
+// values instead of panicking.
+func decodeU64(v []byte) (uint64, error) {
+	if len(v) != 8 {
+		return 0, fmt.Errorf("catalog: malformed counter value (len=%d)", len(v))
+	}
+	return binary.BigEndian.Uint64(v), nil
 }
 
 // LabelName resolves a label ID to its name.
@@ -98,9 +121,10 @@ func NextEdgeID(txn storage.Txn) (uint64, error) { return nextCounter(txn, kindE
 
 func internDict(txn storage.Txn, fwdTag, kind byte, name string) (uint32, error) {
 	fwd := append([]byte{fwdTag}, name...)
-	switch v, err := txn.Get(fwd); {
+	v, err := txn.Get(fwd)
+	switch {
 	case err == nil:
-		return binary.BigEndian.Uint32(v), nil
+		return decodeU32(v)
 	case !errors.Is(err, storage.ErrNotFound):
 		return 0, err
 	}
@@ -142,9 +166,13 @@ func revName(txn storage.Txn, kind byte, id uint32) (string, error) {
 func nextCounter(txn storage.Txn, kind byte) (uint64, error) {
 	key := []byte{tagCounter, kind}
 	var cur uint64
-	switch v, err := txn.Get(key); {
+	v, err := txn.Get(key)
+	switch {
 	case err == nil:
-		cur = binary.BigEndian.Uint64(v)
+		cur, err = decodeU64(v)
+		if err != nil {
+			return 0, err
+		}
 	case !errors.Is(err, storage.ErrNotFound):
 		return 0, err
 	}
