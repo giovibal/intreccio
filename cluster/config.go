@@ -49,6 +49,10 @@ type Config struct {
 	// Peers is the full set of voters (including this node), used to add members
 	// after bootstrap and to resolve the leader's forwarding address.
 	Peers []Peer
+	// TLS, when non-nil, encrypts the Raft transport and the forwarding RPC
+	// endpoint and (if a CA is configured) authenticates peers with mutual TLS.
+	// Nil keeps plaintext TCP. Must be the same on every node.
+	TLS *TLSConfig
 
 	// LogOutput receives Raft's logs. Nil means silent (io.Discard); set it to
 	// os.Stderr (or a file) for operational visibility.

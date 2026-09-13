@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -101,7 +102,15 @@ func (n *Node) startForwardServer() error {
 	if err := srv.RegisterName("Forward", &forwardService{node: n}); err != nil {
 		return fmt.Errorf("cluster: register forward service: %w", err)
 	}
-	l, err := net.Listen("tcp", n.cfg.ForwardAddr)
+	var (
+		l   net.Listener
+		err error
+	)
+	if n.tlsServer != nil {
+		l, err = tls.Listen("tcp", n.cfg.ForwardAddr, n.tlsServer)
+	} else {
+		l, err = net.Listen("tcp", n.cfg.ForwardAddr)
+	}
 	if err != nil {
 		return fmt.Errorf("cluster: forward listen: %w", err)
 	}

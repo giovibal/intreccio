@@ -190,6 +190,37 @@ Notes for operators:
   to tune write/read-barrier deadlines.
 - It uses **full replication** to the quorum (each voter holds the whole graph);
   sharding is out of scope.
+- **TLS is opt-in**: set `Config.TLS` to encrypt the Raft transport and the
+  forwarding RPC endpoint and (with a CA) require mutually authenticated peers.
+
+### Securing the cluster with TLS
+
+The Raft transport and the forwarding RPC endpoint use plaintext TCP by default.
+Set `Config.TLS` to encrypt both and, when a CA is supplied, require mutually
+authenticated peers:
+
+```go
+db, err := cluster.Open(cluster.Config{
+    NodeID: "n1", DataDir: "data/n1",
+    BindAddr: "10.0.0.1:7000", ForwardAddr: "10.0.0.1:7001",
+    Role: cluster.RoleVoter, Bootstrap: true, Peers: voters,
+    TLS: &cluster.TLSConfig{
+        CertFile: "certs/n1.pem",
+        KeyFile:  "certs/n1-key.pem",
+        CAFile:   "certs/ca.pem", // when set, enables mutual TLS
+    },
+})
+```
+
+Every voter and every dataless client must use the same `TLSConfig`. The
+certificates must be signed by `CAFile`, and their SANs must cover the addresses
+peers dial. Without `CAFile` the connection is still encrypted, but the server
+does not require a client certificate. `TLS` is `nil` by default, keeping the
+existing plaintext behavior. See `docs/adr/0009-cluster-tls.md`.
+
+From the CLI, pass `-cluster-tls-cert`, `-cluster-tls-key` and
+`-cluster-tls-ca` (plus the optional `-cluster-tls-server-name` and
+`-cluster-tls-insecure`).
 
 ### Try a cluster locally (multiple terminals)
 

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"errors"
 	"sync/atomic"
 
@@ -30,7 +31,16 @@ func newClient(cfg Config) (*client, error) {
 	if len(voters) == 0 {
 		return nil, errors.New("cluster: client requires at least one peer with a ForwardAddr")
 	}
-	return &client{peers: voters, pool: newConnPool(0)}, nil
+
+	var tlsClient *tls.Config
+	if cfg.TLS != nil {
+		var err error
+		_, tlsClient, err = cfg.TLS.configs()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &client{peers: voters, pool: newConnPoolTLS(0, tlsClient)}, nil
 }
 
 // IsLeader is always false for a client.

@@ -5,6 +5,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -53,6 +54,9 @@ type Node struct {
 	fwdListener     net.Listener
 	localExec       localExecutor
 	applyTimeout    time.Duration
+	// tlsServer/tlsClient are nil on a plaintext cluster.
+	tlsServer *tls.Config
+	tlsClient *tls.Config
 	// pool reuses outbound forwarding connections (to the leader when proxying).
 	pool *connPool
 
@@ -80,6 +84,17 @@ func newNode(cfg Config) (*Node, error) {
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("cluster: data dir: %w", err)
+	}
+
+	// Build the TLS configurations first: it is a configuration error we can
+	// report before touching any on-disk state.
+	var tlsServer, tlsClient *tls.Config
+	if cfg.TLS != nil {
+		var err error
+		tlsServer, tlsClient, err = cfg.TLS.configs()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	store, err := badgerstore.Open(filepath.Join(cfg.DataDir, "data"))
@@ -110,7 +125,7 @@ func newNode(cfg Config) (*Node, error) {
 	if logOutput == nil {
 		logOutput = io.Discard
 	}
-	trans, err := raft.NewTCPTransport(cfg.BindAddr, addr, 3, 10*time.Second, logOutput)
+	trans, err := newTransport(cfg.BindAddr, addr, tlsServer, tlsClient, logOutput)
 	if err != nil {
 		_ = boltStore.Close()
 		_ = store.Close()
@@ -155,7 +170,9 @@ func newNode(cfg Config) (*Node, error) {
 		forwardAddrByID: forwardAddrMap(cfg),
 		applyTimeout:    applyTimeout,
 		storeMu:         storeMu,
-		pool:            newConnPool(0),
+		tlsServer:       tlsServer,
+		tlsClient:       tlsClient,
+		pool:            newConnPoolTLS(0, tlsClient),
 		stop:            make(chan struct{}),
 	}
 
