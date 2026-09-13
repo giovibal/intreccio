@@ -25,6 +25,12 @@ var (
 	clusterBootstrap = flag.Bool("cluster-bootstrap", false, "bootstrap a new cluster (one voter only)")
 	clusterPeers     = flag.String("cluster-peers", "",
 		"comma-separated voter set: id=raftAddr=forwardAddr,...")
+
+	clusterTLSCert       = flag.String("cluster-tls-cert", "", "PEM certificate for the Raft transport and forwarding RPC")
+	clusterTLSKey        = flag.String("cluster-tls-key", "", "PEM private key for -cluster-tls-cert")
+	clusterTLSCA         = flag.String("cluster-tls-ca", "", "PEM CA bundle for mutual TLS peer verification")
+	clusterTLSServerName = flag.String("cluster-tls-server-name", "", "override the verified server name (optional)")
+	clusterTLSInsecure   = flag.Bool("cluster-tls-insecure", false, "skip server certificate verification (testing only)")
 )
 
 func init() { clusterOpen = openCluster }
@@ -48,6 +54,17 @@ func openCluster() (*intreccio.DB, bool, error) {
 		return nil, true, fmt.Errorf("invalid -cluster-role %q (voter|client)", *clusterRole)
 	}
 
+	var tlsCfg *cluster.TLSConfig
+	if *clusterTLSCert != "" || *clusterTLSKey != "" || *clusterTLSCA != "" {
+		tlsCfg = &cluster.TLSConfig{
+			CertFile:           *clusterTLSCert,
+			KeyFile:            *clusterTLSKey,
+			CAFile:             *clusterTLSCA,
+			ServerName:         *clusterTLSServerName,
+			InsecureSkipVerify: *clusterTLSInsecure,
+		}
+	}
+
 	db, err := cluster.Open(cluster.Config{
 		NodeID:      *clusterID,
 		DataDir:     *clusterData,
@@ -56,6 +73,7 @@ func openCluster() (*intreccio.DB, bool, error) {
 		Role:        role,
 		Bootstrap:   *clusterBootstrap,
 		Peers:       peers,
+		TLS:         tlsCfg,
 		LogOutput:   os.Stderr,
 	})
 	if err == nil {

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/rpc"
@@ -22,13 +23,18 @@ type connPool struct {
 	mu      sync.Mutex
 	idle    map[string][]*rpc.Client
 	closed  bool
+	// tls is nil for a plaintext cluster; otherwise outgoing connections are
+	// wrapped in TLS (with a client certificate for mutual authentication).
+	tls *tls.Config
 }
 
-func newConnPool(maxIdle int) *connPool {
+func newConnPool(maxIdle int) *connPool { return newConnPoolTLS(maxIdle, nil) }
+
+func newConnPoolTLS(maxIdle int, tlsClient *tls.Config) *connPool {
 	if maxIdle <= 0 {
 		maxIdle = defaultMaxIdleConns
 	}
-	return &connPool{maxIdle: maxIdle, idle: make(map[string][]*rpc.Client)}
+	return &connPool{maxIdle: maxIdle, idle: make(map[string][]*rpc.Client), tls: tlsClient}
 }
 
 // get returns an idle connection for addr, or dials a new one.
@@ -45,6 +51,14 @@ func (p *connPool) get(addr string) (*rpc.Client, error) {
 		return c, nil
 	}
 	p.mu.Unlock()
+
+	if p.tls != nil {
+		conn, err := tls.Dial("tcp", addr, p.tls)
+		if err != nil {
+			return nil, fmt.Errorf("cluster: dial %s: %w", addr, err)
+		}
+		return rpc.NewClient(conn), nil
+	}
 
 	c, err := rpc.Dial("tcp", addr)
 	if err != nil {
