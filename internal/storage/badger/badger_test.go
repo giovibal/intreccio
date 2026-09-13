@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -91,6 +92,51 @@ func TestOpenWithOptionsPersists(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestLoadRecoversAfterFailure verifies that a failed Load (which drops the
+// store first) leaves it usable: a subsequent Load with a valid dump fully
+// restores the data. This is the property Raft relies on when it re-applies the
+// latest snapshot after an interrupted restore.
+func TestLoadRecoversAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Update(func(tx storage.Txn) error {
+		return tx.Set([]byte("k"), []byte("v"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var dump bytes.Buffer
+	if err := s.Backup(&dump); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+
+	if err := s.Load(strings.NewReader("not a badger backup")); err == nil {
+		t.Fatal("expected the corrupt Load to fail")
+	}
+
+	if err := s.Load(bytes.NewReader(dump.Bytes())); err != nil {
+		t.Fatalf("recovery Load: %v", err)
+	}
+
+	if err := s.View(func(tx storage.Txn) error {
+		got, err := tx.Get([]byte("k"))
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(got, []byte("v")) {
+			t.Errorf("got %q want %q", got, "v")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

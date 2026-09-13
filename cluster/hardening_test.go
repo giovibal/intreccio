@@ -3,8 +3,10 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +74,61 @@ func TestSnapshotRestoreOnRestart(t *testing.T) {
 	// newNode returns, so poll the local replica until it converges rather than
 	// reading once — an immediate read can race ahead of the trailing-log replay.
 	waitForNamesLocal(t, db2, []string{"A", "B", "C", "D"}, 20*time.Second)
+}
+
+// TestInterruptedRestoreRecoversOnRestart simulates a restore that is cut short
+// (Load drops the store, then fails on a corrupt payload) and verifies that a
+// restart recovers: Raft re-applies the latest snapshot on startup and replays
+// the trailing log, so no committed data is lost.
+func TestInterruptedRestoreRecoversOnRestart(t *testing.T) {
+	dir := t.TempDir()
+	raftAddr := freeAddr(t)
+	fwdAddr := freeAddr(t)
+	cfg := Config{
+		NodeID:      "n1",
+		DataDir:     dir,
+		BindAddr:    raftAddr,
+		ForwardAddr: fwdAddr,
+		Role:        RoleVoter,
+		Bootstrap:   true,
+		Peers:       []Peer{{ID: "n1", RaftAddr: raftAddr, ForwardAddr: fwdAddr}},
+	}
+
+	node, err := newNode(cfg)
+	if err != nil {
+		t.Fatalf("newNode: %v", err)
+	}
+	db := intreccio.New(node)
+
+	// Data inside the snapshot, then a forced snapshot, then trailing data.
+	for _, name := range []string{"A", "B"} {
+		createPerson(t, db, name)
+	}
+	if err := node.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("force snapshot: %v", err)
+	}
+	for _, name := range []string{"C", "D"} {
+		createPerson(t, db, name)
+	}
+
+	// Interrupt a restore: the corrupt payload makes Badger.Load fail after it
+	// has already dropped the store, leaving it empty/partial.
+	if err := node.fsm.Restore(io.NopCloser(strings.NewReader("not a snapshot"))); err == nil {
+		t.Fatal("expected the corrupt restore to fail")
+	}
+
+	if err := node.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Restart: Raft restores the snapshot and replays the trailing log.
+	cfg.Bootstrap = false
+	node2, err := newNode(cfg)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = node2.Close() }()
+	waitForNamesLocal(t, intreccio.New(node2), []string{"A", "B", "C", "D"}, 20*time.Second)
 }
 
 // waitForNamesLocal polls a local (non-linearizable) read until the names match
