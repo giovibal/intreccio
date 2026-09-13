@@ -6,13 +6,13 @@ import (
 	"fmt"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/exec"
+	"github.com/giovibal/intreccio/internal/storage"
+	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
+	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/parser"
 	"github.com/giovibal/intreccio/query/plan"
 	"github.com/giovibal/intreccio/query/sema"
-	"github.com/giovibal/intreccio/internal/storage"
-	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
 
 // Backend is the storage/execution backend behind a DB. It is implemented by
@@ -99,6 +99,10 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureFormat(store); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return &DB{be: &localBackend{store: store}}, nil
 }
 
@@ -108,7 +112,19 @@ func OpenInMemory() (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureFormat(store); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return &DB{be: &localBackend{store: store}}, nil
+}
+
+// ensureFormat initialises the on-disk format marker on a fresh database and
+// verifies it on an existing one, so an incompatible layout is rejected at open.
+func ensureFormat(store storage.Store) error {
+	return store.Update(func(txn storage.Txn) error {
+		return catalog.EnsureFormat(txn)
+	})
 }
 
 // Close releases the database resources.
