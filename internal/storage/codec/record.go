@@ -55,6 +55,9 @@ func DecodeNode(b []byte) (NodeRecord, error) {
 	if err != nil {
 		return rec, fmt.Errorf("codec: node record, label count: %w", err)
 	}
+	if n > uint64(r.remaining()) {
+		return rec, fmt.Errorf("codec: node record, implausible label count %d", n)
+	}
 	rec.Labels = make([]uint32, n)
 	for i := range rec.Labels {
 		l, err := r.uvarint()
@@ -186,6 +189,9 @@ type reader struct {
 	i int
 }
 
+// remaining is the number of bytes left to consume.
+func (r *reader) remaining() int { return len(r.b) - r.i }
+
 func (r *reader) uvarint() (uint64, error) {
 	v, n := binary.Uvarint(r.b[r.i:])
 	if n <= 0 {
@@ -214,7 +220,7 @@ func (r *reader) byte() (byte, error) {
 }
 
 func (r *reader) bytes(n int) ([]byte, error) {
-	if r.i+n > len(r.b) {
+	if n < 0 || n > r.remaining() {
 		return nil, errShort
 	}
 	out := r.b[r.i : r.i+n]
@@ -226,6 +232,9 @@ func (r *reader) props() (map[uint32]any, error) {
 	n, err := r.uvarint()
 	if err != nil {
 		return nil, fmt.Errorf("codec: property count: %w", err)
+	}
+	if n > uint64(r.remaining()) {
+		return nil, fmt.Errorf("codec: property map, implausible count %d", n)
 	}
 	props := make(map[uint32]any, n)
 	for i := uint64(0); i < n; i++ {
@@ -269,6 +278,9 @@ func (r *reader) value() (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if n > uint64(r.remaining()) {
+			return nil, errShort
+		}
 		raw, err := r.bytes(int(n))
 		if err != nil {
 			return nil, err
@@ -278,6 +290,9 @@ func (r *reader) value() (any, error) {
 		n, err := r.uvarint()
 		if err != nil {
 			return nil, err
+		}
+		if n > uint64(r.remaining()) {
+			return nil, fmt.Errorf("codec: list, implausible length %d", n)
 		}
 		list := make([]any, n)
 		for i := range list {
@@ -290,6 +305,9 @@ func (r *reader) value() (any, error) {
 		n, err := r.uvarint()
 		if err != nil {
 			return nil, err
+		}
+		if n > uint64(r.remaining()) {
+			return nil, fmt.Errorf("codec: map, implausible size %d", n)
 		}
 		m := make(map[string]any, n)
 		for i := uint64(0); i < n; i++ {
