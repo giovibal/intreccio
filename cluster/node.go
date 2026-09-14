@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
+	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
@@ -101,6 +102,10 @@ func newNode(cfg Config) (*Node, error) {
 	store, err := badgerstore.Open(filepath.Join(cfg.DataDir, "data"))
 	if err != nil {
 		return nil, fmt.Errorf("cluster: open store: %w", err)
+	}
+	if err := store.Update(func(txn storage.Txn) error { return catalog.EnsureFormat(txn) }); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("cluster: format: %w", err)
 	}
 
 	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-log.db"))

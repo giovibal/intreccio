@@ -117,6 +117,10 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureFormat(store); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return &DB{be: &localBackend{store: store}}, nil
 }
 
@@ -126,7 +130,19 @@ func OpenInMemory() (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureFormat(store); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return &DB{be: &localBackend{store: store}}, nil
+}
+
+// ensureFormat initialises the on-disk format marker on a fresh database and
+// verifies it on an existing one, so an incompatible layout is rejected at open.
+func ensureFormat(store storage.Store) error {
+	return store.Update(func(txn storage.Txn) error {
+		return catalog.EnsureFormat(txn)
+	})
 }
 
 // Close releases the database resources.

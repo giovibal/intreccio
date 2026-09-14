@@ -379,7 +379,9 @@ Releases follow [Semantic Versioning](https://semver.org/) with a `v` prefix
 **minor** bump may include breaking changes and a **patch** bump is reserved for
 fixes and backward-compatible additions. The **on-disk storage format is not yet
 frozen**, so a database created by one `0.x` version is not guaranteed to be
-readable by another. A release is cut by pushing a tag; see
+readable by another. A version marker is stored in the database and checked on
+open, so a build refuses to open a database whose layout it does not support
+instead of misreading it. A release is cut by pushing a tag; see
 `docs/adr/0006-versioning-and-release.md` for the rationale.
 
 ## Documentation
