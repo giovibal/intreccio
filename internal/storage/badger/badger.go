@@ -86,7 +86,24 @@ func (s *Store) Backup(w io.Writer) error {
 
 // Load replaces the entire database contents with the dump from r. Existing
 // data is dropped first so the result reflects exactly the snapshot.
-func (s *Store) Load(r io.Reader) error {
+//
+// The replacement is not atomic: Badger has no single call that swaps the whole
+// keyspace. If DropAll succeeds but Load fails (or the process dies in between),
+// the store is left empty or partial and the caller must restore again before
+// trusting it. The Raft layer is resilient to this because it re-applies the
+// latest snapshot on every startup, so an interrupted restore is retried rather
+// than silently served.
+//
+// Badger's Load trusts the length prefix of each record and panics on a corrupt
+// payload (it calls make with an attacker/time-controlled size). Recover it and
+// return an error so a damaged snapshot lets Raft fall back to an older snapshot
+// or fail cleanly, instead of taking the process down.
+func (s *Store) Load(r io.Reader) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("badger: load: corrupt backup: %v", p)
+		}
+	}()
 	if err := s.db.DropAll(); err != nil {
 		return fmt.Errorf("badger: load: drop: %w", err)
 	}
