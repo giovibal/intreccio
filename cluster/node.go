@@ -5,6 +5,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -228,9 +229,9 @@ func (n *Node) ReadBarrier() error {
 }
 
 // Forward sends a query to the leader for execution (used by followers for
-// writes and linearizable reads).
-func (n *Node) Forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
-	return n.forward(cypher, params, write, linearizable)
+// writes and linearizable reads). ctx bounds the wait for a reply.
+func (n *Node) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+	return n.forward(ctx, cypher, params, write, linearizable)
 }
 
 // Local reports that a voter can serve reads from its local store.

@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/plan"
-	"github.com/giovibal/intreccio/internal/graph"
 )
 
 func buildExpandWith(x *plan.Expand, ctx *Context, arg *argumentOp) (op, error) {
@@ -65,6 +65,9 @@ type edgeHit struct {
 
 func (e *expand) next() (binding, bool, error) {
 	for {
+		if err := e.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		if e.pidx >= len(e.pending) {
 			b, ok, err := e.input.next()
 			if err != nil || !ok {
@@ -208,6 +211,9 @@ func buildVarExpandWith(x *plan.Expand, ctx *Context, arg *argumentOp) (op, erro
 
 func (e *varExpand) next() (binding, bool, error) {
 	for {
+		if err := e.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		if e.pidx >= len(e.pending) {
 			b, ok, err := e.input.next()
 			if err != nil || !ok {
@@ -280,6 +286,9 @@ func (e *varExpand) bfs(fromID uint64) ([]varHit, error) {
 	frontier := []frontElem{{nodeID: fromID}}
 
 	for d := 1; d <= maxH; d++ {
+		if err := e.ctx.check(); err != nil {
+			return nil, err
+		}
 		var next []frontElem
 		for _, f := range frontier {
 			neighbors, err := e.neighbors(f.nodeID)

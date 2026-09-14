@@ -1,20 +1,41 @@
 package exec
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
-	"github.com/giovibal/intreccio/query/plan"
 	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/query/ast"
+	"github.com/giovibal/intreccio/query/plan"
 )
 
-// Context carries the execution state: the transaction and the query parameters.
+// ErrResultLimit is returned when a query produces more rows than the configured
+// maximum (Context.MaxRows).
+var ErrResultLimit = fmt.Errorf("exec: query result exceeds the configured row limit")
+
+// Context carries the execution state: the transaction, the query parameters, an
+// optional cancellation context and an optional result-row cap.
 type Context struct {
 	Txn    storage.Txn
 	Params map[string]any
+	// Ctx, when non-nil, cancels execution when it is done (deadline or manual
+	// cancellation). Operators poll it in their inner loops so long queries
+	// return promptly.
+	Ctx context.Context
+	// MaxRows, when > 0, bounds the number of rows a query may produce. Exceeding
+	// it aborts with ErrResultLimit.
+	MaxRows int64
+}
+
+// check reports whether execution should stop because Ctx is done.
+func (c *Context) check() error {
+	if c.Ctx == nil {
+		return nil
+	}
+	return c.Ctx.Err()
 }
 
 // op is a Volcano-style iterator: next returns the next row, false at the end.
@@ -32,6 +53,9 @@ func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
 	// Write-only queries have no output columns: drain for side effects.
 	if len(columns) == 0 {
 		for {
+			if err := ctx.check(); err != nil {
+				return nil, err
+			}
 			_, ok, err := o.next()
 			if err != nil {
 				return nil, err
@@ -43,6 +67,9 @@ func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
 	}
 	var rows [][]any
 	for {
+		if err := ctx.check(); err != nil {
+			return nil, err
+		}
 		b, ok, err := o.next()
 		if err != nil {
 			return nil, err
@@ -55,6 +82,15 @@ func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
 			row[i] = b[c]
 		}
 		rows = append(rows, row)
+		if ctx.MaxRows > 0 && int64(len(rows)) >= ctx.MaxRows {
+			// Stop only once the cap is reached and more rows are available.
+			if _, more, err := o.next(); err != nil {
+				return nil, err
+			} else if more {
+				return nil, ErrResultLimit
+			}
+			break
+		}
 	}
 	return rows, nil
 }
@@ -117,7 +153,7 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &skip{input: in, n: n}, nil
+		return &skip{ctx: ctx, input: in, n: n}, nil
 	case *plan.Limit:
 		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
@@ -127,7 +163,7 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &limit{input: in, n: n}, nil
+		return &limit{ctx: ctx, input: in, n: n}, nil
 	case *plan.CartesianProduct:
 		left, err := buildWith(x.Left, ctx, arg)
 		if err != nil {
@@ -137,7 +173,7 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &cartesian{left: left, right: right}, nil
+		return &cartesian{ctx: ctx, left: left, right: right}, nil
 	case *plan.Aggregate:
 		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
@@ -202,7 +238,7 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 			}
 			parts[i] = part
 		}
-		u := &unionOp{parts: parts, columns: x.Columns, dedup: !x.All}
+		u := &unionOp{ctx: ctx, parts: parts, columns: x.Columns, dedup: !x.All}
 		if u.dedup {
 			u.seen = map[string]struct{}{}
 		}
@@ -268,6 +304,9 @@ type nodeScan struct {
 }
 
 func (s *nodeScan) next() (binding, bool, error) {
+	if err := s.ctx.check(); err != nil {
+		return nil, false, err
+	}
 	if s.pos >= len(s.ids) {
 		return nil, false, nil
 	}
@@ -288,6 +327,9 @@ type filter struct {
 
 func (f *filter) next() (binding, bool, error) {
 	for {
+		if err := f.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		b, ok, err := f.input.next()
 		if err != nil || !ok {
 			return nil, ok, err
@@ -312,6 +354,9 @@ type project struct {
 
 func (p *project) next() (binding, bool, error) {
 	for {
+		if err := p.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		b, ok, err := p.input.next()
 		if err != nil || !ok {
 			return nil, ok, err
@@ -371,6 +416,10 @@ func (s *sortOp) next() (binding, bool, error) {
 func (s *sortOp) load() {
 	s.loaded = true
 	for {
+		if err := s.ctx.check(); err != nil {
+			s.err = err
+			return
+		}
 		b, ok, err := s.input.next()
 		if err != nil {
 			s.err = err
@@ -426,6 +475,7 @@ func columnKey(e ast.Expr) string {
 }
 
 type skip struct {
+	ctx     *Context
 	input   op
 	n       int64
 	skipped bool
@@ -435,6 +485,9 @@ func (s *skip) next() (binding, bool, error) {
 	if !s.skipped {
 		s.skipped = true
 		for i := int64(0); i < s.n; i++ {
+			if err := s.ctx.check(); err != nil {
+				return nil, false, err
+			}
 			_, ok, err := s.input.next()
 			if err != nil || !ok {
 				return nil, ok, err
@@ -445,12 +498,16 @@ func (s *skip) next() (binding, bool, error) {
 }
 
 type limit struct {
+	ctx   *Context
 	input op
 	n     int64
 	count int64
 }
 
 func (l *limit) next() (binding, bool, error) {
+	if err := l.ctx.check(); err != nil {
+		return nil, false, err
+	}
 	if l.count >= l.n {
 		return nil, false, nil
 	}
@@ -464,6 +521,7 @@ func (l *limit) next() (binding, bool, error) {
 
 // cartesian is a nested-loop product: for each left row, all right rows.
 type cartesian struct {
+	ctx       *Context
 	left      op
 	right     op
 	rightRows []binding
@@ -476,6 +534,9 @@ type cartesian struct {
 func (c *cartesian) next() (binding, bool, error) {
 	if !c.loaded {
 		for {
+			if err := c.ctx.check(); err != nil {
+				return nil, false, err
+			}
 			b, ok, err := c.right.next()
 			if err != nil {
 				return nil, false, err
@@ -488,6 +549,9 @@ func (c *cartesian) next() (binding, bool, error) {
 		c.loaded = true
 	}
 	for {
+		if err := c.ctx.check(); err != nil {
+			return nil, false, err
+		}
 		if !c.haveLeft {
 			b, ok, err := c.left.next()
 			if err != nil || !ok {

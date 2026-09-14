@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/plan"
-	"github.com/giovibal/intreccio/internal/graph"
 )
 
 // aggregateOp implements grouped aggregation. It reads all input rows, places
@@ -62,6 +62,9 @@ func (a *aggregateOp) load() error {
 	}
 
 	for {
+		if err := a.ctx.check(); err != nil {
+			return err
+		}
 		b, ok, err := a.input.next()
 		if err != nil {
 			return err

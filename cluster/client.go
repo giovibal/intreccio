@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"sync/atomic"
@@ -55,7 +56,7 @@ func (c *client) ReadBarrier() error { return nil }
 // Forward sends the query to a voter, trying each in turn (round-robin with
 // failover) until one answers. The contacted voter serves default reads locally
 // and proxies writes/linearizable reads to the leader.
-func (c *client) Forward(cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
 	args := &ForwardArgs{
 		Cypher:       cypher,
 		Params:       sanitizeParams(params),
@@ -66,7 +67,7 @@ func (c *client) Forward(cypher string, params map[string]any, write, linearizab
 	var lastErr error
 	for i := range c.peers {
 		p := c.peers[(start+i)%len(c.peers)]
-		rep, err := c.pool.call(p.ForwardAddr, args)
+		rep, err := c.pool.call(ctx, p.ForwardAddr, args)
 		if err != nil {
 			lastErr = err
 			continue // voter unreachable: try the next one

@@ -103,6 +103,20 @@ throughput and can tolerate losing the most recent writes on such a crash, open
 the database with `intreccio.Open("data/", intreccio.WithSyncWrites(false))`.
 The store stays consistent either way. (In-memory databases are unaffected.)
 
+`Query` honors its `context.Context`: pass a deadline or cancel it to bound
+execution. `WithMaxRows(n)` additionally caps how many rows a read may return,
+failing with `ErrResultLimit` when exceeded:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+res, err := db.Query(ctx,
+    "MATCH (p:Person) RETURN p.name AS name",
+    nil,
+    intreccio.WithMaxRows(1000)) // optional cap, ErrResultLimit if exceeded
+```
+
 ### Use the CLI / REPL
 
 The `intreccio` binary opens a directory-backed database, or an in-memory one if
