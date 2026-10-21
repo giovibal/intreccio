@@ -420,6 +420,9 @@ func (m *mergeOp) next() (binding, bool, error) {
 }
 
 func (m *mergeOp) run(b binding) ([]binding, error) {
+	if err := rejectNullMergeProps(m.ctx, b, m.part); err != nil {
+		return nil, err
+	}
 	var (
 		rows     []binding
 		wasMatch bool
@@ -448,6 +451,36 @@ func (m *mergeOp) run(b binding) ([]binding, error) {
 		}
 	}
 	return rows, nil
+}
+
+// rejectNullMergeProps fails when an inline property of the MERGE pattern
+// evaluates to null: a null value can neither be matched nor stored, so MERGE
+// has no defined outcome (openCypher raises an error).
+func rejectNullMergeProps(ctx *Context, b binding, part ast.PatternPart) error {
+	check := func(kind string, props map[string]ast.Expr) error {
+		for k, expr := range props {
+			v, err := eval(expr, b, ctx)
+			if err != nil {
+				return err
+			}
+			if v == nil {
+				return fmt.Errorf("exec: cannot MERGE %s with a null value for property %q", kind, k)
+			}
+		}
+		return nil
+	}
+	if err := check("node", part.Start.Props); err != nil {
+		return err
+	}
+	for _, ch := range part.Chain {
+		if err := check("relationship", ch.Rel.Props); err != nil {
+			return err
+		}
+		if err := check("node", ch.Node.Props); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // mergeNode: match nodes with all labels and inline props; create one if none match.

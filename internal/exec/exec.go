@@ -269,6 +269,9 @@ func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
 	if err != nil {
 		return nil, err
 	}
+	if value == nil {
+		return nil, nil // x = null is never true
+	}
 	return graph.NodesByProperty(ctx.Txn, labelID, keyID, value)
 }
 
