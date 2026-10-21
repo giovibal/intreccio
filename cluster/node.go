@@ -65,6 +65,10 @@ type Node struct {
 	// writeMu serializes the stage→propose→apply sequence so each statement sees
 	// the fully-applied state of all prior writes.
 	writeMu sync.Mutex
+	// barrierTerm is the Raft term in which this node, as leader, last
+	// confirmed that its state machine applied every committed entry. Guarded
+	// by writeMu.
+	barrierTerm uint64
 
 	// storeMu guards local store access against a snapshot Restore (Badger
 	// DropAll+Load). Reads/staging take it shared; the FSM's Restore takes it
@@ -267,6 +271,16 @@ func (n *Node) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
 
 	if n.raft.State() != raft.Leader {
 		return nil, errNotLeader
+	}
+	// A newly elected leader can hold committed entries its state machine has
+	// not applied yet. Staging against that store would read stale data and
+	// replicate a write-set that overwrites newer values, so the first write of
+	// each term waits for the state machine to catch up.
+	if term := n.raft.CurrentTerm(); term != n.barrierTerm {
+		if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
+			return nil, fmt.Errorf("cluster: leader barrier: %w", err)
+		}
+		n.barrierTerm = term
 	}
 
 	var (

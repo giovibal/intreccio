@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hashicorp/raft"
 
@@ -26,6 +27,10 @@ type fsm struct {
 	// the owning Node. Apply and Snapshot run on Raft's single FSM goroutine, so
 	// they never overlap Restore and do not need it.
 	storeMu *sync.RWMutex
+	// beforeApply, when set, runs before each command is applied. Tests use it
+	// to make a replica's state machine lag behind its log; it is nil in
+	// production.
+	beforeApply atomic.Pointer[func()]
 }
 
 var _ raft.FSM = (*fsm)(nil)
@@ -38,6 +43,9 @@ func newFSM(store storage.Store, snap storage.Snapshotter, tmpDir string, storeM
 func (f *fsm) Apply(l *raft.Log) any {
 	if l.Type != raft.LogCommand {
 		return nil
+	}
+	if hook := f.beforeApply.Load(); hook != nil {
+		(*hook)()
 	}
 	return f.store.Update(func(txn storage.Txn) error {
 		return applyWriteSet(l.Data, txn)
