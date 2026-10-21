@@ -171,6 +171,10 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 	for _, opt := range opts {
 		opt(&o)
 	}
+	params, err := normalizeParams(params)
+	if err != nil {
+		return nil, err
+	}
 
 	q, err := parser.Parse(cypher)
 	if err != nil {
