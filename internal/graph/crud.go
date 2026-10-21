@@ -19,11 +19,16 @@ import (
 // interning their identifiers, and updates its indexes. Returns the new nodeID.
 func CreateNode(txn storage.Txn, labels []string, props map[string]any) (uint64, error) {
 	labelIDs := make([]uint32, 0, len(labels))
+	seen := make(map[uint32]bool, len(labels))
 	for _, name := range labels {
 		id, err := catalog.InternLabel(txn, name)
 		if err != nil {
 			return 0, err
 		}
+		if seen[id] {
+			continue // (:A:A) has the label once
+		}
+		seen[id] = true
 		labelIDs = append(labelIDs, id)
 	}
 	p, err := internProps(txn, props)
