@@ -25,6 +25,23 @@ const (
 	strTerm byte = 0x00 // terminator 0x00 0x00
 )
 
+// Value bands of the `p` index, exported for range scans: every value of one
+// kind lives in one contiguous band, ordered by value.
+const (
+	BandBool   = tagBool
+	BandInt    = tagInt
+	BandFloat  = tagFloat
+	BandString = tagStr
+)
+
+// AppendStringPrefix appends the string band tag followed by s in the ordered
+// encoding but without the terminator: every indexed string that starts with
+// s has an encoding that starts with these bytes.
+func AppendStringPrefix(dst []byte, s string) []byte {
+	enc := appendOrderedString(append(dst, tagStr), s)
+	return enc[:len(enc)-2] // drop the 0x00 0x00 terminator
+}
+
 // errShort signals a truncated buffer during decoding.
 var errShort = errors.New("codec: buffer too short")
 

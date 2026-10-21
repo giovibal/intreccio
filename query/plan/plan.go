@@ -197,10 +197,16 @@ func (pl *planner) planMatch(m *ast.Match) error {
 			whereEqs[eq.variable] = append(whereEqs[eq.variable], eq)
 		}
 	}
+	whereRanges := map[string][]rangePred{}
+	for _, e := range whereConj {
+		if r, ok := asRange(e); ok {
+			whereRanges[r.variable] = append(whereRanges[r.variable], r)
+		}
+	}
 
 	var residual []ast.Expr
 	for _, part := range m.Parts {
-		r, err := pl.planPart(part, whereEqs, consumed)
+		r, err := pl.planPart(part, whereEqs, whereRanges, consumed)
 		if err != nil {
 			return err
 		}
@@ -244,9 +250,15 @@ func (pl *planner) planOptionalMatch(m *ast.Match) error {
 			whereEqs[eq.variable] = append(whereEqs[eq.variable], eq)
 		}
 	}
+	whereRanges := map[string][]rangePred{}
+	for _, e := range whereConj {
+		if r, ok := asRange(e); ok {
+			whereRanges[r.variable] = append(whereRanges[r.variable], r)
+		}
+	}
 	var residual []ast.Expr
 	for _, part := range m.Parts {
-		r, err := pl.planPart(part, whereEqs, consumed)
+		r, err := pl.planPart(part, whereEqs, whereRanges, consumed)
 		if err != nil {
 			return err
 		}
@@ -276,7 +288,7 @@ func (pl *planner) planOptionalMatch(m *ast.Match) error {
 	return nil
 }
 
-func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality, consumed map[int]bool) ([]ast.Expr, error) {
+func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality, whereRanges map[string][]rangePred, consumed map[int]bool) ([]ast.Expr, error) {
 	nodes, rels := pl.buildPart(part)
 
 	startIdx := -1
@@ -288,11 +300,11 @@ func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality
 	}
 
 	if startIdx == -1 {
-		idx, scan, eq := pl.chooseAnchor(nodes, whereEqs)
+		idx, scan, eq := pl.chooseAnchor(nodes, whereEqs, whereRanges)
 		switch {
 		case pl.plan == nil:
 			pl.plan = scan
-		case eq != nil && len(exprVars(eq.value)) > 0:
+		case len(scanVars(scan)) > 0:
 			// The seek value depends on the incoming row: run the seek once
 			// per row instead of as an independent scan.
 			pl.plan = &Apply{Outer: pl.plan, Inner: &CartesianProduct{Left: &Argument{}, Right: scan}}
@@ -338,7 +350,7 @@ func (pl *planner) emitExpand(from pnode, rel prel, to pnode, reversed bool) {
 	pl.bind(to.name)
 }
 
-func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality) (int, Op, *equality) {
+func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality, whereRanges map[string][]rangePred) (int, Op, *equality) {
 	bestIdx, bestScore := 0, -1
 	var bestScan Op
 	var bestEq *equality
@@ -346,7 +358,7 @@ func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality) (
 		if pl.isBound(nodes[i].name) {
 			continue
 		}
-		score, scan, eq := pl.scoreNode(nodes[i], whereEqs[nodes[i].name])
+		score, scan, eq := pl.scoreNode(nodes[i], whereEqs[nodes[i].name], whereRanges[nodes[i].name])
 		if score > bestScore {
 			bestIdx, bestScore, bestScan, bestEq = i, score, scan, eq
 		}
@@ -357,25 +369,82 @@ func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality) (
 	return bestIdx, bestScan, bestEq
 }
 
-func (pl *planner) scoreNode(nd pnode, whereEqs []equality) (int, Op, *equality) {
+// scoreNode picks the access method for a pattern node: an index seek on an
+// equality (4), an index range scan (3), a label scan (2) or a full scan (1).
+func (pl *planner) scoreNode(nd pnode, whereEqs []equality, ranges []rangePred) (int, Op, *equality) {
 	for _, label := range nd.labels {
 		for _, k := range sortedKeys(nd.props) {
 			if pl.cat != nil && pl.cat.HasIndex(label, k) && pl.seekable(nd.props[k]) {
 				eq := &equality{variable: nd.name, key: k, value: nd.props[k], conjIdx: -1}
-				return 3, &NodeByProperty{Var: nd.name, Label: label, Key: k, Value: nd.props[k]}, eq
+				return 4, &NodeByProperty{Var: nd.name, Label: label, Key: k, Value: nd.props[k]}, eq
 			}
 		}
 		for _, eq := range whereEqs {
 			if pl.cat != nil && pl.cat.HasIndex(label, eq.key) && pl.seekable(eq.value) {
 				e := eq
-				return 3, &NodeByProperty{Var: nd.name, Label: label, Key: eq.key, Value: eq.value}, &e
+				return 4, &NodeByProperty{Var: nd.name, Label: label, Key: eq.key, Value: eq.value}, &e
 			}
+		}
+	}
+	for _, label := range nd.labels {
+		if r := pl.rangeScan(nd.name, label, ranges); r != nil {
+			return 3, r, nil
 		}
 	}
 	if len(nd.labels) > 0 {
 		return 2, &NodeByLabelScan{Var: nd.name, Label: nd.labels[0]}, nil
 	}
 	return 1, &AllNodesScan{Var: nd.name}, nil
+}
+
+// rangeScan builds an index range scan for the first indexed key that has a
+// usable range predicate. The predicates stay in the residual filter: the scan
+// only narrows the candidates.
+func (pl *planner) rangeScan(variable, label string, ranges []rangePred) *NodeByPropertyRange {
+	if pl.cat == nil {
+		return nil
+	}
+	byKey := map[string][]rangePred{}
+	var keys []string
+	for _, r := range ranges {
+		if _, seen := byKey[r.key]; !seen {
+			keys = append(keys, r.key)
+		}
+		byKey[r.key] = append(byKey[r.key], r)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !pl.cat.HasIndex(label, k) {
+			continue
+		}
+		scan := &NodeByPropertyRange{Var: variable, Label: label, Key: k}
+		for _, r := range byKey[k] {
+			if !pl.seekable(r.value) {
+				continue
+			}
+			switch r.op {
+			case "STARTS WITH":
+				if scan.Prefix == nil {
+					scan.Prefix = r.value
+				}
+			case ">", ">=":
+				if scan.Lower == nil {
+					scan.Lower, scan.LowerInclusive = r.value, r.op == ">="
+				}
+			case "<", "<=":
+				if scan.Upper == nil {
+					scan.Upper, scan.UpperInclusive = r.value, r.op == "<="
+				}
+			}
+		}
+		if scan.Prefix != nil {
+			scan.Lower, scan.Upper = nil, nil // a prefix alone bounds the scan
+		}
+		if scan.Prefix != nil || scan.Lower != nil || scan.Upper != nil {
+			return scan
+		}
+	}
+	return nil
 }
 
 func (pl *planner) buildPart(part ast.PatternPart) ([]pnode, []prel) {
@@ -624,6 +693,54 @@ func exprVars(e ast.Expr) []string {
 	return out
 }
 
+// rangePred is `variable.key op value` with op one of >, >=, <, <=, or
+// STARTS WITH (variable.key on the left).
+type rangePred struct {
+	variable, key, op string
+	value             ast.Expr
+}
+
+// asRange reads a range conjunct, flipping `value < n.k` into `n.k > value`.
+func asRange(e ast.Expr) (rangePred, bool) {
+	b, ok := e.(*ast.Binary)
+	if !ok {
+		return rangePred{}, false
+	}
+	flipped := map[string]string{"<": ">", "<=": ">=", ">": "<", ">=": "<="}
+	switch b.Op {
+	case "<", "<=", ">", ">=":
+		if v, k, ok := propOfVar(b.Left); ok {
+			return rangePred{variable: v, key: k, op: b.Op, value: b.Right}, true
+		}
+		if v, k, ok := propOfVar(b.Right); ok {
+			return rangePred{variable: v, key: k, op: flipped[b.Op], value: b.Left}, true
+		}
+	case "STARTS WITH":
+		if v, k, ok := propOfVar(b.Left); ok {
+			return rangePred{variable: v, key: k, op: b.Op, value: b.Right}, true
+		}
+	}
+	return rangePred{}, false
+}
+
+// scanVars returns the variables an access method reads from the incoming
+// row; a non-empty result means the scan must run once per row.
+func scanVars(o Op) []string {
+	switch x := o.(type) {
+	case *NodeByProperty:
+		return exprVars(x.Value)
+	case *NodeByPropertyRange:
+		var out []string
+		for _, e := range []ast.Expr{x.Lower, x.Upper, x.Prefix} {
+			if e != nil {
+				out = append(out, exprVars(e)...)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 func eqExpr(v, k string, val ast.Expr) ast.Expr {
 	return &ast.Binary{Op: "=", Left: &ast.PropertyAccess{Target: &ast.Variable{Name: v}, Key: k}, Right: val}
 }
@@ -644,6 +761,8 @@ func scanLabelOf(o Op) string {
 	case *NodeByLabelScan:
 		return s.Label
 	case *NodeByProperty:
+		return s.Label
+	case *NodeByPropertyRange:
 		return s.Label
 	default:
 		return ""

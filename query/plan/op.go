@@ -32,6 +32,19 @@ type NodeByProperty struct {
 	Value ast.Expr
 }
 
+// NodeByPropertyRange: scan via the secondary index over a range of values
+// (`p`): Lower/Upper bounds (nil = open) or a STARTS WITH Prefix. It may
+// return extra candidates; the planner keeps the predicates as a filter.
+type NodeByPropertyRange struct {
+	Var            string
+	Label          string
+	Key            string
+	Lower, Upper   ast.Expr
+	LowerInclusive bool
+	UpperInclusive bool
+	Prefix         ast.Expr
+}
+
 // --- Internal operators ---
 
 // Expand: starting from the From nodes, follows the edges and produces the To nodes.
@@ -189,25 +202,26 @@ type CreateIndex struct {
 	Property string
 }
 
-func (*AllNodesScan) op()     {}
-func (*NodeByLabelScan) op()  {}
-func (*NodeByProperty) op()   {}
-func (*Expand) op()           {}
-func (*Filter) op()           {}
-func (*Project) op()          {}
-func (*Aggregate) op()        {}
-func (*Sort) op()             {}
-func (*Skip) op()             {}
-func (*Limit) op()            {}
-func (*CartesianProduct) op() {}
-func (*Create) op()           {}
-func (*Merge) op()            {}
-func (*SetItems) op()         {}
-func (*Delete) op()           {}
-func (*CreateIndex) op()      {}
-func (*Remove) op()           {}
-func (*Unwind) op()           {}
-func (*Argument) op()         {}
-func (*OuterApply) op()       {}
-func (*Apply) op()            {}
-func (*Union) op()            {}
+func (*AllNodesScan) op()        {}
+func (*NodeByLabelScan) op()     {}
+func (*NodeByProperty) op()      {}
+func (*NodeByPropertyRange) op() {}
+func (*Expand) op()              {}
+func (*Filter) op()              {}
+func (*Project) op()             {}
+func (*Aggregate) op()           {}
+func (*Sort) op()                {}
+func (*Skip) op()                {}
+func (*Limit) op()               {}
+func (*CartesianProduct) op()    {}
+func (*Create) op()              {}
+func (*Merge) op()               {}
+func (*SetItems) op()            {}
+func (*Delete) op()              {}
+func (*CreateIndex) op()         {}
+func (*Remove) op()              {}
+func (*Unwind) op()              {}
+func (*Argument) op()            {}
+func (*OuterApply) op()          {}
+func (*Apply) op()               {}
+func (*Union) op()               {}

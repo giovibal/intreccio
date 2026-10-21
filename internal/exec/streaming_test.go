@@ -91,3 +91,31 @@ func intsAsAny(n int) []any {
 	}
 	return out
 }
+
+// TestRangeScanReadsOnlyTheRange covers #26: with an index, a range predicate
+// reads the matching index entries, not the whole label.
+func TestRangeScanReadsOnlyTheRange(t *testing.T) {
+	s := newStore(t)
+	runQuery(t, s, "CREATE INDEX FOR (n:L) ON (n.i)", nil)
+	runQuery(t, s, "UNWIND $ids AS i CREATE (:L {i: i, s: toString(i)})", map[string]any{"ids": intsAsAny(1000)})
+	runQuery(t, s, "CREATE INDEX FOR (n:L) ON (n.s)", nil)
+
+	for _, c := range []struct {
+		query    string
+		rows     int
+		maxReads int
+	}{
+		{"MATCH (n:L) WHERE n.i > 995 RETURN n.i", 4, 30},
+		{"MATCH (n:L) WHERE n.i >= 10 AND n.i < 13 RETURN n.i", 3, 30},
+		{"MATCH (n:L) WHERE n.i >= 0 RETURN n.i LIMIT 3", 3, 30},
+		{"MATCH (n:L) WHERE n.s STARTS WITH '99' RETURN n.s", 11, 60},
+	} {
+		reads, rows := readsFor(t, s, c.query)
+		if rows != c.rows {
+			t.Errorf("%s: %d rows, want %d", c.query, rows, c.rows)
+		}
+		if reads > c.maxReads {
+			t.Errorf("%s: read %d records/keys, want at most %d", c.query, reads, c.maxReads)
+		}
+	}
+}
