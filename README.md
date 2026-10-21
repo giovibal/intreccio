@@ -373,9 +373,13 @@ Read side:
 - `MATCH` / `OPTIONAL MATCH` with node/relationship patterns, directions, labels
   and types; `OPTIONAL MATCH` produces null bindings on no-match.
 - `WHERE` with comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`), boolean ops
-  (`AND`/`OR`/`NOT`), property access and label predicates,
-  `IS NULL`/`IS NOT NULL`, `STARTS WITH`/`ENDS WITH`/`CONTAINS`, `IN` with list
-  literals, `CASE WHEN ... THEN ... ELSE ... END` (simple and searched).
+  (`AND`/`OR`/`NOT`, with openCypher null semantics), property access and label
+  predicates, `IS NULL`/`IS NOT NULL`, `STARTS WITH`/`ENDS WITH`/`CONTAINS`,
+  regular expressions (`s =~ 're'`, Go RE2 syntax, whole-string match), `IN`
+  with lists, `CASE WHEN ... THEN ... ELSE ... END` (simple and searched).
+- Lists and maps: literals, `.key` on maps, subscripts (`l[0]`, `l[-1]`,
+  `m['k']`), slices (`l[1..3]`), list comprehensions
+  (`[x IN l WHERE x > 0 | x * 2]`) and `any`/`all`/`none`/`single(x IN l WHERE ...)`.
 - `RETURN` with projection, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`.
 - `WITH` chaining and scope reset; `UNWIND list AS x`.
 - `UNION` / `UNION ALL`.
@@ -383,8 +387,10 @@ Read side:
   relationships).
 - Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` (with `DISTINCT`).
 - Scalar functions: `id`, `labels`, `type`, `keys`, `properties`, `size`,
-  `length`, `head`, `last`, `tail`, `toInteger`, `toFloat`, `toString`,
-  `toUpper`, `toLower`, `trim`, `substring`, `replace`, `split`, `abs`.
+  `length`, `head`, `last`, `tail`, `range`, `coalesce`, `startNode`, `endNode`,
+  `toInteger`, `toFloat`, `toString`, `toUpper`, `toLower`, `trim`,
+  `substring`, `replace`, `split`, `abs`, `round`, `floor`, `ceil`, `sqrt`,
+  `sign`, `rand`, `timestamp`.
 
 Write side:
 - `CREATE`, `MERGE` (with `ON CREATE SET` / `ON MATCH SET`).
@@ -392,7 +398,9 @@ Write side:
   (`n = {...}`) or merge (`n += {...}`).
 - `REMOVE`: property (`n.p`) or labels (`n:Foo`).
 - `DELETE` / `DETACH DELETE`.
-- `CREATE INDEX FOR (v:Label) ON (v.prop)` with on-demand backfill.
+- `CREATE INDEX FOR (v:Label) ON (v.prop)` with on-demand backfill. Indexes
+  serve equality (`=`, inline `{prop: v}`), ranges (`<`, `<=`, `>`, `>=`) and
+  `STARTS WITH`, including values bound earlier in the query (`UNWIND`/`WITH`).
 - Parameters (`$name`).
 
 **Out of scope:** OLAP/vectorized execution, `shortestPath`/`allShortestPaths`,

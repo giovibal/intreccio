@@ -3,7 +3,9 @@ package exec
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
+	"time"
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/graph"
@@ -40,6 +42,35 @@ type Context struct {
 	// may intern the name later.
 	keyIDs   map[string]uint32
 	labelIDs map[string]uint32
+
+	regexps map[string]*regexp.Regexp // compiled =~ patterns
+	now     int64                     // timestamp(), fixed for the execution
+}
+
+// regexp compiles a =~ pattern once per execution. The pattern must match
+// the whole string, as in openCypher.
+func (c *Context) regexp(pattern string) (*regexp.Regexp, error) {
+	if re, ok := c.regexps[pattern]; ok {
+		return re, nil
+	}
+	re, err := regexp.Compile("^(?:" + pattern + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("exec: invalid regular expression %q: %w", pattern, err)
+	}
+	if c.regexps == nil {
+		c.regexps = map[string]*regexp.Regexp{}
+	}
+	c.regexps[pattern] = re
+	return re, nil
+}
+
+// timestamp returns the execution's timestamp in milliseconds since the
+// epoch: every call within one query sees the same value.
+func (c *Context) timestamp() int64 {
+	if c.now == 0 {
+		c.now = time.Now().UnixMilli()
+	}
+	return c.now
 }
 
 // lookupKey resolves a property-key name, caching the result.

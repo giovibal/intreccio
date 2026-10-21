@@ -42,6 +42,10 @@ func eval(e ast.Expr, b binding, ctx *Context) (any, error) {
 		return v, nil
 	case *ast.PropertyAccess:
 		return evalProperty(ex, b, ctx)
+	case *ast.ListComprehension:
+		return evalListComprehension(ex, b, ctx)
+	case *ast.Quantifier:
+		return evalQuantifier(ex, b, ctx)
 	case *ast.Subscript:
 		return evalSubscript(ex, b, ctx)
 	case *ast.Slice:
@@ -130,6 +134,134 @@ func evalProperty(ex *ast.PropertyAccess, b binding, ctx *Context) (any, error) 
 	default:
 		return nil, fmt.Errorf("exec: property access on a non-node/edge/map value (%T)", target)
 	}
+}
+
+// iterList evaluates a list expression for a comprehension or quantifier and
+// calls fn with a row where variable is bound to each element in turn.
+func iterList(listExpr ast.Expr, variable string, b binding, ctx *Context, fn func(row binding, item any) (stop bool, err error)) (isNull bool, err error) {
+	v, err := eval(listExpr, b, ctx)
+	if err != nil {
+		return false, err
+	}
+	if v == nil {
+		return true, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return false, fmt.Errorf("exec: IN requires a list, got %T", v)
+	}
+	row := b.clone()
+	for _, item := range list {
+		if err := ctx.check(); err != nil {
+			return false, err
+		}
+		row[variable] = item
+		stop, err := fn(row, item)
+		if err != nil || stop {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// evalListComprehension evaluates [x IN list WHERE pred | expr]: elements
+// whose predicate is not true are skipped.
+func evalListComprehension(ex *ast.ListComprehension, b binding, ctx *Context) (any, error) {
+	out := []any{}
+	isNull, err := iterList(ex.List, ex.Variable, b, ctx, func(row binding, item any) (bool, error) {
+		if ex.Where != nil {
+			keep, err := eval(ex.Where, row, ctx)
+			if err != nil || !truthy(keep) {
+				return false, err
+			}
+		}
+		if ex.Map != nil {
+			v, err := eval(ex.Map, row, ctx)
+			if err != nil {
+				return false, err
+			}
+			item = v
+		}
+		out = append(out, item)
+		return false, nil
+	})
+	if err != nil || isNull {
+		return nil, err
+	}
+	return out, nil
+}
+
+// evalQuantifier evaluates any/all/none/single(x IN list WHERE pred) with
+// three-valued logic: elements whose predicate is null make the answer null
+// unless the other elements already decide it.
+func evalQuantifier(ex *ast.Quantifier, b binding, ctx *Context) (any, error) {
+	var trues, falses, unknowns int
+	isNull, err := iterList(ex.List, ex.Variable, b, ctx, func(row binding, _ any) (bool, error) {
+		v, err := eval(ex.Where, row, ctx)
+		if err != nil {
+			return false, err
+		}
+		switch {
+		case v == nil:
+			unknowns++
+		case truthy(v):
+			trues++
+		default:
+			falses++
+		}
+		switch ex.Kind { // stop as soon as the answer is decided
+		case "any", "none":
+			return trues > 0, nil
+		case "all":
+			return falses > 0, nil
+		default: // single
+			return trues > 1, nil
+		}
+	})
+	if err != nil || isNull {
+		return nil, err
+	}
+	switch ex.Kind {
+	case "any":
+		if trues > 0 {
+			return true, nil
+		}
+	case "none":
+		if trues > 0 {
+			return false, nil
+		}
+	case "all":
+		if falses > 0 {
+			return false, nil
+		}
+	default: // single
+		if trues > 1 {
+			return false, nil
+		}
+		if unknowns == 0 {
+			return trues == 1, nil
+		}
+		return nil, nil
+	}
+	if unknowns > 0 {
+		return nil, nil
+	}
+	return ex.Kind != "any", nil // any: false; all/none: true
+}
+
+// regexMatch evaluates `s =~ pattern`: the whole string must match (Go RE2
+// syntax). A non-string operand gives null.
+func regexMatch(ctx *Context, l, r any) (any, error) {
+	s, ok1 := l.(string)
+	pattern, ok2 := r.(string)
+	if !ok1 || !ok2 {
+		return nil, nil
+	}
+	re, err := ctx.regexp(pattern)
+	if err != nil {
+		return nil, err
+	}
+	return re.MatchString(s), nil
 }
 
 // evalSubscript evaluates target[index]: a list element by position
@@ -324,6 +456,8 @@ func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 		return compareOp(ex.Op, l, r), nil
 	case "+", "-", "*", "/", "%":
 		return arithmetic(ex.Op, l, r)
+	case "=~":
+		return regexMatch(ctx, l, r)
 	case "STARTS WITH":
 		return stringPredicate(l, r, strings.HasPrefix)
 	case "ENDS WITH":

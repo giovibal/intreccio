@@ -53,6 +53,10 @@ func exprPos(e ast.Expr) ast.Pos {
 		return ex.Pos
 	case *ast.Slice:
 		return ex.Pos
+	case *ast.ListComprehension:
+		return ex.Pos
+	case *ast.Quantifier:
+		return ex.Pos
 	default:
 		return ast.Pos{}
 	}

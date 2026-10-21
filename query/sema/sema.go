@@ -391,6 +391,25 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 		return nil
 	case *ast.PropertyAccess:
 		return a.checkExpr(sc, ex.Target, inAgg)
+	case *ast.ListComprehension:
+		if err := a.checkExpr(sc, ex.List, inAgg); err != nil {
+			return err
+		}
+		inner := sc.with(ex.Variable, ex.Pos)
+		for _, part := range []ast.Expr{ex.Where, ex.Map} {
+			if part == nil {
+				continue
+			}
+			if err := a.checkExpr(inner, part, inAgg); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.Quantifier:
+		if err := a.checkExpr(sc, ex.List, inAgg); err != nil {
+			return err
+		}
+		return a.checkExpr(sc.with(ex.Variable, ex.Pos), ex.Where, inAgg)
 	case *ast.Subscript:
 		if err := a.checkExpr(sc, ex.Target, inAgg); err != nil {
 			return err

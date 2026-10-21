@@ -681,6 +681,20 @@ func (pl *planner) seekable(value ast.Expr) bool {
 	return true
 }
 
+// localVars returns the variables read by exprs other than the local
+// variable they bind (a list comprehension or quantifier variable).
+func localVars(local string, exprs ...ast.Expr) []string {
+	var out []string
+	for _, e := range exprs {
+		for _, v := range exprVars(e) {
+			if v != local {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
 // exprVars returns the variable names an expression reads.
 func exprVars(e ast.Expr) []string {
 	var out []string
@@ -699,6 +713,12 @@ func exprVars(e ast.Expr) []string {
 			walk(x.Target)
 			walk(x.From)
 			walk(x.To)
+		case *ast.ListComprehension:
+			walk(x.List)
+			out = append(out, localVars(x.Variable, x.Where, x.Map)...)
+		case *ast.Quantifier:
+			walk(x.List)
+			out = append(out, localVars(x.Variable, x.Where)...)
 		case *ast.Unary:
 			walk(x.Expr)
 		case *ast.Binary:
@@ -833,6 +853,10 @@ func containsAggregate(e ast.Expr) bool {
 		return containsAggregate(ex.Target) || containsAggregate(ex.Index)
 	case *ast.Slice:
 		return containsAggregate(ex.Target) || containsAggregate(ex.From) || containsAggregate(ex.To)
+	case *ast.ListComprehension:
+		return containsAggregate(ex.List) || containsAggregate(ex.Where) || containsAggregate(ex.Map)
+	case *ast.Quantifier:
+		return containsAggregate(ex.List) || containsAggregate(ex.Where)
 	case *ast.LabelsPredicate:
 		return containsAggregate(ex.Expr)
 	case *ast.ListLiteral:

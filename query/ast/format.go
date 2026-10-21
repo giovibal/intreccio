@@ -84,6 +84,17 @@ func Format(e Expr) string {
 		}
 		sb.WriteByte(')')
 		return sb.String()
+	case *ListComprehension:
+		out := "[" + ex.Variable + " IN " + Format(ex.List)
+		if ex.Where != nil {
+			out += " WHERE " + Format(ex.Where)
+		}
+		if ex.Map != nil {
+			out += " | " + Format(ex.Map)
+		}
+		return out + "]"
+	case *Quantifier:
+		return ex.Kind + "(" + ex.Variable + " IN " + Format(ex.List) + " WHERE " + Format(ex.Where) + ")"
 	case *Subscript:
 		return Format(ex.Target) + "[" + Format(ex.Index) + "]"
 	case *Slice:
