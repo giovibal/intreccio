@@ -487,6 +487,9 @@ func DeleteNode(txn storage.Txn, id uint64) error {
 func internProps(txn storage.Txn, props map[string]any) (map[uint32]any, error) {
 	out := make(map[uint32]any, len(props))
 	for k, v := range props {
+		if v == nil {
+			continue // a null property is an absent property
+		}
 		id, err := catalog.InternKey(txn, k)
 		if err != nil {
 			return nil, err
