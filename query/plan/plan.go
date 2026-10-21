@@ -192,7 +192,7 @@ func (pl *planner) planMatch(m *ast.Match) error {
 	consumed := map[int]bool{}
 	whereEqs := map[string][]equality{}
 	for i, e := range whereConj {
-		if eq, ok := asEquality(e); ok {
+		for _, eq := range asEqualities(e) {
 			eq.conjIdx = i
 			whereEqs[eq.variable] = append(whereEqs[eq.variable], eq)
 		}
@@ -239,7 +239,7 @@ func (pl *planner) planOptionalMatch(m *ast.Match) error {
 	consumed := map[int]bool{}
 	whereEqs := map[string][]equality{}
 	for i, e := range whereConj {
-		if eq, ok := asEquality(e); ok {
+		for _, eq := range asEqualities(e) {
 			eq.conjIdx = i
 			whereEqs[eq.variable] = append(whereEqs[eq.variable], eq)
 		}
@@ -289,9 +289,14 @@ func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality
 
 	if startIdx == -1 {
 		idx, scan, eq := pl.chooseAnchor(nodes, whereEqs)
-		if pl.plan == nil {
+		switch {
+		case pl.plan == nil:
 			pl.plan = scan
-		} else {
+		case eq != nil && len(exprVars(eq.value)) > 0:
+			// The seek value depends on the incoming row: run the seek once
+			// per row instead of as an independent scan.
+			pl.plan = &Apply{Outer: pl.plan, Inner: &CartesianProduct{Left: &Argument{}, Right: scan}}
+		default:
 			pl.plan = &CartesianProduct{Left: pl.plan, Right: scan}
 		}
 		nodes[idx].reachedByScan = true
@@ -355,13 +360,13 @@ func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality) (
 func (pl *planner) scoreNode(nd pnode, whereEqs []equality) (int, Op, *equality) {
 	for _, label := range nd.labels {
 		for _, k := range sortedKeys(nd.props) {
-			if pl.cat != nil && pl.cat.HasIndex(label, k) {
+			if pl.cat != nil && pl.cat.HasIndex(label, k) && pl.seekable(nd.props[k]) {
 				eq := &equality{variable: nd.name, key: k, value: nd.props[k], conjIdx: -1}
 				return 3, &NodeByProperty{Var: nd.name, Label: label, Key: k, Value: nd.props[k]}, eq
 			}
 		}
 		for _, eq := range whereEqs {
-			if pl.cat != nil && pl.cat.HasIndex(label, eq.key) {
+			if pl.cat != nil && pl.cat.HasIndex(label, eq.key) && pl.seekable(eq.value) {
 				e := eq
 				return 3, &NodeByProperty{Var: nd.name, Label: label, Key: eq.key, Value: eq.value}, &e
 			}
@@ -527,39 +532,96 @@ func andAll(exprs []ast.Expr) ast.Expr {
 	return out
 }
 
-func asEquality(e ast.Expr) (equality, bool) {
+// asEqualities returns the `var.key = value` readings of an equality
+// conjunct, one per side that is a property of a variable. Whether the value
+// can drive an index seek is decided later (seekable), once it is known which
+// variables are bound.
+func asEqualities(e ast.Expr) []equality {
 	b, ok := e.(*ast.Binary)
 	if !ok || b.Op != "=" {
-		return equality{}, false
+		return nil
 	}
-	if v, k, val, ok := propConst(b.Left, b.Right); ok {
-		return equality{variable: v, key: k, value: val, conjIdx: -1}, true
+	var out []equality
+	if v, k, ok := propOfVar(b.Left); ok {
+		out = append(out, equality{variable: v, key: k, value: b.Right, conjIdx: -1})
 	}
-	if v, k, val, ok := propConst(b.Right, b.Left); ok {
-		return equality{variable: v, key: k, value: val, conjIdx: -1}, true
+	if v, k, ok := propOfVar(b.Right); ok {
+		out = append(out, equality{variable: v, key: k, value: b.Left, conjIdx: -1})
 	}
-	return equality{}, false
+	return out
 }
 
-func propConst(a, b ast.Expr) (string, string, ast.Expr, bool) {
-	pa, ok := a.(*ast.PropertyAccess)
+func propOfVar(e ast.Expr) (variable, key string, ok bool) {
+	pa, ok := e.(*ast.PropertyAccess)
 	if !ok {
-		return "", "", nil, false
+		return "", "", false
 	}
 	v, ok := pa.Target.(*ast.Variable)
-	if !ok || !isConst(b) {
-		return "", "", nil, false
+	if !ok {
+		return "", "", false
 	}
-	return v.Name, pa.Key, b, true
+	return v.Name, pa.Key, true
 }
 
-func isConst(e ast.Expr) bool {
-	switch e.(type) {
-	case *ast.Literal, *ast.Param:
-		return true
-	default:
+// seekable reports whether value can be evaluated before the node is found:
+// every variable it uses must already be bound, and it must not aggregate.
+func (pl *planner) seekable(value ast.Expr) bool {
+	if containsAggregate(value) {
 		return false
 	}
+	for _, v := range exprVars(value) {
+		if !pl.isBound(v) {
+			return false
+		}
+	}
+	return true
+}
+
+// exprVars returns the variable names an expression reads.
+func exprVars(e ast.Expr) []string {
+	var out []string
+	var walk func(ast.Expr)
+	walk = func(e ast.Expr) {
+		switch x := e.(type) {
+		case nil, *ast.Literal, *ast.Param:
+		case *ast.Variable:
+			out = append(out, x.Name)
+		case *ast.PropertyAccess:
+			walk(x.Target)
+		case *ast.Unary:
+			walk(x.Expr)
+		case *ast.Binary:
+			walk(x.Left)
+			walk(x.Right)
+		case *ast.FunctionCall:
+			for _, a := range x.Args {
+				walk(a)
+			}
+		case *ast.LabelsPredicate:
+			walk(x.Expr)
+		case *ast.ListLiteral:
+			for _, el := range x.Elements {
+				walk(el)
+			}
+		case *ast.MapLiteral:
+			for _, k := range sortedKeys(x.Entries) {
+				walk(x.Entries[k])
+			}
+		case *ast.Case:
+			walk(x.Operand)
+			for _, w := range x.Whens {
+				walk(w.Cond)
+				walk(w.Result)
+			}
+			walk(x.Else)
+		default:
+			// Unknown expression kind: report a sentinel that is never bound,
+			// so the value is not used for a seek.
+			out = append(out, "\x00unknown")
+		}
+	}
+	walk(e)
+	return out
 }
 
 func eqExpr(v, k string, val ast.Expr) ast.Expr {

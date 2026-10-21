@@ -115,7 +115,11 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		}
 		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
 	case *plan.NodeByProperty:
-		ids, err := propertyScanIDs(ctx, x)
+		var row binding
+		if arg != nil {
+			row = arg.row // inside an Apply: the seek value may use the outer row
+		}
+		ids, err := propertyScanIDs(ctx, x, row)
 		if err != nil {
 			return nil, err
 		}
@@ -218,6 +222,12 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
 	case *plan.CreateIndex:
 		return &createIndexOp{ctx: ctx, label: x.Label, prop: x.Property}, nil
+	case *plan.Apply:
+		outer, err := buildWith(x.Outer, ctx, arg)
+		if err != nil {
+			return nil, err
+		}
+		return &outerApplyOp{ctx: ctx, outer: outer, innerPlan: x.Inner, inner: true}, nil
 	case *plan.OuterApply:
 		outer, err := buildWith(x.Outer, ctx, arg)
 		if err != nil {
@@ -256,7 +266,7 @@ func labelScanIDs(ctx *Context, label string) ([]uint64, error) {
 	return graph.NodesByLabel(ctx.Txn, id)
 }
 
-func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
+func propertyScanIDs(ctx *Context, np *plan.NodeByProperty, row binding) ([]uint64, error) {
 	labelID, found, err := catalog.LookupLabel(ctx.Txn, np.Label)
 	if err != nil || !found {
 		return nil, err
@@ -265,7 +275,10 @@ func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
 	if err != nil || !found {
 		return nil, err
 	}
-	value, err := eval(np.Value, binding{}, ctx)
+	if row == nil {
+		row = binding{}
+	}
+	value, err := eval(np.Value, row, ctx)
 	if err != nil {
 		return nil, err
 	}

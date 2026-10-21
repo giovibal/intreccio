@@ -157,6 +157,14 @@ type OuterApply struct {
 	NewVars []string
 }
 
+// Apply runs Inner once per row produced by Outer (Inner's Argument leaf
+// yields that row) and emits every row Inner produces. It is used when an index
+// seek depends on values from the incoming row.
+type Apply struct {
+	Outer Op
+	Inner Op
+}
+
 // Union concatenates the results of two or more sub-plans. If All is true
 // duplicates are kept (UNION ALL); otherwise rows are de-duplicated on the
 // projected columns.
@@ -201,4 +209,5 @@ func (*Remove) op()           {}
 func (*Unwind) op()           {}
 func (*Argument) op()         {}
 func (*OuterApply) op()       {}
+func (*Apply) op()            {}
 func (*Union) op()            {}
