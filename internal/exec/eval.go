@@ -2,6 +2,7 @@ package exec
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/giovibal/intreccio/internal/catalog"
@@ -352,10 +353,21 @@ func equality(a, b any) (eq, known bool) {
 	return graph.QueryEqual(a, b), true
 }
 
-func compareOp(op string, a, b any) bool {
+// compareOp evaluates <, <=, > and >= with openCypher semantics: null when
+// either side is null or the values cannot be compared (e.g. 1 < 'a'), and
+// false whenever NaN is involved. ORDER BY, min and max keep using
+// compareValues, which they need as an ordering.
+func compareOp(op string, a, b any) any {
+	a, b = normalize(a), normalize(b)
+	if a == nil || b == nil {
+		return nil
+	}
+	if isNaN(a) || isNaN(b) {
+		return false
+	}
 	c, ok := compareValues(a, b)
 	if !ok {
-		return false
+		return nil
 	}
 	switch op {
 	case "<":
@@ -367,8 +379,13 @@ func compareOp(op string, a, b any) bool {
 	case ">=":
 		return c >= 0
 	default:
-		return false
+		return nil
 	}
+}
+
+func isNaN(v any) bool {
+	f, ok := v.(float64)
+	return ok && math.IsNaN(f)
 }
 
 // compareValues compares two scalar values, returning the sign of a-b and whether
