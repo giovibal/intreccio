@@ -240,17 +240,13 @@ func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 	}
 }
 
+// stringPredicate evaluates STARTS WITH, ENDS WITH and CONTAINS. As in
+// openCypher, the result is null unless both operands are strings.
 func stringPredicate(l, r any, fn func(string, string) bool) (any, error) {
-	if l == nil || r == nil {
+	ls, lok := l.(string)
+	rs, rok := r.(string)
+	if !lok || !rok {
 		return nil, nil
-	}
-	ls, ok := l.(string)
-	if !ok {
-		return nil, fmt.Errorf("exec: string predicate left operand must be a string, got %T", l)
-	}
-	rs, ok := r.(string)
-	if !ok {
-		return nil, fmt.Errorf("exec: string predicate right operand must be a string, got %T", r)
 	}
 	return fn(ls, rs), nil
 }

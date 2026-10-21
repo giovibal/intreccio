@@ -50,6 +50,9 @@ type Txn interface {
 	// Scan returns an iterator over the keys with the given prefix, in ascending
 	// order. The caller must close the iterator.
 	Scan(prefix []byte) Iterator
+	// ScanFrom is Scan starting at the first key >= start (start should carry
+	// the prefix). It lets range scans seek instead of walking the prefix.
+	ScanFrom(prefix, start []byte) Iterator
 }
 
 // Iterator walks a range of keys. Typical use:

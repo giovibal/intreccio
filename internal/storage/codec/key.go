@@ -153,3 +153,28 @@ func NodeIDFromKey(key []byte) (uint64, error) {
 	}
 	return binary.BigEndian.Uint64(key[1:9]), nil
 }
+
+// PropBandPrefix: scan of the index entries of (label, propKey) whose value
+// is of one kind (band is one of the Band* constants).
+func PropBandPrefix(label, propKey uint32, band byte) []byte {
+	k := make([]byte, 0, 1+4+4+1)
+	k = append(k, KeyProp)
+	k = appendU32(k, label)
+	k = appendU32(k, propKey)
+	return append(k, band)
+}
+
+// ParsePropKey extracts the indexed value and the nodeID from a `p` key.
+func ParsePropKey(key []byte) (value any, node uint64, err error) {
+	if len(key) < 1+4+4+1+8 || key[0] != KeyProp {
+		return nil, 0, fmt.Errorf("codec: malformed `p` key (len=%d)", len(key))
+	}
+	v, n, err := DecodeIndexValue(key[9:])
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(key) != 9+n+8 {
+		return nil, 0, fmt.Errorf("codec: malformed `p` key (len=%d)", len(key))
+	}
+	return v, binary.BigEndian.Uint64(key[len(key)-8:]), nil
+}

@@ -36,6 +36,26 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("NodeByLabelScan(%s:%s)", x.Var, x.Label), nil
 	case *NodeByProperty:
 		return fmt.Sprintf("NodeByProperty(%s:%s {%s = %s})", x.Var, x.Label, x.Key, exprString(x.Value)), nil
+	case *NodeByPropertyRange:
+		var parts []string
+		if x.Prefix != nil {
+			parts = append(parts, x.Key+" STARTS WITH "+exprString(x.Prefix))
+		}
+		if x.Lower != nil {
+			op := " > "
+			if x.LowerInclusive {
+				op = " >= "
+			}
+			parts = append(parts, x.Key+op+exprString(x.Lower))
+		}
+		if x.Upper != nil {
+			op := " < "
+			if x.UpperInclusive {
+				op = " <= "
+			}
+			parts = append(parts, x.Key+op+exprString(x.Upper))
+		}
+		return fmt.Sprintf("NodeByPropertyRange(%s:%s {%s})", x.Var, x.Label, strings.Join(parts, ", ")), nil
 	case *Expand:
 		return fmt.Sprintf("Expand(%s)%s(%s)", x.From, relArrow(x), x.To), []Op{x.Input}
 	case *Filter:

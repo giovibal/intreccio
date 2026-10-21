@@ -147,6 +147,12 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		cur := graph.ScanLabel(ctx.Txn, id)
 		ctx.track(cur)
 		return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
+	case *plan.NodeByPropertyRange:
+		var row binding
+		if arg != nil {
+			row = arg.row // inside an Apply: the bounds may use the outer row
+		}
+		return propertyRangeScan(ctx, x, row)
 	case *plan.NodeByProperty:
 		var row binding
 		if arg != nil {
@@ -289,6 +295,54 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 	default:
 		return nil, fmt.Errorf("exec: unsupported operator %T", p)
 	}
+}
+
+// propertyRangeScan streams the candidates of an index range scan. The
+// predicates it came from stay in the plan as a filter, so the scan only has
+// to return a superset of the matching nodes.
+func propertyRangeScan(ctx *Context, x *plan.NodeByPropertyRange, row binding) (op, error) {
+	empty := &nodeScan{ctx: ctx, variable: x.Var}
+	labelID, found, err := catalog.LookupLabel(ctx.Txn, x.Label)
+	if err != nil || !found {
+		return empty, err
+	}
+	keyID, found, err := catalog.LookupKey(ctx.Txn, x.Key)
+	if err != nil || !found {
+		return empty, err
+	}
+	if row == nil {
+		row = binding{}
+	}
+	var r graph.PropRange
+	if x.Prefix != nil {
+		v, err := eval(x.Prefix, row, ctx)
+		if err != nil {
+			return nil, err
+		}
+		p, ok := v.(string)
+		if !ok {
+			return empty, nil // STARTS WITH a non-string (or null) is never true
+		}
+		r.Prefix, r.HasPrefix = p, true
+	}
+	if x.Lower != nil {
+		if r.Lower, err = eval(x.Lower, row, ctx); err != nil {
+			return nil, err
+		}
+		r.HasLower, r.LowerInclusive = true, x.LowerInclusive
+	}
+	if x.Upper != nil {
+		if r.Upper, err = eval(x.Upper, row, ctx); err != nil {
+			return nil, err
+		}
+		r.HasUpper, r.UpperInclusive = true, x.UpperInclusive
+	}
+	cur, err := graph.ScanPropertyRange(ctx.Txn, labelID, keyID, r)
+	if err != nil || cur == nil {
+		return empty, err
+	}
+	ctx.track(cur)
+	return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
 }
 
 func propertyScanIDs(ctx *Context, np *plan.NodeByProperty, row binding) ([]uint64, error) {
