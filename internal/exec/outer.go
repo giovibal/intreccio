@@ -22,7 +22,8 @@ func (a *argumentOp) next() (binding, bool, error) {
 	return a.row, true, nil
 }
 
-// outerApplyOp implements the left-outer join used by OPTIONAL MATCH. For each
+// outerApplyOp implements the left-outer join used by OPTIONAL MATCH (and,
+// with inner set, the plain Apply used by correlated index seeks). For each
 // outer row it builds a fresh inner exec tree (replacing the Argument leaf
 // with an argumentOp seeded with the current row), then drains it. If the
 // inner produces at least one row, those rows are emitted; otherwise the
@@ -32,6 +33,9 @@ type outerApplyOp struct {
 	outer     op
 	innerPlan plan.Op
 	newVars   []string
+	// inner makes this a plain Apply (inner join): an outer row for which
+	// Inner yields nothing is dropped instead of being null-extended.
+	inner bool
 
 	curOuter      binding
 	curOuterValid bool
@@ -63,7 +67,7 @@ func (o *outerApplyOp) next() (binding, bool, error) {
 				o.rowsEmitted++
 				return b, true, nil
 			}
-			if o.rowsEmitted == 0 {
+			if o.rowsEmitted == 0 && !o.inner {
 				o.pendingEmpty = true
 				continue
 			}

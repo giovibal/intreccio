@@ -64,6 +64,8 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("Unwind(%s AS %s)", exprString(x.Expr), x.Alias), []Op{x.Input}
 	case *Argument:
 		return "Argument", nil
+	case *Apply:
+		return "Apply", []Op{x.Outer, x.Inner}
 	case *OuterApply:
 		return fmt.Sprintf("OuterApply(new=[%s])", strings.Join(x.NewVars, ", ")), []Op{x.Outer, x.Inner}
 	case *Union:

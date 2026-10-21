@@ -68,6 +68,9 @@ func collect(o Op) []Op {
 		out = append(out, collect(x.Input)...)
 	case *Delete:
 		out = append(out, collect(x.Input)...)
+	case *Apply:
+		out = append(out, collect(x.Outer)...)
+		out = append(out, collect(x.Inner)...)
 	case *OuterApply:
 		out = append(out, collect(x.Outer)...)
 		out = append(out, collect(x.Inner)...)
