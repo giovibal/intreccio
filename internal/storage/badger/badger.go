@@ -168,6 +168,11 @@ func mapWriteErr(err error) error {
 func (t *txn) Scan(prefix []byte) storage.Iterator {
 	opts := badger.DefaultIteratorOptions
 	opts.Prefix = prefix
+	// Value prefetching starts one goroutine per key. Most scans here read
+	// keys only (index and adjacency entries have empty values), and node
+	// records are small enough to read on demand, so it costs more than it
+	// saves.
+	opts.PrefetchValues = false
 	it := t.tx.NewIterator(opts)
 	it.Seek(prefix)
 	return &iterator{it: it, prefix: prefix}

@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/giovibal/intreccio/internal/catalog"
@@ -137,4 +138,79 @@ func appendIndexMatches(txn storage.Txn, out []uint64, prefix []byte) ([]uint64,
 		out = append(out, node)
 	}
 	return out, nil
+}
+
+// NodeCursor streams the nodes of a scan one at a time, so a caller that stops
+// early (LIMIT, an error, a cancelled query) reads only what it consumed. It
+// holds one storage iterator for its whole life, which also fixes the set of
+// nodes it returns: writes made later in the same transaction are not seen, as
+// with the ID lists it replaces. The caller must Close it before the
+// transaction ends; Close is idempotent and Next closes it when exhausted.
+type NodeCursor struct {
+	txn     storage.Txn
+	it      storage.Iterator
+	byLabel bool
+	closed  bool
+}
+
+// ScanAllNodes returns a cursor over every node, in nodeID order. Records are
+// decoded straight from the `n` keyspace, without a lookup per node.
+func ScanAllNodes(txn storage.Txn) *NodeCursor {
+	return &NodeCursor{txn: txn, it: txn.Scan(codec.NodePrefix())}
+}
+
+// ScanLabel returns a cursor over the nodes with the given label, in nodeID
+// order (`l` keyspace, then one record lookup per node).
+func ScanLabel(txn storage.Txn, labelID uint32) *NodeCursor {
+	return &NodeCursor{txn: txn, it: txn.Scan(codec.LabelPrefix(labelID)), byLabel: true}
+}
+
+// Next returns the next node; ok is false once the scan is exhausted.
+func (c *NodeCursor) Next() (node Node, ok bool, err error) {
+	if c.closed {
+		return Node{}, false, nil
+	}
+	if !c.it.Valid() {
+		return Node{}, false, c.Close()
+	}
+	key := c.it.Key()
+	if c.byLabel {
+		_, id, err := codec.ParseLabelKey(key)
+		if err != nil {
+			return Node{}, false, err
+		}
+		c.it.Next()
+		node, err := GetNode(c.txn, id)
+		if err != nil {
+			return Node{}, false, err
+		}
+		return node, true, nil
+	}
+	id, err := codec.NodeIDFromKey(key)
+	if err != nil {
+		return Node{}, false, err
+	}
+	val, err := c.it.Value()
+	if err != nil {
+		return Node{}, false, err
+	}
+	c.it.Next()
+	rec, err := codec.DecodeNode(val)
+	if err != nil {
+		return Node{}, false, fmt.Errorf("graph: decode node %d: %w", id, err)
+	}
+	return Node{ID: id, NodeRecord: rec}, true, nil
+}
+
+// Closed reports whether the cursor has been closed (explicitly or because it
+// was exhausted).
+func (c *NodeCursor) Closed() bool { return c.closed }
+
+// Close releases the underlying iterator. It is safe to call more than once.
+func (c *NodeCursor) Close() error {
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	return c.it.Close()
 }

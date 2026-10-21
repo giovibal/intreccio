@@ -28,6 +28,35 @@ type Context struct {
 	// MaxRows, when > 0, bounds the number of rows a query may produce. Exceeding
 	// it aborts with ErrResultLimit.
 	MaxRows int64
+
+	// cursors are the streaming scans opened by this execution. Run closes
+	// them all when it returns, because the storage engine requires every
+	// iterator to be closed before its transaction ends.
+	cursors []*graph.NodeCursor
+}
+
+// track registers an open cursor so Run can close it. Exhausted cursors close
+// themselves; the list is compacted so per-row inner scans (Apply) do not grow
+// it without bound.
+func (c *Context) track(cur *graph.NodeCursor) {
+	if len(c.cursors) >= 64 {
+		live := c.cursors[:0]
+		for _, open := range c.cursors {
+			if !open.Closed() {
+				live = append(live, open)
+			}
+		}
+		c.cursors = live
+	}
+	c.cursors = append(c.cursors, cur)
+}
+
+// closeCursors closes every cursor opened by this execution.
+func (c *Context) closeCursors() {
+	for _, cur := range c.cursors {
+		_ = cur.Close()
+	}
+	c.cursors = nil
 }
 
 // check reports whether execution should stop because Ctx is done.
@@ -46,6 +75,7 @@ type op interface {
 // Run builds the operator tree for root and drains it, returning the rows mapped
 // to the given output columns.
 func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
+	defer ctx.closeCursors()
 	o, err := buildWith(root, ctx, nil)
 	if err != nil {
 		return nil, err
@@ -103,17 +133,20 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 	case nil:
 		return &unit{}, nil
 	case *plan.AllNodesScan:
-		ids, err := graph.AllNodes(ctx.Txn)
-		if err != nil {
-			return nil, err
-		}
-		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
+		cur := graph.ScanAllNodes(ctx.Txn)
+		ctx.track(cur)
+		return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
 	case *plan.NodeByLabelScan:
-		ids, err := labelScanIDs(ctx, x.Label)
+		id, found, err := catalog.LookupLabel(ctx.Txn, x.Label)
 		if err != nil {
 			return nil, err
 		}
-		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
+		if !found {
+			return &nodeScan{ctx: ctx, variable: x.Var}, nil // unknown label: no rows
+		}
+		cur := graph.ScanLabel(ctx.Txn, id)
+		ctx.track(cur)
+		return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
 	case *plan.NodeByProperty:
 		var row binding
 		if arg != nil {
@@ -258,14 +291,6 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 	}
 }
 
-func labelScanIDs(ctx *Context, label string) ([]uint64, error) {
-	id, found, err := catalog.LookupLabel(ctx.Txn, label)
-	if err != nil || !found {
-		return nil, err
-	}
-	return graph.NodesByLabel(ctx.Txn, id)
-}
-
 func propertyScanIDs(ctx *Context, np *plan.NodeByProperty, row binding) ([]uint64, error) {
 	labelID, found, err := catalog.LookupLabel(ctx.Txn, np.Label)
 	if err != nil || !found {
@@ -336,9 +361,12 @@ func (u *unit) next() (binding, bool, error) {
 }
 
 // nodeScan binds variable to each node in ids, fetching the record.
+// nodeScan binds variable to each node of a scan. A streaming scan reads from
+// cursor; an index lookup (a short, already-known ID list) reads from ids.
 type nodeScan struct {
 	ctx      *Context
 	variable string
+	cursor   *graph.NodeCursor
 	ids      []uint64
 	pos      int
 }
@@ -346,6 +374,13 @@ type nodeScan struct {
 func (s *nodeScan) next() (binding, bool, error) {
 	if err := s.ctx.check(); err != nil {
 		return nil, false, err
+	}
+	if s.cursor != nil {
+		node, ok, err := s.cursor.Next()
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		return binding{s.variable: node}, true, nil
 	}
 	if s.pos >= len(s.ids) {
 		return nil, false, nil
@@ -572,6 +607,17 @@ type cartesian struct {
 }
 
 func (c *cartesian) next() (binding, bool, error) {
+	// Read the right side only once a left row exists: with no left rows the
+	// product is empty and the right scan is never needed.
+	if !c.loaded && !c.haveLeft {
+		b, ok, err := c.left.next()
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		c.curLeft = b
+		c.haveLeft = true
+		c.ri = 0
+	}
 	if !c.loaded {
 		for {
 			if err := c.ctx.check(); err != nil {
