@@ -1,9 +1,6 @@
 package sema
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/giovibal/intreccio/query/ast"
 )
 
@@ -52,62 +49,16 @@ func exprPos(e ast.Expr) ast.Pos {
 		return ex.Pos
 	case *ast.LabelsPredicate:
 		return ex.Pos
+	case *ast.Subscript:
+		return ex.Pos
+	case *ast.Slice:
+		return ex.Pos
 	default:
 		return ast.Pos{}
 	}
 }
 
 // exprString renders an expression as text, used to name projection items that
-// lack an alias (e.g. RETURN a.b -> column "a.b").
-func exprString(e ast.Expr) string {
-	switch ex := e.(type) {
-	case *ast.Variable:
-		return ex.Name
-	case *ast.PropertyAccess:
-		return exprString(ex.Target) + "." + ex.Key
-	case *ast.Param:
-		return "$" + ex.Name
-	case *ast.Literal:
-		return literalString(ex.Value)
-	case *ast.Unary:
-		if ex.Op == "NOT" {
-			return "NOT " + exprString(ex.Expr)
-		}
-		return ex.Op + exprString(ex.Expr)
-	case *ast.Binary:
-		return exprString(ex.Left) + " " + ex.Op + " " + exprString(ex.Right)
-	case *ast.LabelsPredicate:
-		return exprString(ex.Expr) + ":" + strings.Join(ex.Labels, ":")
-	case *ast.FunctionCall:
-		var b strings.Builder
-		b.WriteString(ex.Name)
-		b.WriteByte('(')
-		if ex.Distinct {
-			b.WriteString("DISTINCT ")
-		}
-		if ex.Star {
-			b.WriteByte('*')
-		}
-		for i, arg := range ex.Args {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(exprString(arg))
-		}
-		b.WriteByte(')')
-		return b.String()
-	default:
-		return "?"
-	}
-}
-
-func literalString(v any) string {
-	switch x := v.(type) {
-	case nil:
-		return "null"
-	case string:
-		return "'" + x + "'"
-	default:
-		return fmt.Sprintf("%v", x)
-	}
-}
+// lack an alias (e.g. RETURN a.b -> column "a.b"). It is shared with the
+// planner through ast.Format so both agree on column names.
+func exprString(e ast.Expr) string { return ast.Format(e) }

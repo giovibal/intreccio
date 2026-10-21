@@ -302,6 +302,21 @@ type MapLiteral struct {
 // Case is the CASE expression. When Operand is non-nil the form is "simple"
 // (CASE x WHEN v THEN r ...); when nil the form is "searched"
 // (CASE WHEN cond THEN r ...). Else is optional.
+// Subscript is target[index]: a list element (negative indexes count from
+// the end) or a map/node/relationship property by name.
+type Subscript struct {
+	Target Expr
+	Index  Expr
+	Pos    Pos
+}
+
+// Slice is target[from..to] on a list; a nil bound is open.
+type Slice struct {
+	Target   Expr
+	From, To Expr
+	Pos      Pos
+}
+
 type Case struct {
 	Operand Expr
 	Whens   []CaseAlternative
@@ -326,3 +341,5 @@ func (*LabelsPredicate) expr() {}
 func (*ListLiteral) expr()     {}
 func (*MapLiteral) expr()      {}
 func (*Case) expr()            {}
+func (*Subscript) expr()       {}
+func (*Slice) expr()           {}

@@ -975,10 +975,16 @@ func (p *parser) parsePrefix() (ast.Expr, error) {
 	return p.parsePostfix(prim)
 }
 
-// parsePostfix applies property access (.key) and the label predicate (:Label).
+// parsePostfix applies property access (.key), subscripts and slices
+// ([i], [a..b]) and the label predicate (:Label).
 func (p *parser) parsePostfix(left ast.Expr) (ast.Expr, error) {
 	for {
 		switch {
+		case p.at(tLBracket):
+			var err error
+			if left, err = p.parseSubscript(left); err != nil {
+				return nil, err
+			}
 		case p.at(tDot):
 			pos := p.advance().pos
 			key, err := p.identName()
@@ -997,6 +1003,38 @@ func (p *parser) parsePostfix(left ast.Expr) (ast.Expr, error) {
 			return left, nil
 		}
 	}
+}
+
+// parseSubscript parses [index], [from..to], [from..] and [..to].
+func (p *parser) parseSubscript(target ast.Expr) (ast.Expr, error) {
+	pos := p.advance().pos // [
+	var from ast.Expr
+	if !p.at(tDotDot) {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if !p.at(tDotDot) {
+			if _, err := p.expect(tRBracket); err != nil {
+				return nil, err
+			}
+			return &ast.Subscript{Target: target, Index: e, Pos: pos}, nil
+		}
+		from = e
+	}
+	p.advance() // ..
+	var to ast.Expr
+	if !p.at(tRBracket) {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		to = e
+	}
+	if _, err := p.expect(tRBracket); err != nil {
+		return nil, err
+	}
+	return &ast.Slice{Target: target, From: from, To: to, Pos: pos}, nil
 }
 
 func (p *parser) parsePrimary() (ast.Expr, error) {
