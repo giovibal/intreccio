@@ -267,10 +267,11 @@ func (c *NodeCursor) nextInRange() (Node, bool, error) {
 // PropRange describes the values a property range scan must cover. Bounds are
 // scalars as produced by expression evaluation; an absent bound is open.
 type PropRange struct {
-	Lower, Upper       any
-	HasLower, HasUpper bool
-	Prefix             string // STARTS WITH, when HasPrefix
-	HasPrefix          bool
+	Lower, Upper                   any
+	HasLower, HasUpper             bool
+	LowerInclusive, UpperInclusive bool
+	Prefix                         string // STARTS WITH, when HasPrefix
+	HasPrefix                      bool
 }
 
 // ScanPropertyRange returns a cursor over the nodes whose indexed (label,
@@ -371,13 +372,13 @@ func valueKind(v any) string {
 	}
 }
 
-// intBand covers the integers a numeric range may accept. Integer and float
-// comparisons go through float64, so bounds are widened by one and left open
-// beyond 2^53, where the conversion is not exact.
+// intBand covers the integers a numeric range may accept. Below 2^53 an
+// integer and a float compare exactly, so the bounds are exact (an exclusive
+// bound skips the bound value itself); beyond that the side is left open.
 func intBand(prefix []byte, labelID, keyID uint32, r PropRange, lo, hi any) (bandPlan, error) {
 	plan := bandPlan{prefix: prefix, start: prefix}
 	if r.HasLower {
-		if l, ok := intLowerBound(lo); ok {
+		if l, ok := intLowerBound(lo, r.LowerInclusive); ok {
 			start, err := codec.PropPrefix(labelID, keyID, l)
 			if err != nil {
 				return plan, err
@@ -386,32 +387,20 @@ func intBand(prefix []byte, labelID, keyID uint32, r PropRange, lo, hi any) (ban
 		}
 	}
 	if r.HasUpper {
-		if u, ok := intUpperBound(hi); ok {
+		if u, ok := intUpperBound(hi, r.UpperInclusive); ok {
 			plan.stop = func(v any) bool { i, isInt := v.(int64); return !isInt || i > u }
 		}
 	}
 	return plan, nil
 }
 
-func intLowerBound(b any) (int64, bool) {
+// intLowerBound is the smallest integer that can satisfy `x > b` (or >=).
+func intLowerBound(b any, inclusive bool) (int64, bool) {
 	switch x := b.(type) {
 	case int64:
-		if x == math.MinInt64 {
-			return 0, false
+		if inclusive {
+			return x, true
 		}
-		return x - 1, true
-	case float64:
-		if math.IsInf(x, 0) || math.Abs(x) >= maxExactInt {
-			return 0, false
-		}
-		return int64(math.Floor(x)) - 1, true
-	}
-	return 0, false
-}
-
-func intUpperBound(b any) (int64, bool) {
-	switch x := b.(type) {
-	case int64:
 		if x == math.MaxInt64 {
 			return 0, false
 		}
@@ -420,19 +409,54 @@ func intUpperBound(b any) (int64, bool) {
 		if math.IsInf(x, 0) || math.Abs(x) >= maxExactInt {
 			return 0, false
 		}
-		return int64(math.Ceil(x)) + 1, true
+		if inclusive {
+			return int64(math.Ceil(x)), true
+		}
+		return int64(math.Floor(x)) + 1, true
 	}
 	return 0, false
 }
 
-// floatBand covers the floats a numeric range may accept, widened by one ulp
-// on each side so that -0.0/0.0 and integer bounds rounded to float64 are
-// never cut off.
+// intUpperBound is the largest integer that can satisfy `x < b` (or <=).
+func intUpperBound(b any, inclusive bool) (int64, bool) {
+	switch x := b.(type) {
+	case int64:
+		if inclusive {
+			return x, true
+		}
+		if x == math.MinInt64 {
+			return 0, false
+		}
+		return x - 1, true
+	case float64:
+		if math.IsInf(x, 0) || math.Abs(x) >= maxExactInt {
+			return 0, false
+		}
+		if inclusive {
+			return int64(math.Floor(x)), true
+		}
+		return int64(math.Ceil(x)) - 1, true
+	}
+	return 0, false
+}
+
+// floatBand covers the floats a numeric range may accept. Float bounds, and
+// integer bounds below 2^53, are exact (-0.0 sorts just before 0.0, so a
+// bound of zero starts at -0.0); larger integer bounds are widened by one ulp
+// because their float64 conversion may round.
 func floatBand(prefix []byte, labelID, keyID uint32, r PropRange, lo, hi any) (bandPlan, error) {
 	plan := bandPlan{prefix: prefix, start: prefix}
 	if r.HasLower {
-		if l, ok := toFloat64(lo); ok && !math.IsInf(l, -1) {
-			start, err := codec.PropPrefix(labelID, keyID, math.Nextafter(l, math.Inf(-1)))
+		if l, exact, ok := floatBound(lo); ok && !math.IsInf(l, -1) {
+			switch {
+			case !exact:
+				l = math.Nextafter(l, math.Inf(-1))
+			case !r.LowerInclusive:
+				l = math.Nextafter(l, math.Inf(1)) // > 0 skips both zeros
+			case l == 0:
+				l = math.Copysign(0, -1) // >= 0 includes -0.0
+			}
+			start, err := codec.PropPrefix(labelID, keyID, l)
 			if err != nil {
 				return plan, err
 			}
@@ -440,20 +464,34 @@ func floatBand(prefix []byte, labelID, keyID uint32, r PropRange, lo, hi any) (b
 		}
 	}
 	if r.HasUpper {
-		if u, ok := toFloat64(hi); ok && !math.IsInf(u, 1) {
-			limit := math.Nextafter(u, math.Inf(1))
-			plan.stop = func(v any) bool { f, isFloat := v.(float64); return !isFloat || f > limit }
+		if u, exact, ok := floatBound(hi); ok && !math.IsInf(u, 1) {
+			inclusive := r.UpperInclusive
+			if !exact {
+				u, inclusive = math.Nextafter(u, math.Inf(1)), true
+			}
+			plan.stop = func(v any) bool {
+				f, isFloat := v.(float64)
+				if !isFloat {
+					return true
+				}
+				if inclusive {
+					return f > u
+				}
+				return f >= u
+			}
 		}
 	}
 	return plan, nil
 }
 
-func toFloat64(v any) (float64, bool) {
+// floatBound converts a numeric bound to float64 and reports whether the
+// conversion is exact.
+func floatBound(v any) (f float64, exact, ok bool) {
 	switch x := v.(type) {
 	case int64:
-		return float64(x), true
+		return float64(x), x > -maxExactInt && x < maxExactInt, true
 	case float64:
-		return x, true
+		return x, true, true
 	}
-	return 0, false
+	return 0, false, false
 }

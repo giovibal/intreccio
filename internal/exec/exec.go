@@ -329,13 +329,13 @@ func propertyRangeScan(ctx *Context, x *plan.NodeByPropertyRange, row binding) (
 		if r.Lower, err = eval(x.Lower, row, ctx); err != nil {
 			return nil, err
 		}
-		r.HasLower = true
+		r.HasLower, r.LowerInclusive = true, x.LowerInclusive
 	}
 	if x.Upper != nil {
 		if r.Upper, err = eval(x.Upper, row, ctx); err != nil {
 			return nil, err
 		}
-		r.HasUpper = true
+		r.HasUpper, r.UpperInclusive = true, x.UpperInclusive
 	}
 	cur, err := graph.ScanPropertyRange(ctx.Txn, labelID, keyID, r)
 	if err != nil || cur == nil {
