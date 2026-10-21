@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/internal/storage/codec"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // --- CREATE ---
@@ -706,12 +706,12 @@ func propsMatch(ctx *Context, have map[uint32]any, want map[string]ast.Expr, b b
 	return true, nil
 }
 
-// scalarEqualNorm compares two scalar values for equality after normalization.
+// scalarEqualNorm compares two scalar values for equality after normalization,
+// using the query-level equality (so NaN matches nothing).
 func scalarEqualNorm(a, b any) bool {
 	a, b = normalize(a), normalize(b)
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0
+	return equals(a, b)
 }
