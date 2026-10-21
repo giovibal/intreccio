@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"sort"
+
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/storage"
 	"github.com/giovibal/intreccio/internal/storage/codec"
@@ -88,21 +90,20 @@ func NodesByProperty(txn storage.Txn, labelID, keyID uint32, value any) ([]uint6
 	if err != nil {
 		return nil, err
 	}
-	if has && isIndexable(value) {
-		prefix, err := codec.PropPrefix(labelID, keyID, value)
-		if err != nil {
-			return nil, err
-		}
+	probes, exact := equalityProbes(value)
+	if has && exact && isIndexable(value) {
 		var out []uint64
-		it := txn.Scan(prefix)
-		defer func() { _ = it.Close() }()
-		for ; it.Valid(); it.Next() {
-			node, err := codec.ParsePropKeyNode(it.Key())
+		for _, p := range probes {
+			prefix, err := codec.PropPrefix(labelID, keyID, p)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, node)
+			if out, err = appendIndexMatches(txn, out, prefix); err != nil {
+				return nil, err
+			}
 		}
+		// Several probes visit different key ranges: restore node-ID order.
+		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 		return out, nil
 	}
 
@@ -117,9 +118,23 @@ func NodesByProperty(txn storage.Txn, labelID, keyID uint32, value any) ([]uint6
 		if err != nil {
 			return nil, err
 		}
-		if v, ok := node.Props[keyID]; ok && scalarEqual(v, value) {
+		if v, ok := node.Props[keyID]; ok && QueryEqual(v, value) {
 			out = append(out, n)
 		}
+	}
+	return out, nil
+}
+
+// appendIndexMatches appends the node IDs of the `p` entries under prefix.
+func appendIndexMatches(txn storage.Txn, out []uint64, prefix []byte) ([]uint64, error) {
+	it := txn.Scan(prefix)
+	defer func() { _ = it.Close() }()
+	for ; it.Valid(); it.Next() {
+		node, err := codec.ParsePropKeyNode(it.Key())
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, node)
 	}
 	return out, nil
 }

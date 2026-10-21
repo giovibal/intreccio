@@ -2,11 +2,12 @@ package exec
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // binding is one row of execution: variable/column name -> value.
@@ -281,20 +282,26 @@ func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (an
 	return f(truthy(l), truthy(r)), nil
 }
 
+// equals is the query-level equality. It is shared with the graph layer so an
+// index lookup and a filter always agree on which values match.
 func equals(a, b any) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0
+	return graph.QueryEqual(a, b)
 }
 
 func notEquals(a, b any) bool {
 	if a == nil || b == nil {
 		return false
 	}
+	if isNaN(a) || isNaN(b) {
+		return true // NaN is unequal to everything, itself included
+	}
 	c, ok := compareValues(a, b)
 	return ok && c != 0
+}
+
+func isNaN(v any) bool {
+	f, ok := v.(float64)
+	return ok && math.IsNaN(f)
 }
 
 func compareOp(op string, a, b any) bool {
