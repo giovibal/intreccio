@@ -202,9 +202,9 @@ func evalUnary(ex *ast.Unary, b binding, ctx *Context) (any, error) {
 func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 	switch ex.Op {
 	case "AND":
-		return boolOp(ex, b, ctx, func(l, r bool) bool { return l && r })
+		return boolOp(ex, b, ctx, false)
 	case "OR":
-		return boolOp(ex, b, ctx, func(l, r bool) bool { return l || r })
+		return boolOp(ex, b, ctx, true)
 	}
 
 	l, err := eval(ex.Left, b, ctx)
@@ -253,6 +253,9 @@ func stringPredicate(l, r any, fn func(string, string) bool) (any, error) {
 	return fn(ls, rs), nil
 }
 
+// inList evaluates `needle IN haystack` with three-valued logic: true if an
+// element equals needle, otherwise null if any comparison was unknown (a null
+// needle or a null element), otherwise false.
 func inList(needle, haystack any) (any, error) {
 	if haystack == nil {
 		return nil, nil
@@ -261,15 +264,26 @@ func inList(needle, haystack any) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("exec: IN requires a list, got %T", haystack)
 	}
+	unknown := false
 	for _, item := range list {
-		if equals(needle, item) {
+		eq, known := equality(needle, item)
+		if known && eq {
 			return true, nil
 		}
+		if !known {
+			unknown = true
+		}
+	}
+	if unknown {
+		return nil, nil
 	}
 	return false, nil
 }
 
-func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (any, error) {
+// boolOp evaluates AND (or OR when isOr is set) with three-valued logic: the
+// deciding value (false for AND, true for OR) wins over null; otherwise null
+// makes the result null. Non-boolean operands count as false, as before.
+func boolOp(ex *ast.Binary, b binding, ctx *Context, isOr bool) (any, error) {
 	l, err := eval(ex.Left, b, ctx)
 	if err != nil {
 		return nil, err
@@ -278,7 +292,13 @@ func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (an
 	if err != nil {
 		return nil, err
 	}
-	return f(truthy(l), truthy(r)), nil
+	if (l != nil && truthy(l) == isOr) || (r != nil && truthy(r) == isOr) {
+		return isOr, nil
+	}
+	if l == nil || r == nil {
+		return nil, nil
+	}
+	return !isOr, nil
 }
 
 // equals reports whether a and b are definitely equal. An unknown result
