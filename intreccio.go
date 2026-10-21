@@ -98,6 +98,12 @@ var ErrResultLimit = exec.ErrResultLimit
 // takes many writers updating the same node at once.
 var ErrConflict = storage.ErrConflict
 
+// ErrTxnTooLarge is returned by Query when a single write statement holds more
+// changes than one transaction can commit (roughly 25 000 to 35 000 new nodes
+// with the default engine). Nothing is committed. Load large datasets in
+// batches, e.g. `UNWIND $rows ...` with about 10 000 rows per call.
+var ErrTxnTooLarge = storage.ErrTxnTooLarge
+
 // ErrIntegerOverflow is returned by Query when integer arithmetic (including
 // sum()) leaves the 64-bit range. Integers never wrap around silently.
 var ErrIntegerOverflow = exec.ErrIntegerOverflow

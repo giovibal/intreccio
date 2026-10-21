@@ -13,6 +13,11 @@ var ErrNotFound = errors.New("storage: key not found")
 // the caller may retry.
 var ErrConflict = errors.New("storage: transaction conflict (concurrent writes to the same data)")
 
+// ErrTxnTooLarge is returned when a transaction holds more writes than the
+// engine accepts in one commit. Nothing is committed; split the work into
+// smaller transactions.
+var ErrTxnTooLarge = errors.New("storage: transaction too large (split the write into smaller batches)")
+
 // Snapshotter is an optional capability for engines that can serialize and
 // restore their full contents. It is used by the clustering layer for Raft
 // snapshot/restore. Backup writes a consistent dump as of the call; Load
