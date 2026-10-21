@@ -692,6 +692,13 @@ func exprVars(e ast.Expr) []string {
 			out = append(out, x.Name)
 		case *ast.PropertyAccess:
 			walk(x.Target)
+		case *ast.Subscript:
+			walk(x.Target)
+			walk(x.Index)
+		case *ast.Slice:
+			walk(x.Target)
+			walk(x.From)
+			walk(x.To)
 		case *ast.Unary:
 			walk(x.Expr)
 		case *ast.Binary:
@@ -822,8 +829,26 @@ func containsAggregate(e ast.Expr) bool {
 		return containsAggregate(ex.Expr)
 	case *ast.PropertyAccess:
 		return containsAggregate(ex.Target)
+	case *ast.Subscript:
+		return containsAggregate(ex.Target) || containsAggregate(ex.Index)
+	case *ast.Slice:
+		return containsAggregate(ex.Target) || containsAggregate(ex.From) || containsAggregate(ex.To)
 	case *ast.LabelsPredicate:
 		return containsAggregate(ex.Expr)
+	case *ast.ListLiteral:
+		for _, el := range ex.Elements {
+			if containsAggregate(el) {
+				return true
+			}
+		}
+		return false
+	case *ast.MapLiteral:
+		for _, v := range ex.Entries {
+			if containsAggregate(v) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}

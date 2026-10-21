@@ -42,6 +42,10 @@ func eval(e ast.Expr, b binding, ctx *Context) (any, error) {
 		return v, nil
 	case *ast.PropertyAccess:
 		return evalProperty(ex, b, ctx)
+	case *ast.Subscript:
+		return evalSubscript(ex, b, ctx)
+	case *ast.Slice:
+		return evalSlice(ex, b, ctx)
 	case *ast.Unary:
 		return evalUnary(ex, b, ctx)
 	case *ast.Binary:
@@ -121,9 +125,103 @@ func evalProperty(ex *ast.PropertyAccess, b binding, ctx *Context) (any, error) 
 		return propValue(ctx, t.Props, ex.Key)
 	case graph.Edge:
 		return propValue(ctx, t.Props, ex.Key)
+	case map[string]any:
+		return t[ex.Key], nil // a missing key is null
 	default:
-		return nil, fmt.Errorf("exec: property access on a non-node/edge value (%T)", target)
+		return nil, fmt.Errorf("exec: property access on a non-node/edge/map value (%T)", target)
 	}
+}
+
+// evalSubscript evaluates target[index]: a list element by position
+// (negative counts from the end, out of range is null) or a map, node or
+// relationship property by name.
+func evalSubscript(ex *ast.Subscript, b binding, ctx *Context) (any, error) {
+	target, err := eval(ex.Target, b, ctx)
+	if err != nil {
+		return nil, err
+	}
+	index, err := eval(ex.Index, b, ctx)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil || index == nil {
+		return nil, nil
+	}
+	switch t := target.(type) {
+	case []any:
+		i, ok := normalize(index).(int64)
+		if !ok {
+			return nil, fmt.Errorf("exec: list index must be an integer, got %T", index)
+		}
+		if i < 0 {
+			i += int64(len(t))
+		}
+		if i < 0 || i >= int64(len(t)) {
+			return nil, nil
+		}
+		return t[i], nil
+	case map[string]any, graph.Node, graph.Edge:
+		key, ok := index.(string)
+		if !ok {
+			return nil, fmt.Errorf("exec: map key must be a string, got %T", index)
+		}
+		switch m := t.(type) {
+		case map[string]any:
+			return m[key], nil
+		case graph.Node:
+			return propValue(ctx, m.Props, key)
+		default:
+			return propValue(ctx, m.(graph.Edge).Props, key)
+		}
+	default:
+		return nil, fmt.Errorf("exec: cannot index a %T", target)
+	}
+}
+
+// evalSlice evaluates list[from..to]: bounds are clamped to the list,
+// negative bounds count from the end, and a null list or bound gives null.
+func evalSlice(ex *ast.Slice, b binding, ctx *Context) (any, error) {
+	target, err := eval(ex.Target, b, ctx)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil {
+		return nil, nil
+	}
+	list, ok := target.([]any)
+	if !ok {
+		return nil, fmt.Errorf("exec: cannot slice a %T", target)
+	}
+	n := int64(len(list))
+	bound := func(e ast.Expr, open int64) (int64, bool, error) {
+		if e == nil {
+			return open, true, nil
+		}
+		v, err := eval(e, b, ctx)
+		if err != nil || v == nil {
+			return 0, false, err
+		}
+		i, ok := normalize(v).(int64)
+		if !ok {
+			return 0, false, fmt.Errorf("exec: slice bound must be an integer, got %T", v)
+		}
+		if i < 0 {
+			i += n
+		}
+		return min(max(i, 0), n), true, nil
+	}
+	from, ok, err := bound(ex.From, 0)
+	if err != nil || !ok {
+		return nil, err
+	}
+	to, ok, err := bound(ex.To, n)
+	if err != nil || !ok {
+		return nil, err
+	}
+	if from >= to {
+		return []any{}, nil
+	}
+	return append([]any(nil), list[from:to]...), nil
 }
 
 func propValue(ctx *Context, props map[uint32]any, key string) (any, error) {
