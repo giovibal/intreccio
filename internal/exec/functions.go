@@ -434,7 +434,7 @@ func fnAbs(_ *Context, args []any) (any, error) {
 		return nil, nil
 	case int64:
 		if v < 0 {
-			return -v, nil
+			return negateInt(v)
 		}
 		return v, nil
 	case float64:

@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -185,7 +186,7 @@ func evalUnary(ex *ast.Unary, b binding, ctx *Context) (any, error) {
 	case "-":
 		switch n := v.(type) {
 		case int64:
-			return -n, nil
+			return negateInt(n)
 		case float64:
 			return -n, nil
 		default:
@@ -464,17 +465,35 @@ func arithmetic(op string, a, b any) (any, error) {
 	return floatArithmetic(op, af, bf)
 }
 
+// ErrIntegerOverflow is returned when integer arithmetic leaves the int64
+// range. openCypher integers do not wrap around.
+var ErrIntegerOverflow = errors.New("exec: integer overflow")
+
 func intArithmetic(op string, a, b int64) (any, error) {
 	switch op {
 	case "+":
-		return a + b, nil
+		return addInt(a, b)
 	case "-":
-		return a - b, nil
+		c := a - b
+		if (a^b)&(a^c) < 0 {
+			return nil, ErrIntegerOverflow
+		}
+		return c, nil
 	case "*":
-		return a * b, nil
+		if a == 0 || b == 0 {
+			return int64(0), nil
+		}
+		c := a * b
+		if c/b != a || (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
+			return nil, ErrIntegerOverflow
+		}
+		return c, nil
 	case "/":
 		if b == 0 {
 			return nil, fmt.Errorf("exec: division by zero")
+		}
+		if a == math.MinInt64 && b == -1 {
+			return nil, ErrIntegerOverflow
 		}
 		return a / b, nil
 	case "%":
@@ -485,6 +504,23 @@ func intArithmetic(op string, a, b int64) (any, error) {
 	default:
 		return nil, fmt.Errorf("exec: unknown operator %q", op)
 	}
+}
+
+// addInt adds two int64 values, failing instead of wrapping around.
+func addInt(a, b int64) (int64, error) {
+	c := a + b
+	if (a^c)&(b^c) < 0 {
+		return 0, ErrIntegerOverflow
+	}
+	return c, nil
+}
+
+// negateInt negates an int64; -MinInt64 does not fit.
+func negateInt(n int64) (int64, error) {
+	if n == math.MinInt64 {
+		return 0, ErrIntegerOverflow
+	}
+	return -n, nil
 }
 
 func floatArithmetic(op string, a, b float64) (any, error) {

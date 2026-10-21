@@ -92,6 +92,10 @@ func WithMaxRows(limit int) QueryOption {
 // ErrResultLimit is returned by Query when a result exceeds WithMaxRows.
 var ErrResultLimit = exec.ErrResultLimit
 
+// ErrIntegerOverflow is returned by Query when integer arithmetic (including
+// sum()) leaves the 64-bit range. Integers never wrap around silently.
+var ErrIntegerOverflow = exec.ErrIntegerOverflow
+
 // OpenOption configures how Open opens a database.
 type OpenOption func(*openOptions)
 
