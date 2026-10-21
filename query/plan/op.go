@@ -59,6 +59,11 @@ type Expand struct {
 	MinHops   int
 	MaxHops   int
 	ToBound   bool // true if To is already bound: the expand checks the equality
+	// ToUnused / RelUnused mark anonymous pattern elements that nothing reads
+	// (no label or property filter, no path variable): the executor binds
+	// them by ID only instead of loading their records.
+	ToUnused  bool
+	RelUnused bool
 }
 
 // Filter: applies a predicate to the stream.

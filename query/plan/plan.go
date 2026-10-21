@@ -157,6 +157,7 @@ func (pl *planner) bindPatternVars(part ast.PatternPart) {
 
 type pnode struct {
 	name           string
+	anon           bool // no variable in the query text
 	labels         []string
 	props          map[string]ast.Expr
 	reachedByScan  bool
@@ -166,6 +167,7 @@ type pnode struct {
 
 type prel struct {
 	name   string
+	anon   bool // no variable in the query text
 	types  []string
 	dir    ast.Direction
 	props  map[string]ast.Expr
@@ -325,29 +327,62 @@ func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality
 	}
 
 	// Expand rightward and leftward starting from the anchor.
+	var expands []*Expand
 	for i := startIdx; i < len(rels); i++ {
-		pl.emitExpand(nodes[i], rels[i], nodes[i+1], false)
+		expands = append(expands, pl.emitExpand(nodes[i], rels[i], nodes[i+1], false))
 	}
 	for i := startIdx - 1; i >= 0; i-- {
-		pl.emitExpand(nodes[i+1], rels[i], nodes[i], true)
+		expands = append(expands, pl.emitExpand(nodes[i+1], rels[i], nodes[i], true))
 	}
 
-	return residualPredicates(nodes, rels), nil
+	residual := residualPredicates(nodes, rels)
+	if part.Variable == "" { // a path variable observes every element
+		markUnused(expands, nodes, rels, residual)
+	}
+	return residual, nil
 }
 
-func (pl *planner) emitExpand(from pnode, rel prel, to pnode, reversed bool) {
+// markUnused flags the anonymous targets and relationships of single-hop
+// expands that no residual predicate reads, so the executor can skip loading
+// their records. Anonymous elements cannot be named later in the query.
+func markUnused(expands []*Expand, nodes []pnode, rels []prel, residual []ast.Expr) {
+	read := map[string]bool{}
+	for _, e := range residual {
+		for _, v := range exprVars(e) {
+			read[v] = true
+		}
+	}
+	anon := map[string]bool{}
+	for _, nd := range nodes {
+		anon[nd.name] = nd.anon
+	}
+	for _, r := range rels {
+		anon[r.name] = r.anon
+	}
+	for _, x := range expands {
+		if x.VarLength {
+			continue
+		}
+		x.ToUnused = anon[x.To] && !read[x.To] && !x.ToBound
+		x.RelUnused = anon[x.Rel] && !read[x.Rel]
+	}
+}
+
+func (pl *planner) emitExpand(from pnode, rel prel, to pnode, reversed bool) *Expand {
 	dir := rel.dir
 	if reversed {
 		dir = flip(dir)
 	}
-	pl.plan = &Expand{
+	x := &Expand{
 		Input: pl.plan, From: from.name, Rel: rel.name, To: to.name,
 		Types: rel.types, Dir: dir,
 		VarLength: rel.varLen, MinHops: rel.min, MaxHops: rel.max,
 		ToBound: pl.isBound(to.name),
 	}
+	pl.plan = x
 	pl.bind(rel.name)
 	pl.bind(to.name)
+	return x
 }
 
 func (pl *planner) chooseAnchor(nodes []pnode, whereEqs map[string][]equality, whereRanges map[string][]rangePred) (int, Op, *equality) {
@@ -458,19 +493,19 @@ func (pl *planner) buildPart(part ast.PatternPart) ([]pnode, []prel) {
 }
 
 func (pl *planner) makeNode(n *ast.NodePattern) pnode {
-	name := n.Variable
-	if name == "" {
+	name, anon := n.Variable, n.Variable == ""
+	if anon {
 		name = pl.newName("_n")
 	}
-	return pnode{name: name, labels: n.Labels, props: n.Props}
+	return pnode{name: name, anon: anon, labels: n.Labels, props: n.Props}
 }
 
 func (pl *planner) makeRel(r *ast.RelPattern) prel {
-	name := r.Variable
-	if name == "" {
+	name, anon := r.Variable, r.Variable == ""
+	if anon {
 		name = pl.newName("_r")
 	}
-	return prel{name: name, types: r.Types, dir: r.Direction, props: r.Props, varLen: r.VarLength, min: r.MinHops, max: r.MaxHops}
+	return prel{name: name, anon: anon, types: r.Types, dir: r.Direction, props: r.Props, varLen: r.VarLength, min: r.MinHops, max: r.MaxHops}
 }
 
 // residualPredicates collects the predicates to apply in a Filter after
