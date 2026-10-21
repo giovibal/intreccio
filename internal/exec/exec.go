@@ -33,6 +33,43 @@ type Context struct {
 	// them all when it returns, because the storage engine requires every
 	// iterator to be closed before its transaction ends.
 	cursors []*graph.NodeCursor
+
+	// keyIDs and labelIDs cache dictionary lookups for this execution.
+	// Dictionary entries are never removed, so a found ID stays valid for
+	// the whole transaction; misses are not cached because the query itself
+	// may intern the name later.
+	keyIDs   map[string]uint32
+	labelIDs map[string]uint32
+}
+
+// lookupKey resolves a property-key name, caching the result.
+func (c *Context) lookupKey(name string) (uint32, bool, error) {
+	if id, ok := c.keyIDs[name]; ok {
+		return id, true, nil
+	}
+	id, found, err := catalog.LookupKey(c.Txn, name)
+	if err == nil && found {
+		if c.keyIDs == nil {
+			c.keyIDs = map[string]uint32{}
+		}
+		c.keyIDs[name] = id
+	}
+	return id, found, err
+}
+
+// lookupLabel resolves a label name, caching the result.
+func (c *Context) lookupLabel(name string) (uint32, bool, error) {
+	if id, ok := c.labelIDs[name]; ok {
+		return id, true, nil
+	}
+	id, found, err := catalog.LookupLabel(c.Txn, name)
+	if err == nil && found {
+		if c.labelIDs == nil {
+			c.labelIDs = map[string]uint32{}
+		}
+		c.labelIDs[name] = id
+	}
+	return id, found, err
 }
 
 // track registers an open cursor so Run can close it. Exhausted cursors close

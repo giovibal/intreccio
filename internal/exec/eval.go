@@ -6,7 +6,6 @@ import (
 	"math"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/query/ast"
 )
@@ -128,7 +127,7 @@ func evalProperty(ex *ast.PropertyAccess, b binding, ctx *Context) (any, error) 
 }
 
 func propValue(ctx *Context, props map[uint32]any, key string) (any, error) {
-	keyID, found, err := catalog.LookupKey(ctx.Txn, key)
+	keyID, found, err := ctx.lookupKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +147,7 @@ func evalLabels(ex *ast.LabelsPredicate, b binding, ctx *Context) (any, error) {
 		return false, nil
 	}
 	for _, name := range ex.Labels {
-		id, found, err := catalog.LookupLabel(ctx.Txn, name)
+		id, found, err := ctx.lookupLabel(name)
 		if err != nil {
 			return nil, err
 		}
