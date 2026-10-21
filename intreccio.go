@@ -92,6 +92,12 @@ func WithMaxRows(limit int) QueryOption {
 // ErrResultLimit is returned by Query when a result exceeds WithMaxRows.
 var ErrResultLimit = exec.ErrResultLimit
 
+// ErrConflict is returned by Query when a write kept conflicting with
+// concurrent writes to the same data, even after automatic retries with
+// backoff. Nothing is committed and the write can be retried. It is rare: it
+// takes many writers updating the same node at once.
+var ErrConflict = storage.ErrConflict
+
 // ErrIntegerOverflow is returned by Query when integer arithmetic (including
 // sum()) leaves the 64-bit range. Integers never wrap around silently.
 var ErrIntegerOverflow = exec.ErrIntegerOverflow

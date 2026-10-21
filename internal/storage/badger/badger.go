@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/giovibal/intreccio/internal/storage"
@@ -14,6 +16,13 @@ const loadPendingWrites = 256
 
 // maxRetries bounds the Update attempts on an SSI conflict.
 const maxRetries = 100
+
+// Backoff between conflict retries: exponential from retryBase, capped at
+// retryCap, with jitter so contending writers do not retry in lockstep.
+const (
+	retryBase = 50 * time.Microsecond
+	retryCap  = 10 * time.Millisecond
+)
 
 // Store is the storage.Store adapter over BadgerDB.
 type Store struct {
@@ -64,11 +73,24 @@ func (s *Store) View(fn func(storage.Txn) error) error {
 func (s *Store) Update(fn func(storage.Txn) error) error {
 	for i := 0; ; i++ {
 		err := s.db.Update(func(tx *badger.Txn) error { return fn(&txn{tx: tx}) })
-		if errors.Is(err, badger.ErrConflict) && i < maxRetries {
-			continue
+		if !errors.Is(err, badger.ErrConflict) {
+			return err
 		}
-		return err
+		if i >= maxRetries {
+			return storage.ErrConflict
+		}
+		time.Sleep(retryDelay(i))
 	}
+}
+
+// retryDelay is the jittered exponential backoff before conflict retry i:
+// a random duration in [d/2, d) with d = min(retryBase*2^i, retryCap).
+func retryDelay(i int) time.Duration {
+	d := retryCap
+	if i < 20 && retryBase<<i < retryCap {
+		d = retryBase << i
+	}
+	return d/2 + rand.N(d/2)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
