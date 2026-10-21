@@ -117,6 +117,33 @@ res, err := db.Query(ctx,
     intreccio.WithMaxRows(1000)) // optional cap, ErrResultLimit if exceeded
 ```
 
+### Loading data in bulk
+
+Each `Query` call is one transaction, and the default engine caps how many
+writes a transaction can hold: roughly **25 000–35 000 new nodes** per
+statement, fewer when nodes carry many properties or labels. A statement over
+the limit fails with `intreccio.ErrTxnTooLarge` and commits nothing.
+
+Load large datasets in batches of about **10 000 rows** per call:
+
+```go
+const batch = 10000
+for start := 0; start < len(rows); start += batch {
+    end := min(start+batch, len(rows))
+    _, err := db.Query(ctx,
+        "UNWIND $rows AS r CREATE (p:Person) SET p = r",
+        map[string]any{"rows": rows[start:end]})
+    if errors.Is(err, intreccio.ErrTxnTooLarge) {
+        // lower the batch size
+    }
+    ...
+}
+```
+
+`CREATE INDEX` indexes the existing nodes of its label in the same
+transaction, so on a label with more nodes than the limit, create the index
+before loading the data.
+
 ### Use the CLI / REPL
 
 The `intreccio` binary opens a directory-backed database, or an in-memory one if
