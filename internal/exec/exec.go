@@ -269,6 +269,9 @@ func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
 	if err != nil {
 		return nil, err
 	}
+	if value == nil {
+		return nil, nil // x = null is never true
+	}
 	if !graph.IsIndexable(value) {
 		// Lists and maps have no index keys: scan the label and compare with
 		// the query equality, so the result matches the non-indexed path.

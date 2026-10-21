@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // binding is one row of execution: variable/column name -> value.
@@ -347,8 +347,9 @@ func equality(a, b any) (eq, known bool) {
 		bv, ok := b.(graph.Edge)
 		return ok && av.ID == bv.ID, true
 	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0, true
+	// Scalars: shared with the graph layer so an index lookup and a filter
+	// agree (1 = 1.0, NaN equals nothing, different kinds are unequal).
+	return graph.QueryEqual(a, b), true
 }
 
 func compareOp(op string, a, b any) bool {
