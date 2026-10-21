@@ -59,11 +59,7 @@ func TestParameterNormalization(t *testing.T) {
 			if got := res.Rows[0][0]; !reflect.DeepEqual(got, c.want) {
 				t.Errorf("stored %#v, want %#v", got, c.want)
 			}
-			// The same parameter must also match in a comparison (scalars only:
-			// list equality is covered by #20).
-			if reflect.TypeOf(c.want).Kind() == reflect.Slice {
-				return
-			}
+			// The same parameter must also match in a comparison.
 			res, err = db.Query(ctx, "MATCH (n:N) WHERE n.v = $v RETURN count(n)", map[string]any{"v": c.in})
 			if err != nil {
 				t.Fatal(err)
