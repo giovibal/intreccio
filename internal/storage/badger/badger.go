@@ -130,9 +130,18 @@ func (t *txn) Get(key []byte) ([]byte, error) {
 	return item.ValueCopy(nil)
 }
 
-func (t *txn) Set(key, val []byte) error { return t.tx.Set(key, val) }
+func (t *txn) Set(key, val []byte) error { return mapWriteErr(t.tx.Set(key, val)) }
 
-func (t *txn) Delete(key []byte) error { return t.tx.Delete(key) }
+func (t *txn) Delete(key []byte) error { return mapWriteErr(t.tx.Delete(key)) }
+
+// mapWriteErr turns Badger's per-transaction size limit into the
+// engine-neutral storage.ErrTxnTooLarge.
+func mapWriteErr(err error) error {
+	if errors.Is(err, badger.ErrTxnTooBig) {
+		return storage.ErrTxnTooLarge
+	}
+	return err
+}
 
 func (t *txn) Scan(prefix []byte) storage.Iterator {
 	opts := badger.DefaultIteratorOptions
