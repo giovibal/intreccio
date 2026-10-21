@@ -182,7 +182,9 @@ func (a *accumulator) add(row binding, s aggSpec, ctx *Context) error {
 		switch n := v.(type) {
 		case int64:
 			if a.isInt {
-				a.intSum += n
+				if a.intSum, err = addInt(a.intSum, n); err != nil {
+					return fmt.Errorf("sum: %w", err)
+				}
 			} else {
 				a.sum += float64(n)
 			}
