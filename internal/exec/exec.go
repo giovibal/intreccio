@@ -282,6 +282,7 @@ func propertyScanIDs(ctx *Context, np *plan.NodeByProperty, row binding) ([]uint
 	if err != nil {
 		return nil, err
 	}
+	value = normalize(value) // a Go int is an indexable integer
 	if value == nil {
 		return nil, nil // x = null is never true
 	}
