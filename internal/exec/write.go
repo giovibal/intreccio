@@ -679,6 +679,5 @@ func scalarEqualNorm(a, b any) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0
+	return equals(a, b)
 }
