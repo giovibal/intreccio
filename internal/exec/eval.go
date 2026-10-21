@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // binding is one row of execution: variable/column name -> value.
@@ -218,9 +218,9 @@ func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 
 	switch ex.Op {
 	case "=":
-		return equals(l, r), nil
+		return equalityOp(l, r, false), nil
 	case "<>":
-		return notEquals(l, r), nil
+		return equalityOp(l, r, true), nil
 	case "<", "<=", ">", ">=":
 		return compareOp(ex.Op, l, r), nil
 	case "+", "-", "*", "/", "%":
@@ -281,20 +281,75 @@ func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (an
 	return f(truthy(l), truthy(r)), nil
 }
 
+// equals reports whether a and b are definitely equal. An unknown result
+// (null involved) counts as not equal, which is what IN, CASE and MERGE need.
 func equals(a, b any) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0
+	eq, known := equality(a, b)
+	return known && eq
 }
 
-func notEquals(a, b any) bool {
-	if a == nil || b == nil {
-		return false
+// equalityOp evaluates `=` (or `<>` when negate is set) with openCypher
+// three-valued logic: the result is null when it depends on a null.
+func equalityOp(a, b any, negate bool) any {
+	eq, known := equality(a, b)
+	if !known {
+		return nil
 	}
-	c, ok := compareValues(a, b)
-	return ok && c != 0
+	return eq != negate
+}
+
+// equality compares two values. known is false when the outcome depends on a
+// null (e.g. 1 = null, or [1, null] = [1, null]). Lists compare element by
+// element, maps key by key, nodes and relationships by identity, and values of
+// different kinds are unequal.
+func equality(a, b any) (eq, known bool) {
+	a, b = normalize(a), normalize(b)
+	if a == nil || b == nil {
+		return false, false
+	}
+	switch av := a.(type) {
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false, true
+		}
+		known = true
+		for i := range av {
+			e, k := equality(av[i], bv[i])
+			if k && !e {
+				return false, true
+			}
+			known = known && k
+		}
+		return known, known
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok || len(av) != len(bv) {
+			return false, true
+		}
+		known = true
+		for key, x := range av {
+			y, present := bv[key]
+			if !present {
+				return false, true
+			}
+			e, k := equality(x, y)
+			if k && !e {
+				return false, true
+			}
+			known = known && k
+		}
+		return known, known
+	case graph.Node:
+		bv, ok := b.(graph.Node)
+		return ok && av.ID == bv.ID, true
+	case graph.Edge:
+		bv, ok := b.(graph.Edge)
+		return ok && av.ID == bv.ID, true
+	}
+	// Scalars: shared with the graph layer so an index lookup and a filter
+	// agree (1 = 1.0, NaN equals nothing, different kinds are unequal).
+	return graph.QueryEqual(a, b), true
 }
 
 func compareOp(op string, a, b any) bool {
