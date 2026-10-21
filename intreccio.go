@@ -92,6 +92,12 @@ func WithMaxRows(limit int) QueryOption {
 // ErrResultLimit is returned by Query when a result exceeds WithMaxRows.
 var ErrResultLimit = exec.ErrResultLimit
 
+// ErrConflict is returned by Query when a write kept conflicting with
+// concurrent writes to the same data, even after automatic retries with
+// backoff. Nothing is committed and the write can be retried. It is rare: it
+// takes many writers updating the same node at once.
+var ErrConflict = storage.ErrConflict
+
 // ErrTxnTooLarge is returned by Query when a single write statement holds more
 // changes than one transaction can commit (roughly 25 000 to 35 000 new nodes
 // with the default engine). Nothing is committed. Load large datasets in
