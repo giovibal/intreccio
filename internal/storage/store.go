@@ -8,6 +8,11 @@ import (
 // ErrNotFound is returned by Txn.Get when the key does not exist.
 var ErrNotFound = errors.New("storage: key not found")
 
+// ErrConflict is returned by Store.Update when the transaction kept
+// conflicting with concurrent writes after every retry. Nothing is committed;
+// the caller may retry.
+var ErrConflict = errors.New("storage: transaction conflict (concurrent writes to the same data)")
+
 // ErrTxnTooLarge is returned when a transaction holds more writes than the
 // engine accepts in one commit. Nothing is committed; split the work into
 // smaller transactions.
