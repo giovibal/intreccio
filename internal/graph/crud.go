@@ -354,7 +354,7 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 		// Delete `p` entries for properties that will be removed or changed.
 		for keyID, old := range node.Props {
 			newVal, kept := desired[keyID]
-			if kept && scalarEqual(newVal, old) {
+			if kept && sameValue(newVal, old) {
 				continue
 			}
 			for _, l := range node.Labels {
@@ -383,7 +383,7 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 		}
 	} else {
 		for keyID, newVal := range desired {
-			if old, had := node.Props[keyID]; had && !scalarEqual(old, newVal) {
+			if old, had := node.Props[keyID]; had && !sameValue(old, newVal) {
 				for _, l := range node.Labels {
 					has, err := catalog.HasIndex(txn, l, keyID)
 					if err != nil {
