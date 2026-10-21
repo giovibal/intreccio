@@ -272,7 +272,30 @@ func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
 	if value == nil {
 		return nil, nil // x = null is never true
 	}
+	if !graph.IsIndexable(value) {
+		// Lists and maps have no index keys: scan the label and compare with
+		// the query equality, so the result matches the non-indexed path.
+		return nodesWithEqualProperty(ctx, labelID, keyID, value)
+	}
 	return graph.NodesByProperty(ctx.Txn, labelID, keyID, value)
+}
+
+func nodesWithEqualProperty(ctx *Context, labelID, keyID uint32, value any) ([]uint64, error) {
+	ids, err := graph.NodesByLabel(ctx.Txn, labelID)
+	if err != nil {
+		return nil, err
+	}
+	var out []uint64
+	for _, id := range ids {
+		node, err := graph.GetNode(ctx.Txn, id)
+		if err != nil {
+			return nil, err
+		}
+		if v, ok := node.Props[keyID]; ok && equals(v, value) {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func evalCount(e ast.Expr, ctx *Context) (int64, error) {
