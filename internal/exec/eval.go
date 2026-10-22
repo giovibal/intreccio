@@ -595,6 +595,9 @@ func equality(a, b any) (eq, known bool) {
 	case graph.Edge:
 		bv, ok := b.(graph.Edge)
 		return ok && av.ID == bv.ID, true
+	case graph.Path:
+		bv, ok := b.(graph.Path)
+		return ok && pathIDs(av) == pathIDs(bv), true
 	}
 	// Scalars: shared with the graph layer so an index lookup and a filter
 	// agree (1 = 1.0, NaN equals nothing, different kinds are unequal).

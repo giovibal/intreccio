@@ -228,7 +228,7 @@ func (pl *planner) planMatch(m *ast.Match) error {
 	}
 
 	var residual []ast.Expr
-	for _, part := range m.Parts {
+	for _, part := range shortestLast(m.Parts) {
 		r, err := pl.planPart(part, whereEqs, whereRanges, consumed)
 		if err != nil {
 			return err
@@ -239,6 +239,9 @@ func (pl *planner) planMatch(m *ast.Match) error {
 		if !consumed[i] {
 			residual = append(residual, e)
 		}
+	}
+	if err := checkShortestFilters(m.Parts, residual); err != nil {
+		return err
 	}
 	if len(residual) > 0 {
 		pl.plan = &Filter{Input: pl.plan, Pred: andAll(residual)}
@@ -280,7 +283,7 @@ func (pl *planner) planOptionalMatch(m *ast.Match) error {
 		}
 	}
 	var residual []ast.Expr
-	for _, part := range m.Parts {
+	for _, part := range shortestLast(m.Parts) {
 		r, err := pl.planPart(part, whereEqs, whereRanges, consumed)
 		if err != nil {
 			return err
@@ -291,6 +294,9 @@ func (pl *planner) planOptionalMatch(m *ast.Match) error {
 		if !consumed[i] {
 			residual = append(residual, e)
 		}
+	}
+	if err := checkShortestFilters(m.Parts, residual); err != nil {
+		return err
 	}
 	if len(residual) > 0 {
 		pl.plan = &Filter{Input: pl.plan, Pred: andAll(residual)}
@@ -312,6 +318,9 @@ func (pl *planner) planOptionalMatch(m *ast.Match) error {
 }
 
 func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality, whereRanges map[string][]rangePred, consumed map[int]bool) ([]ast.Expr, error) {
+	if part.Shortest != ast.NotShortest {
+		return nil, pl.planShortest(part)
+	}
 	nodes, rels := pl.buildPart(part)
 
 	startIdx := -1
@@ -912,4 +921,81 @@ func sortedKeys(m map[string]ast.Expr) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// shortestLast orders the parts of a MATCH so shortest-path parts come after
+// the patterns that bind their endpoints.
+func shortestLast(parts []ast.PatternPart) []ast.PatternPart {
+	out := make([]ast.PatternPart, 0, len(parts))
+	for _, p := range parts {
+		if p.Shortest == ast.NotShortest {
+			out = append(out, p)
+		}
+	}
+	for _, p := range parts {
+		if p.Shortest != ast.NotShortest {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// planShortest adds a ShortestPath over the current plan. Both endpoints must
+// be bound by now (by an earlier clause or another part of the same MATCH).
+func (pl *planner) planShortest(part ast.PatternPart) error {
+	from, to := part.Start.Variable, part.Chain[0].Node.Variable
+	for _, v := range []string{from, to} {
+		if !pl.isBound(v) {
+			return fmt.Errorf("plan: shortestPath endpoint %s must be bound by an earlier pattern, e.g. MATCH (%s {..}), ..., p = shortestPath(...)", v, v)
+		}
+	}
+	if pl.plan == nil {
+		return fmt.Errorf("plan: shortestPath needs its endpoints bound first")
+	}
+	rel := part.Chain[0].Rel
+	pl.plan = &ShortestPath{
+		Input:   pl.plan,
+		From:    from,
+		To:      to,
+		PathVar: part.Variable,
+		RelVar:  rel.Variable,
+		Types:   rel.Types,
+		Dir:     rel.Direction,
+		MinHops: rel.MinHops,
+		MaxHops: rel.MaxHops,
+		All:     part.Shortest == ast.ShortestAll,
+	}
+	pl.bind(part.Variable)
+	pl.bind(rel.Variable)
+	return nil
+}
+
+// checkShortestFilters rejects WHERE conditions on a shortest path or its
+// relationships in the same MATCH. openCypher applies them during the search
+// (the shortest path that satisfies them), while filtering afterwards would
+// silently return fewer paths; filter in a following WITH ... WHERE instead.
+func checkShortestFilters(parts []ast.PatternPart, residual []ast.Expr) error {
+	vars := map[string]bool{}
+	for _, p := range parts {
+		if p.Shortest == ast.NotShortest {
+			continue
+		}
+		if p.Variable != "" {
+			vars[p.Variable] = true
+		}
+		if v := p.Chain[0].Rel.Variable; v != "" {
+			vars[v] = true
+		}
+	}
+	if len(vars) == 0 {
+		return nil
+	}
+	for _, e := range residual {
+		for _, v := range exprVars(e) {
+			if vars[v] {
+				return fmt.Errorf("plan: a WHERE condition on the shortest path %s is not supported in the same MATCH; filter in a following WITH ... WHERE", v)
+			}
+		}
+	}
+	return nil
 }

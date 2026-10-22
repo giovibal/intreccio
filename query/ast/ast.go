@@ -237,7 +237,18 @@ type PatternPart struct {
 	Variable string
 	Start    *NodePattern
 	Chain    []PatternChain
+	// Shortest marks shortestPath(...) / allShortestPaths(...).
+	Shortest ShortestKind
 }
+
+// ShortestKind tells a plain pattern part from a shortest-path one.
+type ShortestKind int
+
+const (
+	NotShortest ShortestKind = iota
+	ShortestOne              // shortestPath(...)
+	ShortestAll              // allShortestPaths(...)
+)
 
 // PatternChain is a step (relationship → node) in the chain.
 type PatternChain struct {

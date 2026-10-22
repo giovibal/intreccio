@@ -19,37 +19,39 @@ type scalarFunc func(ctx *Context, args []any) (any, error)
 // scalarFuncs is the registry of supported scalar (non-aggregate) functions.
 // Functions are looked up case-insensitively.
 var scalarFuncs = map[string]scalarFunc{
-	"id":         fnID,
-	"labels":     fnLabels,
-	"type":       fnType,
-	"keys":       fnKeys,
-	"properties": fnProperties,
-	"size":       fnSize,
-	"length":     fnLength,
-	"tointeger":  fnToInteger,
-	"tofloat":    fnToFloat,
-	"tostring":   fnToString,
-	"toupper":    fnToUpper,
-	"tolower":    fnToLower,
-	"trim":       fnTrim,
-	"substring":  fnSubstring,
-	"replace":    fnReplace,
-	"split":      fnSplit,
-	"abs":        fnAbs,
-	"head":       fnHead,
-	"last":       fnLast,
-	"tail":       fnTail,
-	"range":      fnRange,
-	"coalesce":   fnCoalesce,
-	"startnode":  fnStartNode,
-	"endnode":    fnEndNode,
-	"round":      fnRound,
-	"floor":      fnFloor,
-	"ceil":       fnCeil,
-	"sqrt":       fnSqrt,
-	"sign":       fnSign,
-	"rand":       fnRand,
-	"timestamp":  fnTimestamp,
+	"id":            fnID,
+	"labels":        fnLabels,
+	"type":          fnType,
+	"keys":          fnKeys,
+	"properties":    fnProperties,
+	"size":          fnSize,
+	"length":        fnLength,
+	"nodes":         fnNodes,
+	"relationships": fnRelationships,
+	"tointeger":     fnToInteger,
+	"tofloat":       fnToFloat,
+	"tostring":      fnToString,
+	"toupper":       fnToUpper,
+	"tolower":       fnToLower,
+	"trim":          fnTrim,
+	"substring":     fnSubstring,
+	"replace":       fnReplace,
+	"split":         fnSplit,
+	"abs":           fnAbs,
+	"head":          fnHead,
+	"last":          fnLast,
+	"tail":          fnTail,
+	"range":         fnRange,
+	"coalesce":      fnCoalesce,
+	"startnode":     fnStartNode,
+	"endnode":       fnEndNode,
+	"round":         fnRound,
+	"floor":         fnFloor,
+	"ceil":          fnCeil,
+	"sqrt":          fnSqrt,
+	"sign":          fnSign,
+	"rand":          fnRand,
+	"timestamp":     fnTimestamp,
 }
 
 // maxRangeLen bounds range() so a typo cannot exhaust memory.
@@ -370,6 +372,11 @@ func sizeOf(name string, v any) (any, error) {
 		return int64(len(x)), nil
 	case []graph.Edge:
 		return int64(len(x)), nil
+	case graph.Path:
+		if name == "length" {
+			return int64(len(x.Rels)), nil // a path's length is its number of hops
+		}
+		return nil, fmt.Errorf("exec: %s() expects a list or string, got a path (use length())", name)
 	default:
 		return nil, fmt.Errorf("exec: %s() expects a list or string, got %T", name, v)
 	}
