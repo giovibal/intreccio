@@ -117,6 +117,36 @@ res, err := db.Query(ctx,
     intreccio.WithMaxRows(1000)) // optional cap, ErrResultLimit if exceeded
 ```
 
+### Transactions across several queries
+
+Each `Query` is its own transaction. To run several queries atomically, with
+Go code between them, use `Update` (read-write) or `View` (read-only, one
+consistent snapshot). Later queries see the writes of earlier ones; returning
+an error from the function discards everything:
+
+```go
+err := db.Update(ctx, func(tx *intreccio.Tx) error {
+    res, err := tx.Query(ctx, "MATCH (a:Account {id: 1}) RETURN a.bal", nil)
+    if err != nil {
+        return err
+    }
+    if res.Rows[0][0].(int64) < 100 {
+        return errors.New("insufficient funds") // nothing is written
+    }
+    if _, err := tx.Query(ctx, "MATCH (a:Account {id: 1}) SET a.bal = a.bal - 100", nil); err != nil {
+        return err
+    }
+    _, err = tx.Query(ctx, "MATCH (b:Account {id: 2}) SET b.bal = b.bal + 100", nil)
+    return err
+})
+```
+
+On a write conflict the function is retried from the start on fresh data, so
+it must not have side effects outside the transaction. A write query inside
+`View` fails with `ErrReadOnlyTx`. In cluster mode `Update` must run on the
+leader (`ErrTxNotOnLeader` elsewhere) and replicates as one entry; `View` reads
+the local replica.
+
 ### Loading data in bulk
 
 Each `Query` call is one transaction, and the default engine caps how many
