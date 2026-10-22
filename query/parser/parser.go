@@ -396,22 +396,32 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	if err := p.expectKw("FOR"); err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(tLParen); err != nil {
-		return nil, err
-	}
-	variable, err := p.identName()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(tColon); err != nil {
-		return nil, err
-	}
-	label, err := p.identName()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := p.expect(tRParen); err != nil {
-		return nil, err
+	var variable, label string
+	rel := p.at(tLParen) && p.peek(1).typ == tRParen
+	if rel {
+		v, typ, err := p.relIndexPattern()
+		if err != nil {
+			return nil, err
+		}
+		variable, label = v, typ
+	} else {
+		if _, err := p.expect(tLParen); err != nil {
+			return nil, err
+		}
+		v, err := p.identName()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tColon); err != nil {
+			return nil, err
+		}
+		if label, err = p.identName(); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tRParen); err != nil {
+			return nil, err
+		}
+		variable = v
 	}
 	if err := p.expectKw("ON"); err != nil {
 		return nil, err
@@ -432,7 +442,32 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	if _, err := p.expect(tRParen); err != nil {
 		return nil, err
 	}
-	return &ast.CreateIndex{Name: name, Variable: variable, Label: label, Property: prop, Pos: pos}, nil
+	return &ast.CreateIndex{Name: name, Variable: variable, Label: label, Property: prop, Rel: rel, Pos: pos}, nil
+}
+
+// relIndexPattern parses the ()-[v:TYPE]-() of a relationship index (any
+// direction) and returns the variable and the type.
+func (p *parser) relIndexPattern() (variable, typ string, err error) {
+	start, err := p.parseNodePattern()
+	if err != nil {
+		return "", "", err
+	}
+	r, err := p.parseRelPattern()
+	if err != nil {
+		return "", "", err
+	}
+	end, err := p.parseNodePattern()
+	if err != nil {
+		return "", "", err
+	}
+	if start.Variable != "" || len(start.Labels) > 0 || end.Variable != "" || len(end.Labels) > 0 ||
+		len(start.Props) > 0 || len(end.Props) > 0 {
+		return "", "", p.errf(start.Pos, "a relationship index pattern has empty nodes: ()-[r:TYPE]-()")
+	}
+	if r.Variable == "" || len(r.Types) != 1 || r.VarLength || len(r.Props) > 0 {
+		return "", "", p.errf(r.Pos, "a relationship index needs a variable and one type: ()-[r:TYPE]-()")
+	}
+	return r.Variable, r.Types[0], nil
 }
 
 // createConstraintBody parses the rest of

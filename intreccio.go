@@ -363,6 +363,20 @@ func (b *localBackend) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any
 
 func (b *localBackend) Close() error { return b.store.Close() }
 
+// HasRelIndex implements plan.RelCatalog.
+func (c planCatalog) HasRelIndex(relType, propKey string) bool {
+	typeID, found, err := catalog.LookupType(c.txn, relType)
+	if err != nil || !found {
+		return false
+	}
+	keyID, found, err := catalog.LookupKey(c.txn, propKey)
+	if err != nil || !found {
+		return false
+	}
+	has, err := catalog.HasRelIndex(c.txn, typeID, keyID)
+	return err == nil && has
+}
+
 // planCatalog adapts the catalog to plan.Catalog, resolving names within the
 // transaction. A missing label/key means no index, which is correct.
 type planCatalog struct {

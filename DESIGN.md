@@ -105,6 +105,7 @@ Conventions:
 | `l` | `l` + labelID(4) + nodeID(8) | ∅ | label index |
 | `p` | `p` + labelID(4) + propKeyID(4) + valEnc + nodeID(8) | ∅ | secondary property index |
 | `u` | `u` + labelID(4) + propKeyID(4) + valEnc | nodeID(8) | owner of a value under a unique constraint |
+| `r` | `r` + typeID(4) + propKeyID(4) + valEnc + edgeID(8) | ∅ | relationship property index |
 
 ### Unique constraints (the `u` rows)
 A unique constraint on `(label, propKey)` is backed by its `p` index (created
@@ -160,7 +161,7 @@ needed.
 ## 7. Transactions and consistency invariants
 
 > **Invariant #1 (non-negotiable):** every write updates the base record **and
-> all** of its derived index keys (`l`, `p`, `u`, `o`, `i`) **within the same
+> all** of its derived index keys (`l`, `p`, `u`, `o`, `i`, `r`) **within the same
 > transaction**. If record and indexes do not commit atomically, the indexes
 > diverge and the queries lie.
 

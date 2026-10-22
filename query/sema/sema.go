@@ -127,7 +127,7 @@ func (a *analyzer) clause(sc *scope, c ast.Clause) error {
 	case *ast.CreateIndex, *ast.DropIndex, *ast.CreateConstraint, *ast.DropConstraint:
 		return nil // no variables involved
 	case *ast.ShowIndexes:
-		a.result.Columns = []string{"name", "label", "property"}
+		a.result.Columns = []string{"name", "label", "property", "entity"}
 		return nil
 	case *ast.ShowConstraints:
 		a.result.Columns = []string{"name", "label", "property", "type"}

@@ -1,7 +1,7 @@
 // Package graph is the model + transactional CRUD + traversal primitives.
 //
 // It is the single point through which writes pass: every mutation updates the
-// base record and all of its index keys (`l`, `p`, `o`, `i`) within the same
+// base record and all of its index keys (`l`, `p`, `u`, `o`, `i`, `r`) within the same
 // transaction (Invariant #1). The functions operate on a storage.Txn provided by
 // the caller, so multiple mutations can compose atomically in a single Update.
 package graph
@@ -84,6 +84,11 @@ func CreateEdge(txn storage.Txn, typ string, src, dst uint64, props map[string]a
 	if err := txn.Set(codec.InKey(dst, typeID, src, id), nil); err != nil {
 		return 0, err
 	}
+	for k, v := range p {
+		if err := putRelPropEntry(txn, typeID, k, v, id); err != nil {
+			return 0, err
+		}
+	}
 	return id, nil
 }
 
@@ -152,7 +157,8 @@ func GetEdge(txn storage.Txn, id uint64) (Edge, error) {
 	return Edge{ID: id, EdgeRecord: rec}, nil
 }
 
-// DeleteEdge removes an edge: the `e` record plus the two adjacency entries `o`/`i`.
+// DeleteEdge removes an edge: the `e` record, the two adjacency entries `o`/`i`
+// and its relationship index entries `r`.
 func DeleteEdge(txn storage.Txn, id uint64) error {
 	e, err := GetEdge(txn, id)
 	if err != nil {
@@ -163,6 +169,11 @@ func DeleteEdge(txn storage.Txn, id uint64) error {
 	}
 	if err := txn.Delete(codec.InKey(e.Dst, e.Type, e.Src, id)); err != nil {
 		return err
+	}
+	for k, v := range e.Props {
+		if err := delRelPropEntry(txn, e.Type, k, v, id); err != nil {
+			return err
+		}
 	}
 	return txn.Delete(codec.EdgeKey(id))
 }
