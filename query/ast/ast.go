@@ -245,9 +245,9 @@ type PatternPart struct {
 type ShortestKind int
 
 const (
-	NotShortest  ShortestKind = iota
-	ShortestOne               // shortestPath(...)
-	ShortestAll               // allShortestPaths(...)
+	NotShortest ShortestKind = iota
+	ShortestOne              // shortestPath(...)
+	ShortestAll              // allShortestPaths(...)
 )
 
 // PatternChain is a step (relationship → node) in the chain.
