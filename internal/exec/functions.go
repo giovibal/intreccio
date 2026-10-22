@@ -3,12 +3,13 @@ package exec
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // scalarFunc is the signature of all built-in scalar functions. It takes the
@@ -38,6 +39,154 @@ var scalarFuncs = map[string]scalarFunc{
 	"head":       fnHead,
 	"last":       fnLast,
 	"tail":       fnTail,
+	"range":      fnRange,
+	"coalesce":   fnCoalesce,
+	"startnode":  fnStartNode,
+	"endnode":    fnEndNode,
+	"round":      fnRound,
+	"floor":      fnFloor,
+	"ceil":       fnCeil,
+	"sqrt":       fnSqrt,
+	"sign":       fnSign,
+	"rand":       fnRand,
+	"timestamp":  fnTimestamp,
+}
+
+// maxRangeLen bounds range() so a typo cannot exhaust memory.
+const maxRangeLen = 10_000_000
+
+// fnRange returns the integers from start to end inclusive, by step.
+func fnRange(_ *Context, args []any) (any, error) {
+	if err := needArgs("range", args, 2, 3); err != nil {
+		return nil, err
+	}
+	nums := make([]int64, len(args))
+	for i, a := range args {
+		n, ok := normalize(a).(int64)
+		if !ok {
+			return nil, fmt.Errorf("exec: range() expects integers, got %T", a)
+		}
+		nums[i] = n
+	}
+	start, end, step := nums[0], nums[1], int64(1)
+	if len(nums) == 3 {
+		step = nums[2]
+	}
+	if step == 0 {
+		return nil, fmt.Errorf("exec: range() step must not be zero")
+	}
+	// Size the result up front (in float64, which cannot overflow here) so an
+	// oversized range fails before allocating anything.
+	if n := (float64(end)-float64(start))/float64(step) + 1; n > maxRangeLen {
+		return nil, fmt.Errorf("exec: range() would produce more than %d elements", maxRangeLen)
+	}
+	out := []any{}
+	for i := start; (step > 0 && i <= end) || (step < 0 && i >= end); i += step {
+		out = append(out, i)
+		if (step > 0 && i > math.MaxInt64-step) || (step < 0 && i < math.MinInt64-step) {
+			break // the next step would overflow
+		}
+	}
+	return out, nil
+}
+
+// fnCoalesce returns its first non-null argument.
+func fnCoalesce(_ *Context, args []any) (any, error) {
+	if err := needArgs("coalesce", args, 1, -1); err != nil {
+		return nil, err
+	}
+	for _, a := range args {
+		if a != nil {
+			return a, nil
+		}
+	}
+	return nil, nil
+}
+
+func edgeEnd(name string, ctx *Context, args []any, start bool) (any, error) {
+	if err := needArgs(name, args, 1, 1); err != nil {
+		return nil, err
+	}
+	switch e := args[0].(type) {
+	case nil:
+		return nil, nil
+	case graph.Edge:
+		id := e.Dst
+		if start {
+			id = e.Src
+		}
+		return graph.GetNode(ctx.Txn, id)
+	default:
+		return nil, fmt.Errorf("exec: %s() expects a relationship, got %T", name, args[0])
+	}
+}
+
+func fnStartNode(ctx *Context, args []any) (any, error) { return edgeEnd("startNode", ctx, args, true) }
+func fnEndNode(ctx *Context, args []any) (any, error)   { return edgeEnd("endNode", ctx, args, false) }
+
+// numericFunc applies f to a numeric argument and returns a float, as the
+// openCypher math functions do; null gives null.
+func numericFunc(name string, args []any, f func(float64) float64) (any, error) {
+	if err := needArgs(name, args, 1, 1); err != nil {
+		return nil, err
+	}
+	switch v := normalize(args[0]).(type) {
+	case nil:
+		return nil, nil
+	case int64:
+		return f(float64(v)), nil
+	case float64:
+		return f(v), nil
+	default:
+		return nil, fmt.Errorf("exec: %s() expects a number, got %T", name, args[0])
+	}
+}
+
+// fnRound rounds half up (towards positive infinity), as openCypher does.
+func fnRound(_ *Context, args []any) (any, error) {
+	return numericFunc("round", args, func(x float64) float64 { return math.Floor(x + 0.5) })
+}
+func fnFloor(_ *Context, args []any) (any, error) { return numericFunc("floor", args, math.Floor) }
+func fnCeil(_ *Context, args []any) (any, error)  { return numericFunc("ceil", args, math.Ceil) }
+func fnSqrt(_ *Context, args []any) (any, error)  { return numericFunc("sqrt", args, math.Sqrt) }
+
+// fnSign returns -1, 0 or 1 as an integer.
+func fnSign(_ *Context, args []any) (any, error) {
+	if err := needArgs("sign", args, 1, 1); err != nil {
+		return nil, err
+	}
+	switch v := normalize(args[0]).(type) {
+	case nil:
+		return nil, nil
+	case int64:
+		return int64(cmpInt64(v, 0)), nil
+	case float64:
+		switch {
+		case v > 0:
+			return int64(1), nil
+		case v < 0:
+			return int64(-1), nil
+		}
+		return int64(0), nil
+	default:
+		return nil, fmt.Errorf("exec: sign() expects a number, got %T", args[0])
+	}
+}
+
+func fnRand(_ *Context, args []any) (any, error) {
+	if err := needArgs("rand", args, 0, 0); err != nil {
+		return nil, err
+	}
+	return rand.Float64(), nil
+}
+
+// fnTimestamp returns milliseconds since the epoch, the same value for every
+// call within one query.
+func fnTimestamp(ctx *Context, args []any) (any, error) {
+	if err := needArgs("timestamp", args, 0, 0); err != nil {
+		return nil, err
+	}
+	return ctx.timestamp(), nil
 }
 
 func evalFunctionCall(fc *ast.FunctionCall, b binding, ctx *Context) (any, error) {

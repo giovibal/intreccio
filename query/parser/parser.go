@@ -863,6 +863,8 @@ func (p *parser) infixBP() (int, string) {
 		return 4, ">"
 	case tGe:
 		return 4, ">="
+	case tRegex:
+		return 4, "=~"
 	case tIdent:
 		if p.atKw("AND") {
 			return 2, "AND"
@@ -1109,6 +1111,9 @@ func (p *parser) paramName() (string, error) {
 }
 
 func (p *parser) parseListLiteral() (ast.Expr, error) {
+	if p.peek(1).typ == tIdent && p.peekKw(2, "IN") {
+		return p.parseListComprehension()
+	}
 	pos := p.advance().pos // [
 	list := &ast.ListLiteral{Pos: pos}
 	if !p.at(tRBracket) {
@@ -1128,6 +1133,48 @@ func (p *parser) parseListLiteral() (ast.Expr, error) {
 		return nil, err
 	}
 	return list, nil
+}
+
+// parseListComprehension parses [x IN list WHERE pred | expr].
+func (p *parser) parseListComprehension() (ast.Expr, error) {
+	pos := p.advance().pos // [
+	variable, list, err := p.parseInClause()
+	if err != nil {
+		return nil, err
+	}
+	lc := &ast.ListComprehension{Variable: variable, List: list, Pos: pos}
+	if p.atKw("WHERE") {
+		p.advance()
+		if lc.Where, err = p.parseExpr(0); err != nil {
+			return nil, err
+		}
+	}
+	if p.at(tPipe) {
+		p.advance()
+		if lc.Map, err = p.parseExpr(0); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(tRBracket); err != nil {
+		return nil, err
+	}
+	return lc, nil
+}
+
+// parseInClause parses `variable IN expr`.
+func (p *parser) parseInClause() (string, ast.Expr, error) {
+	variable, err := p.identName()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := p.expectKw("IN"); err != nil {
+		return "", nil, err
+	}
+	list, err := p.parseExpr(0)
+	if err != nil {
+		return "", nil, err
+	}
+	return variable, list, nil
 }
 
 func (p *parser) parseMapLiteralExpr() (ast.Expr, error) {
@@ -1187,6 +1234,26 @@ func (p *parser) parseFunctionCall() (ast.Expr, error) {
 	nameTok := p.advance() // ident
 	if _, err := p.expect(tLParen); err != nil {
 		return nil, err
+	}
+	switch kind := strings.ToLower(nameTok.text); kind {
+	case "any", "all", "none", "single":
+		if p.at(tIdent) && p.peekKw(1, "IN") {
+			variable, list, err := p.parseInClause()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectKw("WHERE"); err != nil {
+				return nil, err
+			}
+			where, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(tRParen); err != nil {
+				return nil, err
+			}
+			return &ast.Quantifier{Kind: kind, Variable: variable, List: list, Where: where, Pos: nameTok.pos}, nil
+		}
 	}
 	fn := &ast.FunctionCall{Name: nameTok.text, Pos: nameTok.pos}
 	if p.atKw("DISTINCT") {

@@ -39,3 +39,12 @@ func (s *scope) replaceWith(other *scope) {
 	s.vars = other.vars
 	s.order = other.order
 }
+
+// with returns a copy of s that also defines name (for the local variable of
+// a list comprehension or quantifier).
+func (s *scope) with(name string, pos ast.Pos) *scope {
+	c := newScope()
+	c.merge(s)
+	c.define(name, pos)
+	return c
+}

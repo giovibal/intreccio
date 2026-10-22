@@ -310,6 +310,24 @@ type Subscript struct {
 	Pos    Pos
 }
 
+// ListComprehension is [Variable IN List WHERE Where | Map]; Where and Map
+// are optional.
+type ListComprehension struct {
+	Variable   string
+	List       Expr
+	Where, Map Expr
+	Pos        Pos
+}
+
+// Quantifier is any/all/none/single(Variable IN List WHERE Where).
+type Quantifier struct {
+	Kind     string // "any", "all", "none" or "single"
+	Variable string
+	List     Expr
+	Where    Expr
+	Pos      Pos
+}
+
 // Slice is target[from..to] on a list; a nil bound is open.
 type Slice struct {
 	Target   Expr
@@ -330,16 +348,18 @@ type CaseAlternative struct {
 	Result Expr
 }
 
-func (*Literal) expr()         {}
-func (*Param) expr()           {}
-func (*Variable) expr()        {}
-func (*PropertyAccess) expr()  {}
-func (*Unary) expr()           {}
-func (*Binary) expr()          {}
-func (*FunctionCall) expr()    {}
-func (*LabelsPredicate) expr() {}
-func (*ListLiteral) expr()     {}
-func (*MapLiteral) expr()      {}
-func (*Case) expr()            {}
-func (*Subscript) expr()       {}
-func (*Slice) expr()           {}
+func (*Literal) expr()           {}
+func (*Param) expr()             {}
+func (*Variable) expr()          {}
+func (*PropertyAccess) expr()    {}
+func (*Unary) expr()             {}
+func (*Binary) expr()            {}
+func (*FunctionCall) expr()      {}
+func (*LabelsPredicate) expr()   {}
+func (*ListLiteral) expr()       {}
+func (*MapLiteral) expr()        {}
+func (*Case) expr()              {}
+func (*Subscript) expr()         {}
+func (*Slice) expr()             {}
+func (*ListComprehension) expr() {}
+func (*Quantifier) expr()        {}
