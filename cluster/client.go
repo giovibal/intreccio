@@ -56,12 +56,10 @@ func (c *client) ReadBarrier() error { return nil }
 // Forward sends the query to a voter, trying each in turn (round-robin with
 // failover) until one answers. The contacted voter serves default reads locally
 // and proxies writes/linearizable reads to the leader.
-func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
-	args := &ForwardArgs{
-		Cypher:       cypher,
-		Params:       sanitizeParams(params),
-		Write:        write,
-		Linearizable: linearizable,
+func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
+	args, err := newForwardArgs(ctx, cypher, params, write, linearizable, maxRows)
+	if err != nil {
+		return nil, nil, err
 	}
 	start := int(c.next.Add(1))
 	var lastErr error
@@ -69,11 +67,17 @@ func (c *client) Forward(ctx context.Context, cypher string, params map[string]a
 		p := c.peers[(start+i)%len(c.peers)]
 		rep, err := c.pool.call(ctx, p.ForwardAddr, args)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, err // the caller gave up: no point trying others
+			}
 			lastErr = err
 			continue // voter unreachable: try the next one
 		}
 		if rep.Err != "" {
-			lastErr = errors.New(rep.Err)
+			lastErr = rep.error()
+			if rep.Code != "" {
+				return nil, nil, lastErr // a definite answer (limit, conflict, timeout...)
+			}
 			continue // e.g. no leader momentarily: try another voter
 		}
 		return rep.Columns, desanitizeRows(rep.Rows), nil

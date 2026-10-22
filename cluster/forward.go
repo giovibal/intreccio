@@ -8,14 +8,17 @@ import (
 	"fmt"
 	"net"
 	"net/rpc"
+	"time"
 
 	"github.com/hashicorp/raft"
+
+	"github.com/giovibal/intreccio"
 )
 
 // localExecutor runs a query string entirely on this node (no forwarding) and
 // returns serializable columns/rows. It is injected by the root package, which
 // owns the Cypher pipeline; the cluster layer stays ignorant of it.
-type localExecutor func(cypher string, params map[string]any) (cols []string, rows [][]any, err error)
+type localExecutor func(ctx context.Context, cypher string, params map[string]any, maxRows int64) (cols []string, rows [][]any, err error)
 
 // nullValue is a gob-encodable stand-in for a nil interface element, since gob
 // cannot encode a nil interface inside a slice/map. Rows and params are
@@ -41,6 +44,13 @@ type ForwardArgs struct {
 	Params       map[string]any
 	Write        bool
 	Linearizable bool
+	// MaxRows is the caller's WithMaxRows (0 = no cap).
+	MaxRows int64
+	// Timeout is what was left of the caller's deadline when the request was
+	// sent (0 = no deadline). A duration, not a time, so clock skew between
+	// nodes does not matter. Cancellation without a deadline is not
+	// propagated: the caller stops waiting, the leader finishes the query.
+	Timeout time.Duration
 }
 
 // ForwardReply is the leader's response. Exported for the same reason as
@@ -49,7 +59,86 @@ type ForwardReply struct {
 	Columns []string
 	Rows    [][]any
 	Err     string
+	// Code names the sentinel error behind Err, if any (see wireErrors), so
+	// errors.Is keeps working on the caller.
+	Code string
 }
+
+// newForwardArgs builds a request carrying ctx's remaining deadline.
+func newForwardArgs(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) (*ForwardArgs, error) {
+	args := &ForwardArgs{
+		Cypher:       cypher,
+		Params:       sanitizeParams(params),
+		Write:        write,
+		Linearizable: linearizable,
+		MaxRows:      maxRows,
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		args.Timeout = time.Until(deadline)
+		if args.Timeout <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+	}
+	return args, nil
+}
+
+// context returns the context a forwarded request runs under: the caller's
+// remaining deadline, or fallback when the caller set none (0 = unbounded).
+func (a *ForwardArgs) context(fallback time.Duration) (context.Context, context.CancelFunc) {
+	if a.Timeout > 0 {
+		return context.WithTimeout(context.Background(), a.Timeout)
+	}
+	if fallback > 0 {
+		return context.WithTimeout(context.Background(), fallback)
+	}
+	return context.WithCancel(context.Background())
+}
+
+// wireErrors are the sentinel errors that keep their identity across a
+// forward. The codes are part of the wire format: never reuse or rename one.
+var wireErrors = []struct {
+	code string
+	err  error
+}{
+	{"result_limit", intreccio.ErrResultLimit},
+	{"conflict", intreccio.ErrConflict},
+	{"txn_too_large", intreccio.ErrTxnTooLarge},
+	{"integer_overflow", intreccio.ErrIntegerOverflow},
+	{"deadline_exceeded", context.DeadlineExceeded},
+	{"canceled", context.Canceled},
+}
+
+// setError stores err in the reply, with its sentinel code when it has one.
+func (r *ForwardReply) setError(err error) {
+	r.Err = err.Error()
+	r.Code = ""
+	for _, w := range wireErrors {
+		if errors.Is(err, w.err) {
+			r.Code = w.code
+			return
+		}
+	}
+}
+
+// error rebuilds the reply's error: the original message, unwrapping to the
+// sentinel named by Code (an unknown code from a newer node is ignored).
+func (r *ForwardReply) error() error {
+	for _, w := range wireErrors {
+		if w.code == r.Code {
+			return &remoteError{msg: r.Err, sentinel: w.err}
+		}
+	}
+	return errors.New(r.Err)
+}
+
+// remoteError is an error that happened on another node.
+type remoteError struct {
+	msg      string
+	sentinel error
+}
+
+func (e *remoteError) Error() string { return e.msg }
+func (e *remoteError) Unwrap() error { return e.sentinel }
 
 // needsLeader reports whether the request must be served by the leader: writes
 // (replicated) and linearizable reads. Default reads can be served by any voter.
@@ -66,13 +155,19 @@ func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
 	n := s.node
 
 	// Leader-bound request received by a non-leader voter: proxy to the leader.
-	// Bound the proxy wait by the apply timeout.
+	// Bound the proxy wait by the caller's deadline, else the apply timeout.
 	if args.needsLeader() && n.raft.State() != raft.Leader {
-		ctx, cancel := context.WithTimeout(context.Background(), n.applyTimeout)
+		ctx, cancel := args.context(n.applyTimeout)
 		defer cancel()
 		rep, err := n.callLeader(ctx, args)
 		if err != nil {
-			reply.Err = err.Error()
+			if args.Timeout > 0 {
+				reply.setError(err)
+			} else {
+				// Our own proxy timeout, not the caller's: leave it uncoded so
+				// a client may still try another voter.
+				reply.Err = err.Error()
+			}
 			return nil
 		}
 		*reply = *rep
@@ -90,9 +185,11 @@ func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
 		reply.Err = "cluster: no local executor wired"
 		return nil
 	}
-	cols, rows, err := exec(args.Cypher, desanitizeParams(args.Params))
+	ctx, cancel := args.context(0)
+	defer cancel()
+	cols, rows, err := exec(ctx, args.Cypher, desanitizeParams(args.Params), args.MaxRows)
 	if err != nil {
-		reply.Err = err.Error()
+		reply.setError(err)
 		return nil
 	}
 	reply.Columns = cols
@@ -139,19 +236,17 @@ func (n *Node) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply
 
 // forward is the voter-side entry used by the root router: it forwards a query
 // to the leader (writes, linearizable reads) and returns desanitized rows.
-func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
-	args := &ForwardArgs{
-		Cypher:       cypher,
-		Params:       sanitizeParams(params),
-		Write:        write,
-		Linearizable: linearizable,
+func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
+	args, err := newForwardArgs(ctx, cypher, params, write, linearizable, maxRows)
+	if err != nil {
+		return nil, nil, err
 	}
 	rep, err := n.callLeader(ctx, args)
 	if err != nil {
 		return nil, nil, err
 	}
 	if rep.Err != "" {
-		return nil, nil, errors.New(rep.Err)
+		return nil, nil, rep.error()
 	}
 	return rep.Columns, desanitizeRows(rep.Rows), nil
 }

@@ -239,8 +239,8 @@ func (n *Node) ReadBarrier() error {
 
 // Forward sends a query to the leader for execution (used by followers for
 // writes and linearizable reads). ctx bounds the wait for a reply.
-func (n *Node) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
-	return n.forward(ctx, cypher, params, write, linearizable)
+func (n *Node) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
+	return n.forward(ctx, cypher, params, write, linearizable, maxRows)
 }
 
 // Local reports that a voter can serve reads from its local store.
@@ -248,7 +248,7 @@ func (n *Node) Local() bool { return true }
 
 // SetLocalExecutor wires the root package's local query execution, used by the
 // leader to run forwarded queries.
-func (n *Node) SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]any, error)) {
+func (n *Node) SetLocalExecutor(fn func(ctx context.Context, cypher string, params map[string]any, maxRows int64) ([]string, [][]any, error)) {
 	n.localExec = fn
 }
 

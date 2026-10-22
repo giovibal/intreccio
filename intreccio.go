@@ -55,13 +55,16 @@ type clusterBackend interface {
 	// dataless client returns false, so every query is forwarded.
 	Local() bool
 	ReadBarrier() error
-	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error)
+	// Forward runs the query on another node. ctx's deadline and maxRows (0 =
+	// no cap) apply there too, and known sentinel errors (ErrResultLimit,
+	// ErrConflict, context.DeadlineExceeded, ...) survive the trip.
+	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error)
 }
 
 // localExecutorSetter lets a backend receive this DB's local executor (used by a
 // leader to run forwarded queries).
 type localExecutorSetter interface {
-	SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]any, error))
+	SetLocalExecutor(fn func(ctx context.Context, cypher string, params map[string]any, maxRows int64) ([]string, [][]any, error))
 }
 
 // QueryOption configures a single Query call.
@@ -210,7 +213,7 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 			(write && !cb.IsLeader()) ||
 			(o.linearizable && !write && !cb.IsLeader())
 		if forward {
-			cols, rows, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write)
+			cols, rows, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write, o.maxRows)
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
 			}
@@ -260,8 +263,9 @@ func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, para
 
 // executeLocalText parses and runs a query entirely on the local node, returning
 // serializable columns/rows. It is wired into a clustered backend so the leader
-// can execute forwarded queries; it never forwards.
-func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, [][]any, error) {
+// can execute forwarded queries; it never forwards. ctx and maxRows carry the
+// caller's deadline and WithMaxRows.
+func (db *DB) executeLocalText(ctx context.Context, cypher string, params map[string]any, maxRows int64) ([]string, [][]any, error) {
 	q, err := parser.Parse(cypher)
 	if err != nil {
 		return nil, nil, err
@@ -270,7 +274,7 @@ func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err := db.runLocal(context.Background(), q, semaRes.Columns, params, isWriteQuery(q), 0)
+	res, err := db.runLocal(ctx, q, semaRes.Columns, params, isWriteQuery(q), maxRows)
 	if err != nil {
 		return nil, nil, err
 	}
