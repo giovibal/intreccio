@@ -185,10 +185,12 @@ func nextCounter(txn storage.Txn, kind byte) (uint64, error) {
 	return next, nil
 }
 
-// IndexDef identifies a secondary `p` index on (label, propKey).
+// IndexDef identifies a secondary `p` index on (label, propKey). Name is the
+// name given at creation, empty if none was given (see IndexName).
 type IndexDef struct {
 	Label   uint32
 	PropKey uint32
+	Name    string
 }
 
 func indexKey(label, propKey uint32) []byte {
@@ -199,9 +201,49 @@ func indexKey(label, propKey uint32) []byte {
 	return b
 }
 
-// AddIndex registers an active `p` index (idempotent).
+// AddIndex registers an active `p` index without a name (idempotent).
 func AddIndex(txn storage.Txn, label, propKey uint32) error {
-	return txn.Set(indexKey(label, propKey), []byte{})
+	return AddNamedIndex(txn, label, propKey, "")
+}
+
+// AddNamedIndex registers an active `p` index under name ("" for none). The
+// name is kept in the registry value, which older databases leave empty.
+func AddNamedIndex(txn storage.Txn, label, propKey uint32, name string) error {
+	return txn.Set(indexKey(label, propKey), []byte(name))
+}
+
+// GetIndex returns the registered index on (label, propKey), if any.
+func GetIndex(txn storage.Txn, label, propKey uint32) (IndexDef, bool, error) {
+	v, err := txn.Get(indexKey(label, propKey))
+	switch {
+	case err == nil:
+		return IndexDef{Label: label, PropKey: propKey, Name: string(v)}, true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return IndexDef{}, false, nil
+	default:
+		return IndexDef{}, false, err
+	}
+}
+
+// RemoveIndex unregisters a `p` index. The caller removes its entries.
+func RemoveIndex(txn storage.Txn, label, propKey uint32) error {
+	return txn.Delete(indexKey(label, propKey))
+}
+
+// IndexName is the name an index is known by: the one given at creation, or
+// index_<label>_<property> when none was given.
+func IndexName(txn storage.Txn, d IndexDef) (label, prop, name string, err error) {
+	if label, err = LabelName(txn, d.Label); err != nil {
+		return "", "", "", err
+	}
+	if prop, err = KeyName(txn, d.PropKey); err != nil {
+		return "", "", "", err
+	}
+	name = d.Name
+	if name == "" {
+		name = "index_" + label + "_" + prop
+	}
+	return label, prop, name, nil
 }
 
 // HasIndex reports whether a `p` index exists on (label, propKey).
@@ -226,9 +268,14 @@ func ListIndexes(txn storage.Txn) ([]IndexDef, error) {
 		if len(k) != 1+4+4 {
 			return nil, fmt.Errorf("catalog: malformed index registry key (len=%d)", len(k))
 		}
+		v, err := it.Value()
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, IndexDef{
 			Label:   binary.BigEndian.Uint32(k[1:5]),
 			PropKey: binary.BigEndian.Uint32(k[5:9]),
+			Name:    string(v),
 		})
 	}
 	return out, nil

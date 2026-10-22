@@ -328,7 +328,11 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		}
 		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
 	case *plan.CreateIndex:
-		return &createIndexOp{ctx: ctx, label: x.Label, prop: x.Property}, nil
+		return &createIndexOp{ctx: ctx, name: x.Name, label: x.Label, prop: x.Property}, nil
+	case *plan.DropIndex:
+		return &dropIndexOp{ctx: ctx, name: x.Name, ifExists: x.IfExists}, nil
+	case *plan.ShowIndexes:
+		return &showIndexesOp{ctx: ctx}, nil
 	case *plan.Apply:
 		outer, err := buildWith(x.Outer, ctx, arg)
 		if err != nil {

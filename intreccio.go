@@ -321,7 +321,7 @@ func (db *DB) Explain(ctx context.Context, cypher string) (string, error) {
 func isWriteQuery(q *ast.Query) bool {
 	for _, c := range q.Clauses {
 		switch c.(type) {
-		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex:
+		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex, *ast.DropIndex:
 			return true
 		}
 	}

@@ -398,7 +398,9 @@ Write side:
   (`n = {...}`) or merge (`n += {...}`).
 - `REMOVE`: property (`n.p`) or labels (`n:Foo`).
 - `DELETE` / `DETACH DELETE`.
-- `CREATE INDEX FOR (v:Label) ON (v.prop)` with on-demand backfill. Indexes
+- `CREATE INDEX [name] FOR (v:Label) ON (v.prop)` with on-demand backfill,
+  `SHOW INDEXES` (name, label, property; unnamed indexes are listed as
+  `index_<Label>_<prop>`) and `DROP INDEX name [IF EXISTS]`. Indexes
   serve equality (`=`, inline `{prop: v}`), ranges (`<`, `<=`, `>`, `>=`) and
   `STARTS WITH`, including values bound earlier in the query (`UNWIND`/`WITH`).
 - Parameters (`$name`).

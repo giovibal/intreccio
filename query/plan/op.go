@@ -203,9 +203,19 @@ type Delete struct {
 // CreateIndex: registers a secondary `p` index on (:Label).prop and backfills
 // the entries for any existing nodes that already have the property.
 type CreateIndex struct {
+	Name     string
 	Label    string
 	Property string
 }
+
+// DropIndex removes an index (registry and entries) by name.
+type DropIndex struct {
+	Name     string
+	IfExists bool
+}
+
+// ShowIndexes lists the indexes as (name, label, property) rows.
+type ShowIndexes struct{}
 
 func (*AllNodesScan) op()        {}
 func (*NodeByLabelScan) op()     {}
@@ -224,6 +234,8 @@ func (*Merge) op()               {}
 func (*SetItems) op()            {}
 func (*Delete) op()              {}
 func (*CreateIndex) op()         {}
+func (*DropIndex) op()           {}
+func (*ShowIndexes) op()         {}
 func (*Remove) op()              {}
 func (*Unwind) op()              {}
 func (*Argument) op()            {}

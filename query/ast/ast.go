@@ -102,13 +102,28 @@ type Delete struct {
 
 // CreateIndex is CREATE INDEX FOR (v:Label) ON (v.prop).
 type CreateIndex struct {
+	Name     string // optional
 	Variable string
 	Label    string
 	Property string
 	Pos      Pos
 }
 
+// DropIndex is DROP INDEX name [IF EXISTS].
+type DropIndex struct {
+	Name     string
+	IfExists bool
+	Pos      Pos
+}
+
+// ShowIndexes is SHOW INDEX(ES): one row per index (name, label, property).
+type ShowIndexes struct {
+	Pos Pos
+}
+
 func (*Match) clause()       {}
+func (*DropIndex) clause()   {}
+func (*ShowIndexes) clause() {}
 func (*With) clause()        {}
 func (*Return) clause()      {}
 func (*Create) clause()      {}

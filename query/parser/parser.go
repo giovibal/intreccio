@@ -188,6 +188,15 @@ func (p *parser) parseClause() (ast.Clause, error) {
 			return nil, err
 		}
 		return p.deleteBody(pos, true)
+	case p.atKw("DROP"):
+		return p.parseDropIndex()
+	case p.atKw("SHOW"):
+		pos := p.advance().pos
+		if !p.atKw("INDEX") && !p.atKw("INDEXES") {
+			return nil, p.errf(p.cur().pos, "expected INDEXES after SHOW")
+		}
+		p.advance()
+		return &ast.ShowIndexes{Pos: pos}, nil
 	case p.atKw("DELETE"):
 		pos := p.advance().pos
 		return p.deleteBody(pos, false)
@@ -370,8 +379,9 @@ func (p *parser) parseCreate() (ast.Clause, error) {
 func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	p.advance() // INDEX
 	// Optional index name before FOR.
+	var name string
 	if !p.atKw("FOR") && p.at(tIdent) {
-		p.advance()
+		name = p.advance().text
 	}
 	if err := p.expectKw("FOR"); err != nil {
 		return nil, err
@@ -412,7 +422,28 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	if _, err := p.expect(tRParen); err != nil {
 		return nil, err
 	}
-	return &ast.CreateIndex{Variable: variable, Label: label, Property: prop, Pos: pos}, nil
+	return &ast.CreateIndex{Name: name, Variable: variable, Label: label, Property: prop, Pos: pos}, nil
+}
+
+// parseDropIndex parses DROP INDEX name [IF EXISTS].
+func (p *parser) parseDropIndex() (ast.Clause, error) {
+	pos := p.advance().pos // DROP
+	if err := p.expectKw("INDEX"); err != nil {
+		return nil, err
+	}
+	name, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	d := &ast.DropIndex{Name: name, Pos: pos}
+	if p.atKw("IF") {
+		p.advance()
+		if err := p.expectKw("EXISTS"); err != nil {
+			return nil, err
+		}
+		d.IfExists = true
+	}
+	return d, nil
 }
 
 func (p *parser) parseMerge() (ast.Clause, error) {

@@ -2,6 +2,7 @@ package exec
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/graph"
@@ -326,6 +327,7 @@ func (d *deleteOp) next() (binding, bool, error) {
 
 type createIndexOp struct {
 	ctx   *Context
+	name  string
 	label string
 	prop  string
 	done  bool
@@ -352,11 +354,32 @@ func (c *createIndexOp) next() (binding, bool, error) {
 	}
 	if has {
 		// Idempotent: registry entry already present and any prior backfill is
-		// kept consistent by the graph layer on every subsequent mutation.
+		// kept consistent by the graph layer on every subsequent mutation. A
+		// different explicit name for the same index is a conflict.
+		if c.name != "" {
+			def, _, err := catalog.GetIndex(c.ctx.Txn, labelID, keyID)
+			if err != nil {
+				return nil, false, err
+			}
+			_, _, existing, err := catalog.IndexName(c.ctx.Txn, def)
+			if err != nil {
+				return nil, false, err
+			}
+			if existing != c.name {
+				return nil, false, fmt.Errorf("exec: an index on :%s(%s) already exists as %q", c.label, c.prop, existing)
+			}
+		}
 		return binding{}, true, nil
 	}
 
-	if err := catalog.AddIndex(c.ctx.Txn, labelID, keyID); err != nil {
+	if c.name != "" {
+		if _, found, err := findIndex(c.ctx, c.name); err != nil {
+			return nil, false, err
+		} else if found {
+			return nil, false, fmt.Errorf("exec: an index named %q already exists", c.name)
+		}
+	}
+	if err := catalog.AddNamedIndex(c.ctx.Txn, labelID, keyID, c.name); err != nil {
 		return nil, false, err
 	}
 
@@ -384,6 +407,86 @@ func (c *createIndexOp) next() (binding, bool, error) {
 		}
 	}
 	return binding{}, true, nil
+}
+
+// --- DROP INDEX / SHOW INDEXES ---
+
+// findIndex returns the index known by name (see catalog.IndexName).
+func findIndex(ctx *Context, name string) (catalog.IndexDef, bool, error) {
+	defs, err := catalog.ListIndexes(ctx.Txn)
+	if err != nil {
+		return catalog.IndexDef{}, false, err
+	}
+	for _, d := range defs {
+		_, _, n, err := catalog.IndexName(ctx.Txn, d)
+		if err != nil {
+			return catalog.IndexDef{}, false, err
+		}
+		if n == name {
+			return d, true, nil
+		}
+	}
+	return catalog.IndexDef{}, false, nil
+}
+
+type dropIndexOp struct {
+	ctx      *Context
+	name     string
+	ifExists bool
+	done     bool
+}
+
+func (d *dropIndexOp) next() (binding, bool, error) {
+	if d.done {
+		return nil, false, nil
+	}
+	d.done = true
+	def, found, err := findIndex(d.ctx, d.name)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		if d.ifExists {
+			return binding{}, true, nil
+		}
+		return nil, false, fmt.Errorf("exec: no index named %q", d.name)
+	}
+	if err := graph.DropIndexEntries(d.ctx.Txn, def.Label, def.PropKey); err != nil {
+		return nil, false, err
+	}
+	return binding{}, true, nil
+}
+
+// showIndexesOp emits one (name, label, property) row per index, by name.
+type showIndexesOp struct {
+	ctx  *Context
+	rows []binding
+	pos  int
+	done bool
+}
+
+func (s *showIndexesOp) next() (binding, bool, error) {
+	if !s.done {
+		s.done = true
+		defs, err := catalog.ListIndexes(s.ctx.Txn)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, d := range defs {
+			label, prop, name, err := catalog.IndexName(s.ctx.Txn, d)
+			if err != nil {
+				return nil, false, err
+			}
+			s.rows = append(s.rows, binding{"name": name, "label": label, "property": prop})
+		}
+		sort.Slice(s.rows, func(i, j int) bool { return s.rows[i]["name"].(string) < s.rows[j]["name"].(string) })
+	}
+	if s.pos >= len(s.rows) {
+		return nil, false, nil
+	}
+	r := s.rows[s.pos]
+	s.pos++
+	return r, true, nil
 }
 
 // --- MERGE ---
