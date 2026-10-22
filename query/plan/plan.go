@@ -113,7 +113,16 @@ func (pl *planner) clause(c ast.Clause) error {
 		pl.plan = &Delete{Input: pl.plan, Exprs: cl.Exprs, Detach: cl.Detach}
 		return nil
 	case *ast.CreateIndex:
-		pl.plan = &CreateIndex{Label: cl.Label, Property: cl.Property}
+		pl.plan = &CreateIndex{Name: cl.Name, Label: cl.Label, Property: cl.Property}
+		return nil
+	case *ast.DropIndex:
+		pl.plan = &DropIndex{Name: cl.Name, IfExists: cl.IfExists}
+		return nil
+	case *ast.ShowIndexes:
+		pl.plan = &ShowIndexes{}
+		for _, c := range []string{"name", "label", "property"} {
+			pl.bind(c)
+		}
 		return nil
 	default:
 		return fmt.Errorf("plan: unsupported clause")

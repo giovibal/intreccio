@@ -106,6 +106,10 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("%s(%s)", op, strings.Join(parts, ", ")), []Op{x.Input}
 	case *CreateIndex:
 		return fmt.Sprintf("CreateIndex(:%s.%s)", x.Label, x.Property), nil
+	case *DropIndex:
+		return fmt.Sprintf("DropIndex(%s)", x.Name), nil
+	case *ShowIndexes:
+		return "ShowIndexes", nil
 	default:
 		return "?", nil
 	}

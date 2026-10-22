@@ -178,3 +178,11 @@ func ParsePropKey(key []byte) (value any, node uint64, err error) {
 	}
 	return v, binary.BigEndian.Uint64(key[len(key)-8:]), nil
 }
+
+// PropIndexPrefix: scan of every entry of the (label, propKey) index.
+func PropIndexPrefix(label, propKey uint32) []byte {
+	k := make([]byte, 0, 1+4+4)
+	k = append(k, KeyProp)
+	k = appendU32(k, label)
+	return appendU32(k, propKey)
+}

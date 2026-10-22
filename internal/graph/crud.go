@@ -570,3 +570,23 @@ func hasIncidentEdges(txn storage.Txn, nodeID uint64) (bool, error) {
 	}
 	return false, nil
 }
+
+// DropIndexEntries removes every `p` entry of the (label, propKey) index and
+// unregisters it, in the caller's transaction. Node records are untouched.
+func DropIndexEntries(txn storage.Txn, labelID, keyID uint32) error {
+	prefix := codec.PropIndexPrefix(labelID, keyID)
+	var keys [][]byte
+	it := txn.Scan(prefix)
+	for ; it.Valid(); it.Next() {
+		keys = append(keys, it.Key())
+	}
+	if err := it.Close(); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if err := txn.Delete(k); err != nil {
+			return err
+		}
+	}
+	return catalog.RemoveIndex(txn, labelID, keyID)
+}
