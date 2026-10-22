@@ -257,6 +257,11 @@ Notes for operators:
 - **Writes** are serialized through the leader and committed by a quorum; losing
   a minority of voters keeps the cluster available, losing a majority halts writes
   (safety over availability — no split brain).
+- A **forwarded** query (a write on a follower, a linearizable read, anything on
+  a client) runs under the caller's context deadline and `WithMaxRows`, and its
+  errors still match `ErrResultLimit`, `ErrConflict`, `ErrTxnTooLarge`,
+  `ErrIntegerOverflow` and `context.DeadlineExceeded` with `errors.Is`. Canceling
+  a context without a deadline stops the wait, not the work on the leader.
 - Set `Config.LogOutput` (e.g. `os.Stderr`) for Raft logs and `Config.ApplyTimeout`
   to tune write/read-barrier deadlines.
 - It uses **full replication** to the quorum (each voter holds the whole graph);
