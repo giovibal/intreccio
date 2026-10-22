@@ -100,12 +100,14 @@ type Delete struct {
 	Pos    Pos
 }
 
-// CreateIndex is CREATE INDEX FOR (v:Label) ON (v.prop).
+// CreateIndex is CREATE INDEX FOR (v:Label) ON (v.prop), or with Rel set
+// CREATE INDEX FOR ()-[v:TYPE]-() ON (v.prop) (Label then holds the type).
 type CreateIndex struct {
 	Name     string // optional
 	Variable string
 	Label    string
 	Property string
+	Rel      bool
 	Pos      Pos
 }
 
@@ -116,7 +118,7 @@ type DropIndex struct {
 	Pos      Pos
 }
 
-// ShowIndexes is SHOW INDEX(ES): one row per index (name, label, property).
+// ShowIndexes is SHOW INDEX(ES): one row per index (name, label, property, entity).
 type ShowIndexes struct {
 	Pos Pos
 }

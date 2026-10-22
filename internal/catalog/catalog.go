@@ -9,6 +9,7 @@
 //	R + kind(1) + id(4)          -> name     dictionary reverse
 //	X + label(4) + propKey(4)    -> name     registry of active `p` indexes
 //	U + label(4) + propKey(4)    -> flags+name  registry of unique constraints
+//	Y + type(4) + propKey(4)     -> name     registry of relationship `r` indexes
 //
 // IDs start at 1; ID 0 is reserved as "none".
 package catalog
@@ -29,6 +30,7 @@ const (
 	tagReverse    byte = 'R'
 	tagIndexReg   byte = 'X'
 	tagConstraint byte = 'U'
+	tagRelIndex   byte = 'Y'
 )
 
 // Dictionary kinds, used for the counter and the reverse mapping.
@@ -380,4 +382,89 @@ func ConstraintName(txn storage.Txn, d ConstraintDef) (label, prop, name string,
 		name = "constraint_" + label + "_" + prop
 	}
 	return label, prop, name, nil
+}
+
+// RelIndexDef identifies a relationship property index on (type, propKey).
+type RelIndexDef struct {
+	Type    uint32
+	PropKey uint32
+	Name    string
+}
+
+func relIndexKey(typeID, propKey uint32) []byte {
+	b := make([]byte, 1+4+4)
+	b[0] = tagRelIndex
+	binary.BigEndian.PutUint32(b[1:5], typeID)
+	binary.BigEndian.PutUint32(b[5:9], propKey)
+	return b
+}
+
+// AddRelIndex registers a relationship property index under name ("" for none).
+func AddRelIndex(txn storage.Txn, typeID, propKey uint32, name string) error {
+	return txn.Set(relIndexKey(typeID, propKey), []byte(name))
+}
+
+// HasRelIndex reports whether (type, propKey) has a relationship index.
+func HasRelIndex(txn storage.Txn, typeID, propKey uint32) (bool, error) {
+	switch _, err := txn.Get(relIndexKey(typeID, propKey)); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// GetRelIndex returns the relationship index on (type, propKey), if any.
+func GetRelIndex(txn storage.Txn, typeID, propKey uint32) (RelIndexDef, bool, error) {
+	v, err := txn.Get(relIndexKey(typeID, propKey))
+	switch {
+	case err == nil:
+		return RelIndexDef{Type: typeID, PropKey: propKey, Name: string(v)}, true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return RelIndexDef{}, false, nil
+	default:
+		return RelIndexDef{}, false, err
+	}
+}
+
+// RemoveRelIndex unregisters a relationship index. The caller removes its entries.
+func RemoveRelIndex(txn storage.Txn, typeID, propKey uint32) error {
+	return txn.Delete(relIndexKey(typeID, propKey))
+}
+
+// ListRelIndexes lists the registered relationship indexes.
+func ListRelIndexes(txn storage.Txn) ([]RelIndexDef, error) {
+	var out []RelIndexDef
+	it := txn.Scan([]byte{tagRelIndex})
+	defer func() { _ = it.Close() }()
+	for ; it.Valid(); it.Next() {
+		k := it.Key()
+		if len(k) != 1+4+4 {
+			return nil, fmt.Errorf("catalog: malformed relationship index key (len=%d)", len(k))
+		}
+		v, err := it.Value()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, RelIndexDef{Type: binary.BigEndian.Uint32(k[1:5]), PropKey: binary.BigEndian.Uint32(k[5:9]), Name: string(v)})
+	}
+	return out, nil
+}
+
+// RelIndexName is the name a relationship index is known by: the one given
+// at creation, or rel_index_<type>_<property> when none was given.
+func RelIndexName(txn storage.Txn, d RelIndexDef) (typ, prop, name string, err error) {
+	if typ, err = TypeName(txn, d.Type); err != nil {
+		return "", "", "", err
+	}
+	if prop, err = KeyName(txn, d.PropKey); err != nil {
+		return "", "", "", err
+	}
+	name = d.Name
+	if name == "" {
+		name = "rel_index_" + typ + "_" + prop
+	}
+	return typ, prop, name, nil
 }

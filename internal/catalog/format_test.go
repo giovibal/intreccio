@@ -38,7 +38,7 @@ func TestEnsureFormatRejectsWrongVersion(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(tx storage.Txn) error {
 		var b [4]byte
-		binary.BigEndian.PutUint32(b[:], formatUnique+1)
+		binary.BigEndian.PutUint32(b[:], maxFormat+1)
 		return tx.Set(formatKey, b[:])
 	}); err != nil {
 		t.Fatal(err)
@@ -83,4 +83,23 @@ func TestRequireUniqueFormat(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRequireFormatNeverLowers(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(EnsureFormat); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []func(storage.Txn) error{RequireRelIndexFormat, RequireUniqueFormat, EnsureFormat} {
+		if err := s.Update(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = s.View(func(tx storage.Txn) error {
+		v, _ := tx.Get(formatKey)
+		if got := binary.BigEndian.Uint32(v); got != formatRelIndex {
+			t.Errorf("marker = %d, want %d", got, formatRelIndex)
+		}
+		return nil
+	})
 }

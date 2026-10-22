@@ -204,8 +204,9 @@ type Delete struct {
 // the entries for any existing nodes that already have the property.
 type CreateIndex struct {
 	Name     string
-	Label    string
+	Label    string // the relationship type when Rel
 	Property string
+	Rel      bool
 }
 
 // DropIndex removes an index (registry and entries) by name.
@@ -214,7 +215,7 @@ type DropIndex struct {
 	IfExists bool
 }
 
-// ShowIndexes lists the indexes as (name, label, property) rows.
+// ShowIndexes lists the indexes as (name, label, property, entity) rows.
 type ShowIndexes struct{}
 
 // CreateConstraint adds a unique constraint on (:Label).prop.
@@ -250,6 +251,23 @@ type ShortestPath struct {
 }
 
 func (*ShortestPath) op() {}
+
+// RelByProperty seeks, through the relationship index, the relationships of
+// Type whose Key equals Value, and binds Rel and its endpoints: From is the
+// start and To the end for DirOut, the reverse for DirIn, and both ways (two
+// rows) for DirBoth. When From and To are the same variable only self-loops
+// match.
+type RelByProperty struct {
+	Rel   string
+	From  string
+	To    string
+	Dir   ast.Direction
+	Type  string
+	Key   string
+	Value ast.Expr
+}
+
+func (*RelByProperty) op() {}
 
 func (*CreateConstraint) op() {}
 func (*DropConstraint) op()   {}

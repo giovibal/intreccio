@@ -444,10 +444,17 @@ Write side:
 - `REMOVE`: property (`n.p`) or labels (`n:Foo`).
 - `DELETE` / `DETACH DELETE`.
 - `CREATE INDEX [name] FOR (v:Label) ON (v.prop)` with on-demand backfill,
-  `SHOW INDEXES` (name, label, property; unnamed indexes are listed as
+  `SHOW INDEXES` (name, label, property, entity; unnamed indexes are listed as
   `index_<Label>_<prop>`) and `DROP INDEX name [IF EXISTS]`. Indexes
   serve equality (`=`, inline `{prop: v}`), ranges (`<`, `<=`, `>`, `>=`) and
   `STARTS WITH`, including values bound earlier in the query (`UNWIND`/`WITH`).
+- Relationship property indexes: `CREATE INDEX [name] FOR ()-[r:TYPE]-() ON
+  (r.prop)` (listed by `SHOW INDEXES` with entity `RELATIONSHIP`, default name
+  `rel_index_<TYPE>_<prop>`). An equality on an indexed relationship property
+  (`-[r:TYPE {prop: v}]->` or `WHERE r.prop = v`) starts the pattern from the
+  matching relationships when no node can be found through an index. The first
+  one marks the database as format version 3, which older builds refuse to
+  open.
 - Unique constraints: `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (v:Label)
   REQUIRE v.prop IS UNIQUE`, `SHOW CONSTRAINTS` (name, label, property, type;
   unnamed ones are `constraint_<Label>_<prop>`) and `DROP CONSTRAINT name [IF

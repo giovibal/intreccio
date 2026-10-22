@@ -233,6 +233,8 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
 	case *plan.Expand:
 		return buildExpandWith(x, ctx, arg)
+	case *plan.RelByProperty:
+		return buildRelSeek(x, ctx, arg)
 	case *plan.ShortestPath:
 		return buildShortestPath(x, ctx, arg)
 	case *plan.Filter:
@@ -330,7 +332,7 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		}
 		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
 	case *plan.CreateIndex:
-		return &createIndexOp{ctx: ctx, name: x.Name, label: x.Label, prop: x.Property}, nil
+		return &createIndexOp{ctx: ctx, name: x.Name, label: x.Label, prop: x.Property, rel: x.Rel}, nil
 	case *plan.DropIndex:
 		return &dropIndexOp{ctx: ctx, name: x.Name, ifExists: x.IfExists}, nil
 	case *plan.ShowIndexes:

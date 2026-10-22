@@ -58,6 +58,9 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("NodeByPropertyRange(%s:%s {%s})", x.Var, x.Label, strings.Join(parts, ", ")), nil
 	case *Expand:
 		return fmt.Sprintf("Expand(%s)%s(%s)", x.From, relArrow(x), x.To), []Op{x.Input}
+	case *RelByProperty:
+		arrow := relArrow(&Expand{Rel: x.Rel, Types: []string{x.Type}, Dir: x.Dir})
+		return fmt.Sprintf("RelByProperty((%s)%s(%s) {%s = %s})", x.From, arrow, x.To, x.Key, exprString(x.Value)), nil
 	case *ShortestPath:
 		name := "ShortestPath"
 		if x.All {
@@ -116,6 +119,9 @@ func describe(o Op) (string, []Op) {
 		}
 		return fmt.Sprintf("%s(%s)", op, strings.Join(parts, ", ")), []Op{x.Input}
 	case *CreateIndex:
+		if x.Rel {
+			return fmt.Sprintf("CreateIndex(()-[:%s]-().%s)", x.Label, x.Property), nil
+		}
 		return fmt.Sprintf("CreateIndex(:%s.%s)", x.Label, x.Property), nil
 	case *DropIndex:
 		return fmt.Sprintf("DropIndex(%s)", x.Name), nil

@@ -38,10 +38,10 @@ func TestIndexCommands(t *testing.T) {
 	run("CREATE INDEX FOR (p:P) ON (p.uid)") // same definition again: no-op
 
 	res := run("SHOW INDEXES")
-	if want := []string{"name", "label", "property"}; !reflect.DeepEqual(res.Columns, want) {
+	if want := []string{"name", "label", "property", "entity"}; !reflect.DeepEqual(res.Columns, want) {
 		t.Errorf("columns %v, want %v", res.Columns, want)
 	}
-	want := [][]any{{"index_P_name", "P", "name"}, {"person_uid", "P", "uid"}}
+	want := [][]any{{"index_P_name", "P", "name", "NODE"}, {"person_uid", "P", "uid", "NODE"}}
 	if !reflect.DeepEqual(res.Rows, want) {
 		t.Errorf("SHOW INDEXES = %v, want %v", res.Rows, want)
 	}
@@ -62,7 +62,7 @@ func TestIndexCommands(t *testing.T) {
 	if got := run(lookup).Rows; !reflect.DeepEqual(got, [][]any{{"n2"}}) {
 		t.Errorf("data after drop: %v", got)
 	}
-	if got := run("SHOW INDEXES").Rows; !reflect.DeepEqual(got, [][]any{{"index_P_name", "P", "name"}}) {
+	if got := run("SHOW INDEXES").Rows; !reflect.DeepEqual(got, [][]any{{"index_P_name", "P", "name", "NODE"}}) {
 		t.Errorf("SHOW INDEXES after drop = %v", got)
 	}
 

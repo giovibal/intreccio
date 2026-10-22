@@ -15,6 +15,12 @@ type Catalog interface {
 	HasIndex(label, propKey string) bool
 }
 
+// RelCatalog is implemented by a Catalog that also knows the relationship
+// property indexes; without it the planner never seeks relationships.
+type RelCatalog interface {
+	HasRelIndex(relType, propKey string) bool
+}
+
 // NoIndexes is a Catalog that reports no indexes. It is the convenient choice
 // for callers that plan a query without a database — e.g. parsing and inspecting
 // the plan of an openCypher query as a standalone library.
@@ -113,7 +119,7 @@ func (pl *planner) clause(c ast.Clause) error {
 		pl.plan = &Delete{Input: pl.plan, Exprs: cl.Exprs, Detach: cl.Detach}
 		return nil
 	case *ast.CreateIndex:
-		pl.plan = &CreateIndex{Name: cl.Name, Label: cl.Label, Property: cl.Property}
+		pl.plan = &CreateIndex{Name: cl.Name, Label: cl.Label, Property: cl.Property, Rel: cl.Rel}
 		return nil
 	case *ast.DropIndex:
 		pl.plan = &DropIndex{Name: cl.Name, IfExists: cl.IfExists}
@@ -132,7 +138,7 @@ func (pl *planner) clause(c ast.Clause) error {
 		return nil
 	case *ast.ShowIndexes:
 		pl.plan = &ShowIndexes{}
-		for _, c := range []string{"name", "label", "property"} {
+		for _, c := range []string{"name", "label", "property", "entity"} {
 			pl.bind(c)
 		}
 		return nil
@@ -332,6 +338,9 @@ func (pl *planner) planPart(part ast.PatternPart, whereEqs map[string][]equality
 	}
 
 	if startIdx == -1 {
+		if r, seek, eq := pl.relAnchor(nodes, rels, whereEqs, whereRanges); seek != nil {
+			return pl.planFromRel(part, nodes, rels, r, seek, eq, consumed), nil
+		}
 		idx, scan, eq := pl.chooseAnchor(nodes, whereEqs, whereRanges)
 		switch {
 		case pl.plan == nil:
@@ -821,6 +830,8 @@ func scanVars(o Op) []string {
 	switch x := o.(type) {
 	case *NodeByProperty:
 		return exprVars(x.Value)
+	case *RelByProperty:
+		return exprVars(x.Value)
 	case *NodeByPropertyRange:
 		var out []string
 		for _, e := range []ast.Expr{x.Lower, x.Upper, x.Prefix} {
@@ -998,4 +1009,77 @@ func checkShortestFilters(parts []ast.PatternPart, residual []ast.Expr) error {
 		}
 	}
 	return nil
+}
+
+// relAnchor returns a relationship seek to start the part from, when the part
+// has no node to seek by an index (an equality on an indexed node property
+// stays the preferred anchor) but has a single-hop relationship of one type
+// with an equality on a property that has a relationship index.
+func (pl *planner) relAnchor(nodes []pnode, rels []prel, whereEqs map[string][]equality, whereRanges map[string][]rangePred) (int, *RelByProperty, *equality) {
+	rc, ok := pl.cat.(RelCatalog)
+	if !ok {
+		return 0, nil, nil
+	}
+	if _, scan, _ := pl.chooseAnchor(nodes, whereEqs, whereRanges); scan != nil {
+		if _, isSeek := scan.(*NodeByProperty); isSeek {
+			return 0, nil, nil
+		}
+	}
+	for i, r := range rels {
+		if r.varLen || len(r.types) != 1 {
+			continue
+		}
+		seek := func(key string, value ast.Expr) *RelByProperty {
+			if !rc.HasRelIndex(r.types[0], key) || !pl.seekable(value) {
+				return nil
+			}
+			return &RelByProperty{Rel: r.name, From: nodes[i].name, To: nodes[i+1].name,
+				Dir: r.dir, Type: r.types[0], Key: key, Value: value}
+		}
+		for _, k := range sortedKeys(r.props) {
+			if s := seek(k, r.props[k]); s != nil {
+				return i, s, nil
+			}
+		}
+		for _, eq := range whereEqs[r.name] {
+			if s := seek(eq.key, eq.value); s != nil {
+				e := eq
+				return i, s, &e
+			}
+		}
+	}
+	return 0, nil, nil
+}
+
+// planFromRel plans a part anchored on relationship ri: the seek binds it and
+// its two endpoints, then the part expands outwards from them. The endpoint
+// labels and properties, and the relationship's inline properties, stay in
+// the residual predicates.
+func (pl *planner) planFromRel(part ast.PatternPart, nodes []pnode, rels []prel, ri int, seek *RelByProperty, eq *equality, consumed map[int]bool) []ast.Expr {
+	switch {
+	case pl.plan == nil:
+		pl.plan = seek
+	case len(scanVars(seek)) > 0:
+		pl.plan = &Apply{Outer: pl.plan, Inner: &CartesianProduct{Left: &Argument{}, Right: seek}}
+	default:
+		pl.plan = &CartesianProduct{Left: pl.plan, Right: seek}
+	}
+	if eq != nil && eq.conjIdx >= 0 {
+		consumed[eq.conjIdx] = true
+	}
+	pl.bind(seek.Rel)
+	pl.bind(seek.From)
+	pl.bind(seek.To)
+	var expands []*Expand
+	for i := ri + 1; i < len(rels); i++ {
+		expands = append(expands, pl.emitExpand(nodes[i], rels[i], nodes[i+1], false))
+	}
+	for i := ri - 1; i >= 0; i-- {
+		expands = append(expands, pl.emitExpand(nodes[i+1], rels[i], nodes[i], true))
+	}
+	residual := residualPredicates(nodes, rels)
+	if part.Variable == "" {
+		markUnused(expands, nodes, rels, residual)
+	}
+	return residual
 }

@@ -327,8 +327,9 @@ func (d *deleteOp) next() (binding, bool, error) {
 type createIndexOp struct {
 	ctx   *Context
 	name  string
-	label string
+	label string // the relationship type when rel
 	prop  string
+	rel   bool
 	done  bool
 }
 
@@ -337,6 +338,9 @@ func (c *createIndexOp) next() (binding, bool, error) {
 		return nil, false, nil
 	}
 	c.done = true
+	if c.rel {
+		return c.createRelIndex()
+	}
 
 	labelID, err := catalog.InternLabel(c.ctx.Txn, c.label)
 	if err != nil {
@@ -372,7 +376,7 @@ func (c *createIndexOp) next() (binding, bool, error) {
 	}
 
 	if c.name != "" {
-		if _, found, err := findIndex(c.ctx, c.name); err != nil {
+		if _, found, err := findAnyIndex(c.ctx, c.name); err != nil {
 			return nil, false, err
 		} else if found {
 			return nil, false, fmt.Errorf("exec: an index named %q already exists", c.name)
@@ -384,24 +388,91 @@ func (c *createIndexOp) next() (binding, bool, error) {
 	return binding{}, true, nil
 }
 
+// createRelIndex is CREATE INDEX for a relationship type.
+func (c *createIndexOp) createRelIndex() (binding, bool, error) {
+	txn := c.ctx.Txn
+	typeID, err := catalog.InternType(txn, c.label)
+	if err != nil {
+		return nil, false, err
+	}
+	keyID, err := catalog.InternKey(txn, c.prop)
+	if err != nil {
+		return nil, false, err
+	}
+	if def, found, err := catalog.GetRelIndex(txn, typeID, keyID); err != nil {
+		return nil, false, err
+	} else if found {
+		_, _, existing, err := catalog.RelIndexName(txn, def)
+		if err != nil {
+			return nil, false, err
+		}
+		if c.name != "" && c.name != existing {
+			return nil, false, fmt.Errorf("exec: an index on ()-[:%s]-()(%s) already exists as %q", c.label, c.prop, existing)
+		}
+		return binding{}, true, nil
+	}
+	if c.name != "" {
+		if _, found, err := findAnyIndex(c.ctx, c.name); err != nil {
+			return nil, false, err
+		} else if found {
+			return nil, false, fmt.Errorf("exec: an index named %q already exists", c.name)
+		}
+	}
+	if err := graph.BuildRelIndex(txn, typeID, keyID, c.name); err != nil {
+		return nil, false, err
+	}
+	return binding{}, true, nil
+}
+
 // --- DROP INDEX / SHOW INDEXES ---
 
-// findIndex returns the index known by name (see catalog.IndexName).
-func findIndex(ctx *Context, name string) (catalog.IndexDef, bool, error) {
+// indexInfo describes a node or relationship index for DROP and SHOW.
+type indexInfo struct {
+	name, label, prop string // label holds the type of a relationship index
+	rel               bool
+	labelID, keyID    uint32
+}
+
+// listAllIndexes returns every node and relationship index.
+func listAllIndexes(ctx *Context) ([]indexInfo, error) {
+	var out []indexInfo
 	defs, err := catalog.ListIndexes(ctx.Txn)
 	if err != nil {
-		return catalog.IndexDef{}, false, err
+		return nil, err
 	}
 	for _, d := range defs {
-		_, _, n, err := catalog.IndexName(ctx.Txn, d)
+		label, prop, name, err := catalog.IndexName(ctx.Txn, d)
 		if err != nil {
-			return catalog.IndexDef{}, false, err
+			return nil, err
 		}
-		if n == name {
-			return d, true, nil
+		out = append(out, indexInfo{name: name, label: label, prop: prop, labelID: d.Label, keyID: d.PropKey})
+	}
+	rdefs, err := catalog.ListRelIndexes(ctx.Txn)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range rdefs {
+		typ, prop, name, err := catalog.RelIndexName(ctx.Txn, d)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, indexInfo{name: name, label: typ, prop: prop, rel: true, labelID: d.Type, keyID: d.PropKey})
+	}
+	return out, nil
+}
+
+// findAnyIndex returns the node or relationship index known by name.
+func findAnyIndex(ctx *Context, name string) (indexInfo, bool, error) {
+	all, err := listAllIndexes(ctx)
+	if err != nil {
+		return indexInfo{}, false, err
+	}
+	for _, ix := range all {
+		if ix.name == name {
+			return ix, true, nil
 		}
 	}
-	return catalog.IndexDef{}, false, nil
+	return indexInfo{}, false, nil
 }
 
 type dropIndexOp struct {
@@ -416,7 +487,7 @@ func (d *dropIndexOp) next() (binding, bool, error) {
 		return nil, false, nil
 	}
 	d.done = true
-	def, found, err := findIndex(d.ctx, d.name)
+	ix, found, err := findAnyIndex(d.ctx, d.name)
 	if err != nil {
 		return nil, false, err
 	}
@@ -426,7 +497,13 @@ func (d *dropIndexOp) next() (binding, bool, error) {
 		}
 		return nil, false, fmt.Errorf("exec: no index named %q", d.name)
 	}
-	if c, found, err := catalog.GetConstraint(d.ctx.Txn, def.Label, def.PropKey); err != nil {
+	if ix.rel {
+		if err := graph.DropRelIndexEntries(d.ctx.Txn, ix.labelID, ix.keyID); err != nil {
+			return nil, false, err
+		}
+		return binding{}, true, nil
+	}
+	if c, found, err := catalog.GetConstraint(d.ctx.Txn, ix.labelID, ix.keyID); err != nil {
 		return nil, false, err
 	} else if found {
 		_, _, cname, err := catalog.ConstraintName(d.ctx.Txn, c)
@@ -435,13 +512,14 @@ func (d *dropIndexOp) next() (binding, bool, error) {
 		}
 		return nil, false, fmt.Errorf("exec: index %q backs constraint %q; drop the constraint instead", d.name, cname)
 	}
-	if err := graph.DropIndexEntries(d.ctx.Txn, def.Label, def.PropKey); err != nil {
+	if err := graph.DropIndexEntries(d.ctx.Txn, ix.labelID, ix.keyID); err != nil {
 		return nil, false, err
 	}
 	return binding{}, true, nil
 }
 
-// showIndexesOp emits one (name, label, property) row per index, by name.
+// showIndexesOp emits one (name, label, property, entity) row per index, by
+// name; label holds the type of a relationship index.
 type showIndexesOp struct {
 	ctx  *Context
 	rows []binding
@@ -452,16 +530,16 @@ type showIndexesOp struct {
 func (s *showIndexesOp) next() (binding, bool, error) {
 	if !s.done {
 		s.done = true
-		defs, err := catalog.ListIndexes(s.ctx.Txn)
+		all, err := listAllIndexes(s.ctx)
 		if err != nil {
 			return nil, false, err
 		}
-		for _, d := range defs {
-			label, prop, name, err := catalog.IndexName(s.ctx.Txn, d)
-			if err != nil {
-				return nil, false, err
+		for _, ix := range all {
+			entity := "NODE"
+			if ix.rel {
+				entity = "RELATIONSHIP"
 			}
-			s.rows = append(s.rows, binding{"name": name, "label": label, "property": prop})
+			s.rows = append(s.rows, binding{"name": ix.name, "label": ix.label, "property": ix.prop, "entity": entity})
 		}
 		sort.Slice(s.rows, func(i, j int) bool { return s.rows[i]["name"].(string) < s.rows[j]["name"].(string) })
 	}

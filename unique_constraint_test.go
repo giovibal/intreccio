@@ -105,7 +105,7 @@ func TestUniqueConstraintLifecycle(t *testing.T) {
 	if got != "[[p_k P k UNIQUE]]" {
 		t.Errorf("SHOW CONSTRAINTS = %s", got)
 	}
-	if got := fmt.Sprint(mustQuery(t, db, "SHOW INDEXES", nil).Rows); got != "[[index_P_k P k]]" {
+	if got := fmt.Sprint(mustQuery(t, db, "SHOW INDEXES", nil).Rows); got != "[[index_P_k P k NODE]]" {
 		t.Errorf("SHOW INDEXES = %s, want the backing index", got)
 	}
 	if _, err := db.Query(ctx, "DROP INDEX index_P_k", nil); err == nil || !strings.Contains(err.Error(), "backs constraint") {
@@ -131,7 +131,7 @@ func TestUniqueConstraintLifecycle(t *testing.T) {
 	mustQuery(t, db, "CREATE (:Q {k: 1})", nil)
 	expectViolation(t, db, "CREATE (:Q {k: 1})")
 	mustQuery(t, db, "DROP CONSTRAINT constraint_Q_k", nil)
-	if got := fmt.Sprint(mustQuery(t, db, "SHOW INDEXES", nil).Rows); got != "[[index_Q_k Q k]]" {
+	if got := fmt.Sprint(mustQuery(t, db, "SHOW INDEXES", nil).Rows); got != "[[index_Q_k Q k NODE]]" {
 		t.Errorf("SHOW INDEXES = %s, want the pre-existing index kept", got)
 	}
 	mustQuery(t, db, "CREATE (:Q {k: 1})", nil)
