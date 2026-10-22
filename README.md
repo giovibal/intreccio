@@ -421,9 +421,18 @@ Read side:
 - `UNION` / `UNION ALL`.
 - Variable-length paths `-[:T*1..3]->` (trail semantics: no repeated
   relationships).
+- Shortest paths between two already bound nodes:
+  `MATCH (a {..}), (b {..}), p = shortestPath((a)-[:T*..5]-(b))` and
+  `allShortestPaths(...)` (bidirectional breadth-first search), with
+  `length(p)`, `nodes(p)` and `relationships(p)`. One variable-length
+  relationship, minimum length 0 or 1, any direction and types. A condition on
+  the path itself goes in a following `WITH ... WHERE` (a `WHERE` on it in the
+  same `MATCH` is rejected rather than applied after the search). With a
+  minimum length of 1, a node has no shortest path to itself.
 - Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` (with `DISTINCT`).
 - Scalar functions: `id`, `labels`, `type`, `keys`, `properties`, `size`,
-  `length`, `head`, `last`, `tail`, `range`, `coalesce`, `startNode`, `endNode`,
+  `length`, `nodes`, `relationships`, `head`, `last`, `tail`, `range`,
+  `coalesce`, `startNode`, `endNode`,
   `toInteger`, `toFloat`, `toString`, `toUpper`, `toLower`, `trim`,
   `substring`, `replace`, `split`, `abs`, `round`, `floor`, `ceil`, `sqrt`,
   `sign`, `rand`, `timestamp`.
@@ -452,9 +461,10 @@ Write side:
   older builds refuse to open.
 - Parameters (`$name`).
 
-**Out of scope:** OLAP/vectorized execution, `shortestPath`/`allShortestPaths`,
-subqueries (`EXISTS { }`, `CALL { }`), user-defined procedures, path variables
-(`p = (...)`) and full TCK conformance.
+**Out of scope:** OLAP/vectorized execution, subqueries (`EXISTS { }`,
+`CALL { }`), user-defined procedures, path variables on ordinary patterns
+(`p = (a)-->(b)`; they are supported with `shortestPath`) and full TCK
+conformance.
 
 ## Versioning
 

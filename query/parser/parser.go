@@ -783,6 +783,26 @@ func (p *parser) parsePatternPart() (ast.PatternPart, error) {
 		p.advance() // var
 		p.advance() // =
 	}
+	if (p.atKw("shortestPath") || p.atKw("allShortestPaths")) && p.peek(1).typ == tLParen {
+		kind := ast.ShortestOne
+		if p.atKw("allShortestPaths") {
+			kind = ast.ShortestAll
+		}
+		p.advance() // shortestPath / allShortestPaths
+		p.advance() // (
+		inner, err := p.parsePatternPart()
+		if err != nil {
+			return part, err
+		}
+		if inner.Variable != "" || inner.Shortest != ast.NotShortest {
+			return part, p.errf(inner.Start.Pos, "expected a pattern inside shortestPath")
+		}
+		if _, err := p.expect(tRParen); err != nil {
+			return part, err
+		}
+		inner.Variable, inner.Shortest = part.Variable, kind
+		return inner, nil
+	}
 	start, err := p.parseNodePattern()
 	if err != nil {
 		return part, err

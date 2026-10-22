@@ -320,6 +320,8 @@ func canonKey(v any) string {
 		return fmt.Sprintf("N:%d", x.ID)
 	case graph.Edge:
 		return fmt.Sprintf("E:%d", x.ID)
+	case graph.Path:
+		return "P:" + pathIDs(x)
 	default:
 		return fmt.Sprintf("?:%v", v)
 	}

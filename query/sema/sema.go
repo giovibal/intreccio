@@ -138,6 +138,11 @@ func (a *analyzer) clause(sc *scope, c ast.Clause) error {
 }
 
 func (a *analyzer) match(sc *scope, m *ast.Match) error {
+	for _, part := range m.Parts {
+		if err := a.checkShortest(part); err != nil {
+			return err
+		}
+	}
 	if err := a.introducePattern(sc, m.Parts); err != nil {
 		return err
 	}
@@ -148,7 +153,40 @@ func (a *analyzer) match(sc *scope, m *ast.Match) error {
 }
 
 func (a *analyzer) create(sc *scope, c *ast.Create) error {
+	for _, part := range c.Parts {
+		if part.Shortest != ast.NotShortest {
+			return a.errf(part.Start.Pos, "shortestPath can only be used in MATCH")
+		}
+	}
 	return a.introducePattern(sc, c.Parts)
+}
+
+// checkShortest validates the supported form of a shortest-path part:
+// shortestPath((a)-[r:T*min..max]-(b)) with a single variable-length
+// relationship between two plain node variables, which the planner requires
+// to be bound by an earlier pattern.
+func (a *analyzer) checkShortest(part ast.PatternPart) error {
+	if part.Shortest == ast.NotShortest {
+		return nil
+	}
+	if len(part.Chain) != 1 {
+		return a.errf(part.Start.Pos, "shortestPath needs exactly one relationship pattern")
+	}
+	rel, end := part.Chain[0].Rel, part.Chain[0].Node
+	switch {
+	case !rel.VarLength:
+		return a.errf(rel.Pos, "shortestPath needs a variable-length relationship, e.g. [*] or [:T*..5]")
+	case rel.MinHops > 1:
+		return a.errf(rel.Pos, "shortestPath supports a minimum length of 0 or 1 only")
+	case len(rel.Props) > 0:
+		return a.errf(rel.Pos, "relationship properties are not supported in shortestPath")
+	}
+	for _, n := range []*ast.NodePattern{part.Start, end} {
+		if n.Variable == "" || len(n.Labels) > 0 || len(n.Props) > 0 {
+			return a.errf(n.Pos, "shortestPath endpoints must be plain variables bound by an earlier pattern, e.g. MATCH (a {..}), (b {..}), p = shortestPath((a)-[*]-(b))")
+		}
+	}
+	return nil
 }
 
 func (a *analyzer) set(sc *scope, s *ast.Set) error {
@@ -209,6 +247,9 @@ func (a *analyzer) unwind(sc *scope, u *ast.Unwind) error {
 }
 
 func (a *analyzer) merge(sc *scope, m *ast.Merge) error {
+	if m.Part.Shortest != ast.NotShortest {
+		return a.errf(m.Part.Start.Pos, "shortestPath can only be used in MATCH")
+	}
 	if err := a.introducePattern(sc, []ast.PatternPart{m.Part}); err != nil {
 		return err
 	}

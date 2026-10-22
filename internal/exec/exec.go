@@ -233,6 +233,8 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
 	case *plan.Expand:
 		return buildExpandWith(x, ctx, arg)
+	case *plan.ShortestPath:
+		return buildShortestPath(x, ctx, arg)
 	case *plan.Filter:
 		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {

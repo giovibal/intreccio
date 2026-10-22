@@ -58,6 +58,17 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("NodeByPropertyRange(%s:%s {%s})", x.Var, x.Label, strings.Join(parts, ", ")), nil
 	case *Expand:
 		return fmt.Sprintf("Expand(%s)%s(%s)", x.From, relArrow(x), x.To), []Op{x.Input}
+	case *ShortestPath:
+		name := "ShortestPath"
+		if x.All {
+			name = "AllShortestPaths"
+		}
+		arrow := relArrow(&Expand{Rel: x.RelVar, Types: x.Types, Dir: x.Dir, VarLength: true, MinHops: x.MinHops, MaxHops: x.MaxHops})
+		s := fmt.Sprintf("%s(%s)%s(%s)", name, x.From, arrow, x.To)
+		if x.PathVar != "" {
+			s += " AS " + x.PathVar
+		}
+		return s, []Op{x.Input}
 	case *Filter:
 		return fmt.Sprintf("Filter(%s)", exprString(x.Pred)), []Op{x.Input}
 	case *Project:

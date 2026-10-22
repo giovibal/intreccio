@@ -233,6 +233,24 @@ type DropConstraint struct {
 // ShowConstraints lists the constraints as (name, label, property, type) rows.
 type ShowConstraints struct{}
 
+// ShortestPath finds, for each input row, the shortest path(s) between the
+// already bound nodes From and To, binding PathVar to the path and RelVar to
+// its relationships (either may be "").
+type ShortestPath struct {
+	Input   Op
+	From    string
+	To      string
+	PathVar string
+	RelVar  string
+	Types   []string
+	Dir     ast.Direction
+	MinHops int // -1 = unspecified (1)
+	MaxHops int // -1 = unbounded
+	All     bool
+}
+
+func (*ShortestPath) op() {}
+
 func (*CreateConstraint) op() {}
 func (*DropConstraint) op()   {}
 func (*ShowConstraints) op()  {}
