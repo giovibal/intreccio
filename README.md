@@ -22,7 +22,8 @@ medium-sized graphs. It is *not* an analytical (OLAP) engine.
 - **Property graph** — nodes with labels and properties, typed relationships
   with properties.
 - **Pluggable storage** behind a minimal `Store` interface; **BadgerDB** is the
-  default engine (bbolt is a planned alternative adapter).
+  default engine; a **bbolt** adapter passes the same storage conformance suite
+  and the full query test suite (`INTRECCIO_TEST_ENGINE=bolt go test .`).
 - **Order-preserving key encoding** so hot queries become a single ordered range
   scan, and secondary property indexes support range queries.
 - **ACID transactions** with always-consistent indexes (every mutation updates
@@ -471,6 +472,7 @@ Building from source and running the test suite require Go 1.26+:
 go build ./...          # build everything
 go test ./...           # run the tests
 make race               # tests with the race detector
+INTRECCIO_TEST_ENGINE=bolt go test .  # query tests on the bbolt engine
 make lint               # golangci-lint (v2)
 go run ./cmd/intreccio  # run the REPL from source
 ```

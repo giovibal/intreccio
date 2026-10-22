@@ -11,7 +11,7 @@ import (
 
 // client is a dataless cluster member: it stores nothing and forwards every
 // query to a voter. It lets extra service instances share the database without
-// replicating it. It satisfies intreccio.Backend and the clustered routing
+// replicating it. It satisfies backend.Backend and the clustered routing
 // interface (IsLeader/Local/ReadBarrier/Forward).
 type client struct {
 	peers []Peer // voters to contact (each with a ForwardAddr)

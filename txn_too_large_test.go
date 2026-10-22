@@ -3,6 +3,7 @@ package intreccio
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -12,6 +13,9 @@ import (
 func TestTxnTooLargeIsRecognisable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode")
+	}
+	if os.Getenv("INTRECCIO_TEST_ENGINE") == "bolt" {
+		t.Skip("bbolt has no per-transaction size limit")
 	}
 	ctx := context.Background()
 	db, err := OpenInMemory()

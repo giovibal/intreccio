@@ -18,7 +18,7 @@ func TestForwardCarriesDeadlineAndMaxRows(t *testing.T) {
 		gotLeft     time.Duration
 		gotMax      int64
 	)
-	n := &Node{localExec: func(ctx context.Context, _ string, _ map[string]any, maxRows int64) ([]string, [][]any, error) {
+	n := &raftNode{localExec: func(ctx context.Context, _ string, _ map[string]any, maxRows int64) ([]string, [][]any, error) {
 		var d time.Time
 		d, gotDeadline = ctx.Deadline()
 		gotLeft = time.Until(d)

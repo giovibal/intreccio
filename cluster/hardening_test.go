@@ -35,7 +35,7 @@ func TestSnapshotRestoreOnRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newNode: %v", err)
 	}
-	db := intreccio.New(node)
+	db := wrap(node)
 
 	// Writes that end up inside the snapshot.
 	for _, name := range []string{"A", "B"} {
@@ -68,7 +68,7 @@ func TestSnapshotRestoreOnRestart(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = node2.Close() }()
-	db2 := intreccio.New(node2)
+	db2 := wrap(node2)
 
 	// Recovery (restore snapshot + replay trailing log) runs asynchronously after
 	// newNode returns, so poll the local replica until it converges rather than
@@ -98,7 +98,7 @@ func TestInterruptedRestoreRecoversOnRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newNode: %v", err)
 	}
-	db := intreccio.New(node)
+	db := wrap(node)
 
 	// Data inside the snapshot, then a forced snapshot, then trailing data.
 	for _, name := range []string{"A", "B"} {
@@ -128,7 +128,7 @@ func TestInterruptedRestoreRecoversOnRestart(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = node2.Close() }()
-	waitForNamesLocal(t, intreccio.New(node2), []string{"A", "B", "C", "D"}, 20*time.Second)
+	waitForNamesLocal(t, wrap(node2), []string{"A", "B", "C", "D"}, 20*time.Second)
 }
 
 // waitForNamesLocal polls a local (non-linearizable) read until the names match
@@ -243,7 +243,7 @@ func (tc *testCluster) restart(t *testing.T, i int) {
 		t.Fatalf("restart node %d: %v", i, err)
 	}
 	tc.nodes[i] = node
-	tc.dbs[i] = intreccio.New(node)
+	tc.dbs[i] = wrap(node)
 }
 
 func createPerson(t *testing.T, db *intreccio.DB, name string) {

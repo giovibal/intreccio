@@ -45,7 +45,11 @@ type Txn interface {
 	// Get returns the value for the key, or ErrNotFound if absent.
 	// The returned buffer is owned by the caller.
 	Get(key []byte) ([]byte, error)
+	// Set writes key=val. The engine may keep both slices until the
+	// transaction ends, so the caller must not modify them afterwards.
 	Set(key, val []byte) error
+	// Delete removes key (a no-op when absent). The same rule as Set applies
+	// to the key slice.
 	Delete(key []byte) error
 	// Scan returns an iterator over the keys with the given prefix, in ascending
 	// order. The caller must close the iterator.
