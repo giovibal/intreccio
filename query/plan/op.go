@@ -217,6 +217,26 @@ type DropIndex struct {
 // ShowIndexes lists the indexes as (name, label, property) rows.
 type ShowIndexes struct{}
 
+// CreateConstraint adds a unique constraint on (:Label).prop.
+type CreateConstraint struct {
+	Name     string
+	Label    string
+	Property string
+}
+
+// DropConstraint removes a constraint by name.
+type DropConstraint struct {
+	Name     string
+	IfExists bool
+}
+
+// ShowConstraints lists the constraints as (name, label, property, type) rows.
+type ShowConstraints struct{}
+
+func (*CreateConstraint) op() {}
+func (*DropConstraint) op()   {}
+func (*ShowConstraints) op()  {}
+
 func (*AllNodesScan) op()        {}
 func (*NodeByLabelScan) op()     {}
 func (*NodeByProperty) op()      {}

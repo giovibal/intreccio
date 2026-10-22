@@ -26,6 +26,12 @@ func clausePos(c ast.Clause) ast.Pos {
 		return cl.Pos
 	case *ast.ShowIndexes:
 		return cl.Pos
+	case *ast.CreateConstraint:
+		return cl.Pos
+	case *ast.DropConstraint:
+		return cl.Pos
+	case *ast.ShowConstraints:
+		return cl.Pos
 	case *ast.Remove:
 		return cl.Pos
 	case *ast.Unwind:

@@ -104,6 +104,15 @@ func TestForwardedQueriesKeepErrorTypes(t *testing.T) {
 			t.Errorf("%s: overflowing write = %v, want ErrIntegerOverflow", name, err)
 		}
 	}
+	// Unique constraints replicate, and a violation keeps its type.
+	if _, err := lead.Query(ctx, "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE", nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, db := range map[string]*intreccio.DB{"follower": follower, "client": client} {
+		if _, err := db.Query(ctx, "CREATE (:Person {name: '1'})", nil); !errors.Is(err, intreccio.ErrConstraintViolation) {
+			t.Errorf("%s: duplicate write = %v, want ErrConstraintViolation", name, err)
+		}
+	}
 	// The dataless client forwards default reads too.
 	if _, err := client.Query(ctx, matchNames, nil, intreccio.WithMaxRows(2)); !errors.Is(err, intreccio.ErrResultLimit) {
 		t.Errorf("client default read over the limit = %v, want ErrResultLimit", err)

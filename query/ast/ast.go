@@ -121,6 +121,31 @@ type ShowIndexes struct {
 	Pos Pos
 }
 
+// CreateConstraint is CREATE CONSTRAINT [name] [IF NOT EXISTS]
+// FOR (v:Label) REQUIRE v.prop IS UNIQUE.
+type CreateConstraint struct {
+	Name     string // optional
+	Label    string
+	Property string
+	Pos      Pos
+}
+
+// DropConstraint is DROP CONSTRAINT name [IF EXISTS].
+type DropConstraint struct {
+	Name     string
+	IfExists bool
+	Pos      Pos
+}
+
+// ShowConstraints is SHOW CONSTRAINT(S): one row per constraint.
+type ShowConstraints struct {
+	Pos Pos
+}
+
+func (*CreateConstraint) clause() {}
+func (*DropConstraint) clause()   {}
+func (*ShowConstraints) clause()  {}
+
 func (*Match) clause()       {}
 func (*DropIndex) clause()   {}
 func (*ShowIndexes) clause() {}

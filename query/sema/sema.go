@@ -47,7 +47,7 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 		return nil, err
 	}
 	if len(q.Unions) > 0 && hasCreateIndex(q) {
-		return nil, a.errf(clausePos(q.Clauses[0]), "index commands must be the only clause")
+		return nil, a.errf(clausePos(q.Clauses[0]), "schema commands must be the only clause")
 	}
 	for _, u := range q.Unions {
 		// Each UNION arm is analysed in isolation; columns must match by name.
@@ -69,9 +69,10 @@ func (a *analyzer) analyzeArm(clauses []ast.Clause) ([]string, error) {
 	if len(clauses) == 0 {
 		return nil, &SemaError{Msg: "empty query"}
 	}
-	if (hasClauseOfType[*ast.CreateIndex](clauses) || hasClauseOfType[*ast.DropIndex](clauses) ||
-		hasClauseOfType[*ast.ShowIndexes](clauses)) && len(clauses) != 1 {
-		return nil, a.errf(clausePos(clauses[0]), "index commands must be the only clause")
+	for _, c := range clauses {
+		if isSchemaCommand(c) && len(clauses) != 1 {
+			return nil, a.errf(clausePos(clauses[0]), "schema commands must be the only clause")
+		}
 	}
 
 	sc := newScope()
@@ -89,15 +90,6 @@ func (a *analyzer) analyzeArm(clauses []ast.Clause) ([]string, error) {
 			"incomplete query: a RETURN or a writing clause is required")
 	}
 	return a.result.Columns, nil
-}
-
-func hasClauseOfType[T ast.Clause](clauses []ast.Clause) bool {
-	for _, c := range clauses {
-		if _, ok := c.(T); ok {
-			return true
-		}
-	}
-	return false
 }
 
 func sameColumns(a, b []string) bool {
@@ -132,10 +124,13 @@ func (a *analyzer) clause(sc *scope, c ast.Clause) error {
 		return a.with(sc, cl)
 	case *ast.Return:
 		return a.ret(sc, cl)
-	case *ast.CreateIndex, *ast.DropIndex:
+	case *ast.CreateIndex, *ast.DropIndex, *ast.CreateConstraint, *ast.DropConstraint:
 		return nil // no variables involved
 	case *ast.ShowIndexes:
 		a.result.Columns = []string{"name", "label", "property"}
+		return nil
+	case *ast.ShowConstraints:
+		a.result.Columns = []string{"name", "label", "property", "type"}
 		return nil
 	default:
 		return a.errf(clausePos(c), "unsupported clause")
@@ -497,10 +492,20 @@ func isAggregate(name string) bool { return aggregates[strings.ToLower(name)] }
 
 func hasCreateIndex(q *ast.Query) bool {
 	for _, c := range q.Clauses {
-		switch c.(type) {
-		case *ast.CreateIndex, *ast.DropIndex, *ast.ShowIndexes:
+		if isSchemaCommand(c) {
 			return true
 		}
+	}
+	return false
+}
+
+// isSchemaCommand reports index and constraint commands, which must be the
+// only clause of their query.
+func isSchemaCommand(c ast.Clause) bool {
+	switch c.(type) {
+	case *ast.CreateIndex, *ast.DropIndex, *ast.ShowIndexes,
+		*ast.CreateConstraint, *ast.DropConstraint, *ast.ShowConstraints:
+		return true
 	}
 	return false
 }
@@ -509,7 +514,8 @@ func hasCreateIndex(q *ast.Query) bool {
 func endsQuery(c ast.Clause) bool {
 	switch c.(type) {
 	case *ast.Return, *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete,
-		*ast.CreateIndex, *ast.DropIndex, *ast.ShowIndexes:
+		*ast.CreateIndex, *ast.DropIndex, *ast.ShowIndexes,
+		*ast.CreateConstraint, *ast.DropConstraint, *ast.ShowConstraints:
 		return true
 	default:
 		return false

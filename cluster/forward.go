@@ -104,6 +104,7 @@ var wireErrors = []struct {
 	{"conflict", intreccio.ErrConflict},
 	{"txn_too_large", intreccio.ErrTxnTooLarge},
 	{"integer_overflow", intreccio.ErrIntegerOverflow},
+	{"constraint_violation", intreccio.ErrConstraintViolation},
 	{"deadline_exceeded", context.DeadlineExceeded},
 	{"canceled", context.Canceled},
 }

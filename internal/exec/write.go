@@ -6,7 +6,6 @@ import (
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/graph"
-	"github.com/giovibal/intreccio/internal/storage/codec"
 	"github.com/giovibal/intreccio/query/ast"
 )
 
@@ -379,32 +378,8 @@ func (c *createIndexOp) next() (binding, bool, error) {
 			return nil, false, fmt.Errorf("exec: an index named %q already exists", c.name)
 		}
 	}
-	if err := catalog.AddNamedIndex(c.ctx.Txn, labelID, keyID, c.name); err != nil {
+	if err := graph.BuildIndex(c.ctx.Txn, labelID, keyID, c.name); err != nil {
 		return nil, false, err
-	}
-
-	// Backfill: scan every node carrying the label and write a `p` entry for
-	// each whose property value is a scalar.
-	nodeIDs, err := graph.NodesByLabel(c.ctx.Txn, labelID)
-	if err != nil {
-		return nil, false, err
-	}
-	for _, id := range nodeIDs {
-		node, err := graph.GetNode(c.ctx.Txn, id)
-		if err != nil {
-			return nil, false, err
-		}
-		v, ok := node.Props[keyID]
-		if !ok || !graph.IsIndexable(v) {
-			continue
-		}
-		pk, err := codec.PropKey(labelID, keyID, v, id)
-		if err != nil {
-			return nil, false, err
-		}
-		if err := c.ctx.Txn.Set(pk, nil); err != nil {
-			return nil, false, err
-		}
 	}
 	return binding{}, true, nil
 }
@@ -450,6 +425,15 @@ func (d *dropIndexOp) next() (binding, bool, error) {
 			return binding{}, true, nil
 		}
 		return nil, false, fmt.Errorf("exec: no index named %q", d.name)
+	}
+	if c, found, err := catalog.GetConstraint(d.ctx.Txn, def.Label, def.PropKey); err != nil {
+		return nil, false, err
+	} else if found {
+		_, _, cname, err := catalog.ConstraintName(d.ctx.Txn, c)
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, fmt.Errorf("exec: index %q backs constraint %q; drop the constraint instead", d.name, cname)
 	}
 	if err := graph.DropIndexEntries(d.ctx.Txn, def.Label, def.PropKey); err != nil {
 		return nil, false, err

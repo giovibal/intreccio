@@ -24,7 +24,7 @@ analytical OLAP engine.
 
 ## Correctness invariants
 1. **Index consistency**: every mutation updates the base record **and all** of
-   its index keys (`l`, `p`, `o`, `i`) **in the same transaction**
+   its index keys (`l`, `p`, `u`, `o`, `i`) **in the same transaction**
    (`Store.Update`). All writes go through a single point in `internal/graph`.
    Never write a record without updating its indexes in the same act.
 2. **Order-preserving encoding**: keys use big-endian IDs; values in `valEnc`

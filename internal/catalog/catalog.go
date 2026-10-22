@@ -7,7 +7,8 @@
 //	T + name                     -> id(4)    type dictionary
 //	K + name                     -> id(4)    property-key dictionary
 //	R + kind(1) + id(4)          -> name     dictionary reverse
-//	X + label(4) + propKey(4)    -> {}       registry of active `p` indexes
+//	X + label(4) + propKey(4)    -> name     registry of active `p` indexes
+//	U + label(4) + propKey(4)    -> flags+name  registry of unique constraints
 //
 // IDs start at 1; ID 0 is reserved as "none".
 package catalog
@@ -21,12 +22,13 @@ import (
 )
 
 const (
-	tagCounter  byte = 'c'
-	tagLabelFwd byte = 'L'
-	tagTypeFwd  byte = 'T'
-	tagKeyFwd   byte = 'K'
-	tagReverse  byte = 'R'
-	tagIndexReg byte = 'X'
+	tagCounter    byte = 'c'
+	tagLabelFwd   byte = 'L'
+	tagTypeFwd    byte = 'T'
+	tagKeyFwd     byte = 'K'
+	tagReverse    byte = 'R'
+	tagIndexReg   byte = 'X'
+	tagConstraint byte = 'U'
 )
 
 // Dictionary kinds, used for the counter and the reverse mapping.
@@ -279,4 +281,103 @@ func ListIndexes(txn storage.Txn) ([]IndexDef, error) {
 		})
 	}
 	return out, nil
+}
+
+// ConstraintDef is a unique constraint on (label, propKey). OwnsIndex is true
+// when the constraint created its backing `p` index (dropped with it); false
+// when the index already existed.
+type ConstraintDef struct {
+	Label     uint32
+	PropKey   uint32
+	Name      string
+	OwnsIndex bool
+}
+
+func constraintKey(label, propKey uint32) []byte {
+	b := make([]byte, 1+4+4)
+	b[0] = tagConstraint
+	binary.BigEndian.PutUint32(b[1:5], label)
+	binary.BigEndian.PutUint32(b[5:9], propKey)
+	return b
+}
+
+// AddConstraint registers a unique constraint. The value is a flags byte
+// (bit 0: OwnsIndex) followed by the name ("" for none).
+func AddConstraint(txn storage.Txn, d ConstraintDef) error {
+	v := make([]byte, 1, 1+len(d.Name))
+	if d.OwnsIndex {
+		v[0] = 1
+	}
+	return txn.Set(constraintKey(d.Label, d.PropKey), append(v, d.Name...))
+}
+
+func decodeConstraint(label, propKey uint32, v []byte) (ConstraintDef, error) {
+	if len(v) < 1 {
+		return ConstraintDef{}, errors.New("catalog: malformed constraint entry")
+	}
+	return ConstraintDef{Label: label, PropKey: propKey, OwnsIndex: v[0]&1 != 0, Name: string(v[1:])}, nil
+}
+
+// GetConstraint returns the unique constraint on (label, propKey), if any.
+func GetConstraint(txn storage.Txn, label, propKey uint32) (ConstraintDef, bool, error) {
+	v, err := txn.Get(constraintKey(label, propKey))
+	switch {
+	case err == nil:
+		d, err := decodeConstraint(label, propKey, v)
+		return d, err == nil, err
+	case errors.Is(err, storage.ErrNotFound):
+		return ConstraintDef{}, false, nil
+	default:
+		return ConstraintDef{}, false, err
+	}
+}
+
+// HasUnique reports whether (label, propKey) has a unique constraint.
+func HasUnique(txn storage.Txn, label, propKey uint32) (bool, error) {
+	_, found, err := GetConstraint(txn, label, propKey)
+	return found, err
+}
+
+// RemoveConstraint unregisters a constraint. The caller removes its entries.
+func RemoveConstraint(txn storage.Txn, label, propKey uint32) error {
+	return txn.Delete(constraintKey(label, propKey))
+}
+
+// ListConstraints lists the registered unique constraints.
+func ListConstraints(txn storage.Txn) ([]ConstraintDef, error) {
+	var out []ConstraintDef
+	it := txn.Scan([]byte{tagConstraint})
+	defer func() { _ = it.Close() }()
+	for ; it.Valid(); it.Next() {
+		k := it.Key()
+		if len(k) != 1+4+4 {
+			return nil, fmt.Errorf("catalog: malformed constraint key (len=%d)", len(k))
+		}
+		v, err := it.Value()
+		if err != nil {
+			return nil, err
+		}
+		d, err := decodeConstraint(binary.BigEndian.Uint32(k[1:5]), binary.BigEndian.Uint32(k[5:9]), v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// ConstraintName is the name a constraint is known by: the one given at
+// creation, or constraint_<label>_<property> when none was given.
+func ConstraintName(txn storage.Txn, d ConstraintDef) (label, prop, name string, err error) {
+	if label, err = LabelName(txn, d.Label); err != nil {
+		return "", "", "", err
+	}
+	if prop, err = KeyName(txn, d.PropKey); err != nil {
+		return "", "", "", err
+	}
+	name = d.Name
+	if name == "" {
+		name = "constraint_" + label + "_" + prop
+	}
+	return label, prop, name, nil
 }

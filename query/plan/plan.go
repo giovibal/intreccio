@@ -118,6 +118,18 @@ func (pl *planner) clause(c ast.Clause) error {
 	case *ast.DropIndex:
 		pl.plan = &DropIndex{Name: cl.Name, IfExists: cl.IfExists}
 		return nil
+	case *ast.CreateConstraint:
+		pl.plan = &CreateConstraint{Name: cl.Name, Label: cl.Label, Property: cl.Property}
+		return nil
+	case *ast.DropConstraint:
+		pl.plan = &DropConstraint{Name: cl.Name, IfExists: cl.IfExists}
+		return nil
+	case *ast.ShowConstraints:
+		pl.plan = &ShowConstraints{}
+		for _, c := range []string{"name", "label", "property", "type"} {
+			pl.bind(c)
+		}
+		return nil
 	case *ast.ShowIndexes:
 		pl.plan = &ShowIndexes{}
 		for _, c := range []string{"name", "label", "property"} {

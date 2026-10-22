@@ -13,6 +13,11 @@ const (
 	KeyIn    byte = 'i' // i + dst(8) + type(4) + src(8) + edge(8)
 	KeyLabel byte = 'l' // l + label(4) + node(8)
 	KeyProp  byte = 'p' // p + label(4) + propKey(4) + valEnc + node(8)
+	// KeyUnique maps a value of a unique-constrained (label, propKey) to the
+	// one node holding it: u + label(4) + propKey(4) + valEnc -> node(8).
+	// One key per value (not per node) so that two transactions claiming the
+	// same value conflict instead of both succeeding.
+	KeyUnique byte = 'u'
 )
 
 func appendU32(dst []byte, v uint32) []byte {
@@ -93,6 +98,23 @@ func PropKey(label, propKey uint32, value any, node uint64) ([]byte, error) {
 		return nil, err
 	}
 	return appendU64(k, node), nil
+}
+
+// UniqueKey: the owner entry of a value under a unique constraint.
+func UniqueKey(label, propKey uint32, value any) ([]byte, error) {
+	k := make([]byte, 0, 1+4+4+16)
+	k = append(k, KeyUnique)
+	k = appendU32(k, label)
+	k = appendU32(k, propKey)
+	return AppendIndexValue(k, value)
+}
+
+// UniquePrefix: scan of every owner entry of a unique constraint.
+func UniquePrefix(label, propKey uint32) []byte {
+	k := make([]byte, 0, 1+4+4)
+	k = append(k, KeyUnique)
+	k = appendU32(k, label)
+	return appendU32(k, propKey)
 }
 
 // PropPrefix: scan of the index entries with equality on a value.
