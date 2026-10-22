@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/giovibal/intreccio/internal/backend"
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/exec"
 	"github.com/giovibal/intreccio/internal/storage"
@@ -15,30 +16,19 @@ import (
 	"github.com/giovibal/intreccio/query/sema"
 )
 
-// Backend is the storage/execution backend behind a DB. It is implemented by
-// the default local engine and by the optional clustering package; end users do
-// not implement it directly (use Open or cluster.Open). It exists so the
-// clustering code can route writes through Raft without the core package
-// depending on it.
-type Backend interface {
-	// View runs fn in a read-only transaction.
-	View(fn func(storage.Txn) error) error
-	// ApplyWrite executes a write via stage and durably commits/replicates its
-	// effects, returning whatever stage produced.
-	ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
-	// Close releases the backend.
-	Close() error
-}
-
 // DB is the database handle.
 type DB struct {
-	be Backend
+	be backend.Backend
 }
 
-// New wraps a Backend in a DB. It is the seam used by the clustering package;
-// most callers use Open/OpenInMemory instead. If the backend supports forwarding
-// of leader-bound queries, New wires this DB's local executor into it.
-func New(be Backend) *DB {
+func init() {
+	backend.NewDB = func(be backend.Backend) any { return wrapBackend(be) }
+}
+
+// wrapBackend wraps a backend in a DB. Open and OpenInMemory use the local engine;
+// the cluster package reaches it through backend.NewDB. If the backend
+// forwards leader-bound queries, its local executor is wired here.
+func wrapBackend(be backend.Backend) *DB {
 	db := &DB{be: be}
 	if s, ok := be.(localExecutorSetter); ok {
 		s.SetLocalExecutor(db.executeLocalText)
@@ -143,9 +133,13 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 	return &DB{be: &localBackend{store: store}}, nil
 }
 
+// openMemStore opens the store behind OpenInMemory. It is a variable only so
+// the test suite can run on another engine (see engine_test.go).
+var openMemStore = func() (storage.Store, error) { return badgerstore.OpenInMemory() }
+
 // OpenInMemory opens a fully in-RAM database (useful in tests).
 func OpenInMemory() (*DB, error) {
-	store, err := badgerstore.OpenInMemory()
+	store, err := openMemStore()
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +332,7 @@ type localBackend struct {
 	store storage.Store
 }
 
-var _ Backend = (*localBackend)(nil)
+var _ backend.Backend = (*localBackend)(nil)
 
 func (b *localBackend) View(fn func(storage.Txn) error) error { return b.store.View(fn) }
 

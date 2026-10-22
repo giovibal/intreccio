@@ -147,7 +147,7 @@ func (a *ForwardArgs) needsLeader() bool { return a.Write || a.Linearizable }
 // forwardService is the net/rpc receiver registered on every voter. Followers
 // dial the leader directly; dataless clients dial any voter, which serves
 // default reads locally and proxies leader-bound requests to the leader.
-type forwardService struct{ node *Node }
+type forwardService struct{ node *raftNode }
 
 // Query serves a forwarded query. Errors are returned in reply.Err (not as the
 // RPC error) so the caller sees the original message.
@@ -198,7 +198,7 @@ func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
 }
 
 // startForwardServer starts serving forwarding RPCs on cfg.ForwardAddr.
-func (n *Node) startForwardServer() error {
+func (n *raftNode) startForwardServer() error {
 	srv := rpc.NewServer()
 	if err := srv.RegisterName("Forward", &forwardService{node: n}); err != nil {
 		return fmt.Errorf("cluster: register forward service: %w", err)
@@ -222,7 +222,7 @@ func (n *Node) startForwardServer() error {
 
 // callLeader resolves the current leader's forwarding address and forwards args
 // to it unchanged (used by a follower/voter that received a leader-bound query).
-func (n *Node) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply, error) {
+func (n *raftNode) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply, error) {
 	_, leaderID := n.raft.LeaderWithID()
 	if leaderID == "" {
 		return nil, errors.New("cluster: no leader available")
@@ -236,7 +236,7 @@ func (n *Node) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply
 
 // forward is the voter-side entry used by the root router: it forwards a query
 // to the leader (writes, linearizable reads) and returns desanitized rows.
-func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
+func (n *raftNode) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
 	args, err := newForwardArgs(ctx, cypher, params, write, linearizable, maxRows)
 	if err != nil {
 		return nil, nil, err
