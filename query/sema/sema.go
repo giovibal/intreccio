@@ -92,15 +92,6 @@ func (a *analyzer) analyzeArm(clauses []ast.Clause) ([]string, error) {
 	return a.result.Columns, nil
 }
 
-func hasClauseOfType[T ast.Clause](clauses []ast.Clause) bool {
-	for _, c := range clauses {
-		if _, ok := c.(T); ok {
-			return true
-		}
-	}
-	return false
-}
-
 func sameColumns(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
