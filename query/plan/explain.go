@@ -110,6 +110,12 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("DropIndex(%s)", x.Name), nil
 	case *ShowIndexes:
 		return "ShowIndexes", nil
+	case *CreateConstraint:
+		return fmt.Sprintf("CreateConstraint(:%s.%s UNIQUE)", x.Label, x.Property), nil
+	case *DropConstraint:
+		return fmt.Sprintf("DropConstraint(%s)", x.Name), nil
+	case *ShowConstraints:
+		return "ShowConstraints", nil
 	default:
 		return "?", nil
 	}

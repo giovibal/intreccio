@@ -439,6 +439,17 @@ Write side:
   `index_<Label>_<prop>`) and `DROP INDEX name [IF EXISTS]`. Indexes
   serve equality (`=`, inline `{prop: v}`), ranges (`<`, `<=`, `>`, `>=`) and
   `STARTS WITH`, including values bound earlier in the query (`UNWIND`/`WITH`).
+- Unique constraints: `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (v:Label)
+  REQUIRE v.prop IS UNIQUE`, `SHOW CONSTRAINTS` (name, label, property, type;
+  unnamed ones are `constraint_<Label>_<prop>`) and `DROP CONSTRAINT name [IF
+  EXISTS]`. A write that would give two nodes the same value fails with
+  `ErrConstraintViolation` (so does creating a constraint over existing
+  duplicates). The check runs as each value is written, so swapping two values
+  in one statement needs a temporary value. Only scalar values (numbers,
+  strings, booleans) are checked; `1` and `1.0` count as equal. The constraint
+  uses an existing index on the property or creates one (dropped with it).
+  Creating the first constraint marks the database as format version 2, which
+  older builds refuse to open.
 - Parameters (`$name`).
 
 **Out of scope:** OLAP/vectorized execution, `shortestPath`/`allShortestPaths`,

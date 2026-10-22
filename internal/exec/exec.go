@@ -333,6 +333,12 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		return &dropIndexOp{ctx: ctx, name: x.Name, ifExists: x.IfExists}, nil
 	case *plan.ShowIndexes:
 		return &showIndexesOp{ctx: ctx}, nil
+	case *plan.CreateConstraint:
+		return &createConstraintOp{ctx: ctx, name: x.Name, label: x.Label, prop: x.Property}, nil
+	case *plan.DropConstraint:
+		return &dropConstraintOp{ctx: ctx, name: x.Name, ifExists: x.IfExists}, nil
+	case *plan.ShowConstraints:
+		return &showConstraintsOp{ctx: ctx}, nil
 	case *plan.Apply:
 		outer, err := buildWith(x.Outer, ctx, arg)
 		if err != nil {

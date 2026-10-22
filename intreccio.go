@@ -8,6 +8,7 @@ import (
 	"github.com/giovibal/intreccio/internal/backend"
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/exec"
+	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 	"github.com/giovibal/intreccio/query/ast"
@@ -96,6 +97,13 @@ var ErrConflict = storage.ErrConflict
 // with the default engine). Nothing is committed. Load large datasets in
 // batches, e.g. `UNWIND $rows ...` with about 10 000 rows per call.
 var ErrTxnTooLarge = storage.ErrTxnTooLarge
+
+// ErrConstraintViolation is returned by Query when a write would give two
+// nodes the same value for a property under a unique constraint
+// (CREATE CONSTRAINT ... REQUIRE n.p IS UNIQUE), or when such a constraint
+// cannot be created because existing nodes already share a value. Nothing
+// is committed.
+var ErrConstraintViolation = graph.ErrConstraintViolation
 
 // ErrIntegerOverflow is returned by Query when integer arithmetic (including
 // sum()) leaves the 64-bit range. Integers never wrap around silently.
@@ -319,7 +327,8 @@ func (db *DB) Explain(ctx context.Context, cypher string) (string, error) {
 func isWriteQuery(q *ast.Query) bool {
 	for _, c := range q.Clauses {
 		switch c.(type) {
-		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex, *ast.DropIndex:
+		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex, *ast.DropIndex,
+			*ast.CreateConstraint, *ast.DropConstraint:
 			return true
 		}
 	}

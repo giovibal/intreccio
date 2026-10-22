@@ -189,14 +189,21 @@ func (p *parser) parseClause() (ast.Clause, error) {
 		}
 		return p.deleteBody(pos, true)
 	case p.atKw("DROP"):
+		if p.peekKw(1, "CONSTRAINT") {
+			return p.parseDropConstraint()
+		}
 		return p.parseDropIndex()
 	case p.atKw("SHOW"):
 		pos := p.advance().pos
-		if !p.atKw("INDEX") && !p.atKw("INDEXES") {
-			return nil, p.errf(p.cur().pos, "expected INDEXES after SHOW")
+		switch {
+		case p.atKw("INDEX") || p.atKw("INDEXES"):
+			p.advance()
+			return &ast.ShowIndexes{Pos: pos}, nil
+		case p.atKw("CONSTRAINT") || p.atKw("CONSTRAINTS"):
+			p.advance()
+			return &ast.ShowConstraints{Pos: pos}, nil
 		}
-		p.advance()
-		return &ast.ShowIndexes{Pos: pos}, nil
+		return nil, p.errf(p.cur().pos, "expected INDEXES or CONSTRAINTS after SHOW")
 	case p.atKw("DELETE"):
 		pos := p.advance().pos
 		return p.deleteBody(pos, false)
@@ -369,6 +376,9 @@ func (p *parser) parseCreate() (ast.Clause, error) {
 	if p.atKw("INDEX") {
 		return p.createIndexBody(pos)
 	}
+	if p.atKw("CONSTRAINT") {
+		return p.createConstraintBody(pos)
+	}
 	parts, err := p.parsePattern()
 	if err != nil {
 		return nil, err
@@ -423,6 +433,92 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 		return nil, err
 	}
 	return &ast.CreateIndex{Name: name, Variable: variable, Label: label, Property: prop, Pos: pos}, nil
+}
+
+// createConstraintBody parses the rest of
+// CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (v:Label) REQUIRE v.prop IS UNIQUE.
+// IF NOT EXISTS is accepted for compatibility: creating an existing constraint
+// is a no-op anyway.
+func (p *parser) createConstraintBody(pos ast.Pos) (*ast.CreateConstraint, error) {
+	p.advance() // CONSTRAINT
+	var name string
+	if !p.atKw("FOR") && !p.atKw("IF") && p.at(tIdent) {
+		name = p.advance().text
+	}
+	if p.atKw("IF") {
+		p.advance()
+		if err := p.expectKw("NOT"); err != nil {
+			return nil, err
+		}
+		if err := p.expectKw("EXISTS"); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.expectKw("FOR"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tLParen); err != nil {
+		return nil, err
+	}
+	variable, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tColon); err != nil {
+		return nil, err
+	}
+	label, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tRParen); err != nil {
+		return nil, err
+	}
+	if err := p.expectKw("REQUIRE"); err != nil {
+		return nil, err
+	}
+	refPos := p.cur().pos
+	ref, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if ref != variable {
+		return nil, p.errf(refPos, "REQUIRE must refer to %s, found %s", variable, ref)
+	}
+	if _, err := p.expect(tDot); err != nil {
+		return nil, err
+	}
+	prop, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectKw("IS"); err != nil {
+		return nil, err
+	}
+	if !p.atKw("UNIQUE") {
+		return nil, p.errf(p.cur().pos, "only IS UNIQUE constraints are supported, found %s", p.describe(p.cur()))
+	}
+	p.advance()
+	return &ast.CreateConstraint{Name: name, Label: label, Property: prop, Pos: pos}, nil
+}
+
+// parseDropConstraint parses DROP CONSTRAINT name [IF EXISTS].
+func (p *parser) parseDropConstraint() (ast.Clause, error) {
+	pos := p.advance().pos // DROP
+	p.advance()            // CONSTRAINT
+	name, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	d := &ast.DropConstraint{Name: name, Pos: pos}
+	if p.atKw("IF") {
+		p.advance()
+		if err := p.expectKw("EXISTS"); err != nil {
+			return nil, err
+		}
+		d.IfExists = true
+	}
+	return d, nil
 }
 
 // parseDropIndex parses DROP INDEX name [IF EXISTS].

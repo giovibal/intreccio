@@ -104,6 +104,17 @@ Conventions:
 | `i` | `i` + dstID(8) + typeID(4) + srcID(8) + edgeID(8) | ∅ | incoming edges |
 | `l` | `l` + labelID(4) + nodeID(8) | ∅ | label index |
 | `p` | `p` + labelID(4) + propKeyID(4) + valEnc + nodeID(8) | ∅ | secondary property index |
+| `u` | `u` + labelID(4) + propKeyID(4) + valEnc | nodeID(8) | owner of a value under a unique constraint |
+
+### Unique constraints (the `u` rows)
+A unique constraint on `(label, propKey)` is backed by its `p` index (created
+with the constraint if missing) plus one `u` key **per value**, holding the node
+that owns it. Claiming a value reads and writes that single key, so two
+concurrent transactions claiming the same value conflict under SSI instead of
+both seeing "no duplicate" in a range scan. An integral float is keyed as the
+equal integer (`1.0` collides with `1`); NaN is never claimed. Creating the
+first constraint raises the format marker to 2, so builds that do not maintain
+`u` keys refuse to open the database.
 
 ### Adjacency (the `o` and `i` rows)
 Every edge is written **twice**: once in `o` (for outgoing traversals) and once
@@ -149,7 +160,7 @@ needed.
 ## 7. Transactions and consistency invariants
 
 > **Invariant #1 (non-negotiable):** every write updates the base record **and
-> all** of its derived index keys (`l`, `p`, `o`, `i`) **within the same
+> all** of its derived index keys (`l`, `p`, `u`, `o`, `i`) **within the same
 > transaction**. If record and indexes do not commit atomically, the indexes
 > diverge and the queries lie.
 
