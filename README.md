@@ -98,6 +98,20 @@ func main() {
 }
 ```
 
+Values in `res.Rows` are `nil`, `bool`, `int64`, `float64`, `string`, `[]any`,
+`map[string]any`, or `intreccio.Node`, `intreccio.Relationship` and
+`intreccio.Path` for graph elements (`RETURN p`), with labels, types and
+property names resolved. Their `String()` prints them in Cypher syntax, and a
+node or relationship from a result can be passed back as a parameter
+(`MATCH (n) WHERE n = $node`): it names the stored element.
+
+```go
+res, _ := db.Query(ctx, "MATCH (p:Person {name: 'Alice'}) RETURN p", nil)
+p := res.Rows[0][0].(intreccio.Node)
+fmt.Println(p.ID, p.Labels, p.Props["email"]) // 1 [Person] a@b.com
+fmt.Println(p)                                 // (:Person {email: "a@b.com", name: "Alice"})
+```
+
 By default every committed write is made durable (fsynced) before `Query`
 returns, so it survives an OS crash or power loss. If you prefer higher write
 throughput and can tolerate losing the most recent writes on such a crash, open

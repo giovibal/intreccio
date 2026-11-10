@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-
-	"github.com/giovibal/intreccio/internal/graph"
 )
 
 // normalizeParams converts query parameters to the value types the engine
@@ -36,8 +34,8 @@ func normalizeParam(v any) (any, error) {
 		return v, nil
 	case int:
 		return int64(x), nil
-	case graph.Node, graph.Edge:
-		return v, nil // a node or relationship taken from a previous result
+	case Node, Relationship, Path:
+		return v, nil // taken from a previous result; resolved in the query's transaction
 	}
 
 	rv := reflect.ValueOf(v)
