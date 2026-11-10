@@ -452,8 +452,9 @@ Read side:
 Write side:
 - `CREATE`, `MERGE` (with `ON CREATE SET` / `ON MATCH SET`).
 - `SET`: property assignment (`n.p = v`), label addition (`n:Foo`), map replace
-  (`n = {...}`) or merge (`n += {...}`).
-- `REMOVE`: property (`n.p`) or labels (`n:Foo`).
+  (`n = {...}`) or merge (`n += {...}`), on nodes and (except labels) on
+  relationships; on `null` it does nothing.
+- `REMOVE`: property (`n.p`, `r.p`) or labels (`n:Foo`).
 - `DELETE` / `DETACH DELETE`.
 - `CREATE INDEX [name] FOR (v:Label) ON (v.prop)` with on-demand backfill,
   `SHOW INDEXES` (name, label, property, entity; unnamed indexes are listed as

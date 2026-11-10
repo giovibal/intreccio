@@ -158,13 +158,18 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 			if !ok {
 				return fmt.Errorf("exec: SET target must be a variable's property")
 			}
-			node, ok := b[varRef.Name].(graph.Node)
-			if !ok {
-				return fmt.Errorf("exec: SET target %s is not a node", varRef.Name)
-			}
 			val, err := eval(it.Value, b, ctx)
 			if err != nil {
 				return err
+			}
+			if done, err := setEdgeProps(ctx, b, varRef.Name, map[string]any{it.Target.Key: val}, false); err != nil {
+				return err
+			} else if done {
+				continue
+			}
+			node, ok := b[varRef.Name].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET target %s is not a node or relationship", varRef.Name)
 			}
 			if err := graph.SetProperty(ctx.Txn, node.ID, it.Target.Key, val); err != nil {
 				return err
@@ -175,9 +180,12 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 			}
 			b[varRef.Name] = refreshed
 		case *ast.SetLabels:
+			if b[it.Variable] == nil {
+				continue // SET on null does nothing
+			}
 			node, ok := b[it.Variable].(graph.Node)
 			if !ok {
-				return fmt.Errorf("exec: SET %s:... is not a node", it.Variable)
+				return fmt.Errorf("exec: SET %s:... is not a node (only nodes have labels)", it.Variable)
 			}
 			if err := graph.AddLabels(ctx.Txn, node.ID, it.Labels); err != nil {
 				return err
@@ -188,26 +196,31 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 			}
 			b[it.Variable] = refreshed
 		case *ast.SetMap:
-			node, ok := b[it.Variable].(graph.Node)
-			if !ok {
-				return fmt.Errorf("exec: SET %s = ... is not a node", it.Variable)
-			}
 			val, err := eval(it.Value, b, ctx)
 			if err != nil {
 				return err
 			}
-			if val == nil {
-				if it.Replace {
-					// SET n = null clears all properties.
-					if err := graph.SetNodeProperties(ctx.Txn, node.ID, nil, true); err != nil {
-						return err
-					}
-				}
-			} else {
-				m, ok := val.(map[string]any)
-				if !ok {
+			var m map[string]any
+			if val != nil {
+				var ok bool
+				if m, ok = val.(map[string]any); !ok {
 					return fmt.Errorf("exec: SET %s requires a map value, got %T", it.Variable, val)
 				}
+			}
+			if _, isEdge := b[it.Variable].(graph.Edge); isEdge && val == nil && !it.Replace {
+				continue // SET r += null changes nothing
+			}
+			if done, err := setEdgeProps(ctx, b, it.Variable, m, it.Replace); err != nil {
+				return err
+			} else if done {
+				continue
+			}
+			node, ok := b[it.Variable].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET %s = ... is not a node or relationship", it.Variable)
+			}
+			// SET n = null clears all properties; SET n += null changes nothing.
+			if val != nil || it.Replace {
 				if err := graph.SetNodeProperties(ctx.Txn, node.ID, m, it.Replace); err != nil {
 					return err
 				}
@@ -222,6 +235,28 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 		}
 	}
 	return nil
+}
+
+// setEdgeProps applies a property change to variable when it holds a
+// relationship, or does nothing when it holds null (openCypher: SET and
+// REMOVE on null are no-ops). done is false when the variable holds
+// something else, which the caller then handles (a node) or rejects.
+func setEdgeProps(ctx *Context, b binding, variable string, props map[string]any, replace bool) (done bool, err error) {
+	switch e := b[variable].(type) {
+	case nil:
+		return true, nil
+	case graph.Edge:
+		if err := graph.SetEdgeProperties(ctx.Txn, e.ID, props, replace); err != nil {
+			return true, err
+		}
+		refreshed, err := graph.GetEdge(ctx.Txn, e.ID)
+		if err != nil {
+			return true, err
+		}
+		b[variable] = refreshed
+		return true, nil
+	}
+	return false, nil
 }
 
 // --- REMOVE ---
@@ -247,9 +282,14 @@ func (r *removeOp) next() (binding, bool, error) {
 			if !ok {
 				return nil, false, fmt.Errorf("exec: REMOVE target must be a variable's property")
 			}
+			if done, err := setEdgeProps(r.ctx, b, varRef.Name, map[string]any{it.Target.Key: nil}, false); err != nil {
+				return nil, false, err
+			} else if done {
+				continue
+			}
 			node, ok := b[varRef.Name].(graph.Node)
 			if !ok {
-				return nil, false, fmt.Errorf("exec: REMOVE %s.%s: not a node", varRef.Name, it.Target.Key)
+				return nil, false, fmt.Errorf("exec: REMOVE %s.%s: not a node or relationship", varRef.Name, it.Target.Key)
 			}
 			if err := graph.RemoveProperty(r.ctx.Txn, node.ID, it.Target.Key); err != nil {
 				return nil, false, err
@@ -260,9 +300,12 @@ func (r *removeOp) next() (binding, bool, error) {
 			}
 			b[varRef.Name] = refreshed
 		case *ast.RemoveLabels:
+			if b[it.Variable] == nil {
+				continue // REMOVE on null does nothing
+			}
 			node, ok := b[it.Variable].(graph.Node)
 			if !ok {
-				return nil, false, fmt.Errorf("exec: REMOVE %s:... not a node", it.Variable)
+				return nil, false, fmt.Errorf("exec: REMOVE %s:... is not a node (only nodes have labels)", it.Variable)
 			}
 			if err := graph.RemoveLabels(r.ctx.Txn, node.ID, it.Labels); err != nil {
 				return nil, false, err

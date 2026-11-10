@@ -158,3 +158,53 @@ func ScanEdgesOfType(txn storage.Txn, typeID uint32, fn func(Edge) error) error 
 	}
 	return nil
 }
+
+// SetEdgeProperties changes the properties of a relationship. With replace
+// the relationship ends up with exactly props; otherwise props are merged
+// into the current ones. A nil value removes the property. The record and
+// the `r` index entries of the changed values are updated in the caller's
+// transaction (invariant 1); the relationship keeps its type and endpoints,
+// so the `o`/`i` entries do not change.
+func SetEdgeProperties(txn storage.Txn, id uint64, props map[string]any, replace bool) error {
+	e, err := GetEdge(txn, id)
+	if err != nil {
+		return err
+	}
+	next := make(map[uint32]any, len(e.Props)+len(props))
+	if !replace {
+		for k, v := range e.Props {
+			next[k] = v
+		}
+	}
+	for name, v := range props {
+		keyID, err := catalog.InternKey(txn, name)
+		if err != nil {
+			return err
+		}
+		if v = normalize(v); v == nil {
+			delete(next, keyID)
+		} else {
+			next[keyID] = v
+		}
+	}
+	for k, old := range e.Props {
+		if v, ok := next[k]; !ok || !sameValue(v, old) {
+			if err := delRelPropEntry(txn, e.Type, k, old, id); err != nil {
+				return err
+			}
+		}
+	}
+	for k, v := range next {
+		if old, ok := e.Props[k]; !ok || !sameValue(v, old) {
+			if err := putRelPropEntry(txn, e.Type, k, v, id); err != nil {
+				return err
+			}
+		}
+	}
+	e.Props = next
+	b, err := codec.EncodeEdge(e.EdgeRecord)
+	if err != nil {
+		return err
+	}
+	return txn.Set(codec.EdgeKey(id), b)
+}
