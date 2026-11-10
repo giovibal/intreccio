@@ -4,8 +4,9 @@
 // bbolt has one writer at a time, so Update never conflicts, and its cursors
 // must not outlive a write to the same bucket. To keep the semantics the upper
 // layer relies on (read-your-writes, iterators that stay valid while the
-// transaction keeps writing), an Update buffers its writes in memory and
-// applies them to the bucket only when fn returns nil. Reads merge the buffer
+// transaction keeps writing), an Update buffers its writes in memory (package
+// overlay, shared with the Badger adapter) and applies them to the bucket
+// only when fn returns nil. Reads merge the buffer
 // with the committed data; an iterator sees the writes made before it was
 // created, as with Badger.
 package bolt
@@ -14,12 +15,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage/overlay"
 )
 
 // bucket holds the whole keyspace; key tags already separate the namespaces.
@@ -74,23 +75,19 @@ func (s *Store) View(fn func(storage.Txn) error) error {
 func (s *Store) Update(fn func(storage.Txn) error) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
-		t := &txn{b: b, pending: map[string][]byte{}}
+		t := &txn{b: b, write: true}
 		if err := fn(t); err != nil {
 			return err
 		}
 		t.closed = true
-		keys := make([]string, 0, len(t.pending))
-		for k := range t.pending {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys) // sequential inserts keep the B+tree compact
-		for _, k := range keys {
-			v := t.pending[k]
+		// In key order: sequential inserts keep the B+tree compact.
+		for it := t.ov.Seek(nil); it.Valid(); it.Next() {
+			v, deleted := it.Value()
 			var err error
-			if v == nil {
-				err = b.Delete([]byte(k))
+			if deleted {
+				err = b.Delete(it.Key())
 			} else {
-				err = b.Put([]byte(k), v)
+				err = b.Put(it.Key(), v)
 			}
 			if err != nil {
 				return fmt.Errorf("bolt: commit: %w", err)
@@ -102,13 +99,12 @@ func (s *Store) Update(fn func(storage.Txn) error) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// txn is a bbolt transaction plus, for Update, its buffered writes: a nil
-// value in pending marks a deletion. Stored values are never nil (Set stores
-// an empty slice for an empty value).
+// txn is a bbolt transaction plus, for Update, its buffered writes.
 type txn struct {
-	b       *bolt.Bucket
-	pending map[string][]byte // nil map for a read-only transaction
-	closed  bool
+	b      *bolt.Bucket
+	write  bool
+	ov     overlay.Tree
+	closed bool
 }
 
 var _ storage.Txn = (*txn)(nil)
@@ -116,8 +112,8 @@ var _ storage.Txn = (*txn)(nil)
 var errReadOnly = errors.New("bolt: write in a read-only transaction")
 
 func (t *txn) Get(key []byte) ([]byte, error) {
-	if v, ok := t.pending[string(key)]; ok {
-		if v == nil {
+	if v, deleted, found := t.ov.Get(key); found {
+		if deleted {
 			return nil, storage.ErrNotFound
 		}
 		return bytes.Clone(v), nil
@@ -130,125 +126,60 @@ func (t *txn) Get(key []byte) ([]byte, error) {
 }
 
 func (t *txn) Set(key, val []byte) error {
-	if t.pending == nil || t.closed {
+	if !t.write || t.closed {
 		return errReadOnly
 	}
 	if len(key) == 0 {
 		return errors.New("bolt: empty key")
 	}
-	v := make([]byte, len(val)) // non-nil even when empty
-	copy(v, val)
-	t.pending[string(key)] = v
+	if val == nil {
+		val = []byte{} // present and empty, unlike a deletion marker
+	}
+	t.ov.Put(key, val)
 	return nil
 }
 
 func (t *txn) Delete(key []byte) error {
-	if t.pending == nil || t.closed {
+	if !t.write || t.closed {
 		return errReadOnly
 	}
-	t.pending[string(key)] = nil
+	t.ov.Delete(key)
 	return nil
 }
 
 func (t *txn) Scan(prefix []byte) storage.Iterator { return t.ScanFrom(prefix, prefix) }
 
+// ScanFrom merges the committed keys with the writes buffered so far; writes
+// made while the iterator is open stay invisible to it, as with Badger.
 func (t *txn) ScanFrom(prefix, start []byte) storage.Iterator {
 	if bytes.Compare(start, prefix) < 0 {
 		start = prefix
 	}
-	it := &iterator{prefix: prefix, cur: t.b.Cursor()}
-	// Snapshot the buffered writes in range: later writes stay invisible, as
-	// with a Badger iterator.
-	for k, v := range t.pending {
-		if bytes.HasPrefix([]byte(k), prefix) && k >= string(start) {
-			it.pend = append(it.pend, pendingEntry{key: []byte(k), val: v})
-		}
-	}
-	slices.SortFunc(it.pend, func(a, b pendingEntry) int { return bytes.Compare(a.key, b.key) })
-	it.ck, it.cv = it.cur.Seek(start)
-	it.settle()
-	return it
+	c := &cursor{prefix: prefix, cur: t.b.Cursor()}
+	c.k, c.v = c.cur.Seek(start)
+	return overlay.NewMerged(c, t.ov.Seek(start), prefix)
 }
 
-type pendingEntry struct {
-	key, val []byte // val nil = deleted
-}
-
-// iterator merges the committed keys (cursor) with the buffered writes
-// (pend), the latter winning on equal keys and hiding deleted ones.
-type iterator struct {
+// cursor is the committed side of a scan: a bbolt cursor bounded by prefix.
+type cursor struct {
 	prefix []byte
 	cur    *bolt.Cursor
-	ck, cv []byte // cursor position; ck nil when exhausted
-	pend   []pendingEntry
-	pi     int
-	key    []byte // current merged entry; nil when done
-	val    []byte
-	closed bool
+	k, v   []byte // nil k when exhausted
 }
 
-var _ storage.Iterator = (*iterator)(nil)
+func (c *cursor) Valid() bool { return c.k != nil && bytes.HasPrefix(c.k, c.prefix) }
 
-func (i *iterator) cursorKey() []byte {
-	if i.ck == nil || !bytes.HasPrefix(i.ck, i.prefix) {
-		return nil
-	}
-	return i.ck
+func (c *cursor) Key() []byte { return c.k }
+
+func (c *cursor) Value() ([]byte, error) {
+	out := make([]byte, len(c.v)) // non-nil even when empty
+	copy(out, c.v)
+	return out, nil
 }
 
-// settle moves to the next visible entry, consuming the sources as needed.
-func (i *iterator) settle() {
-	for {
-		ck := i.cursorKey()
-		var pk []byte
-		if i.pi < len(i.pend) {
-			pk = i.pend[i.pi].key
-		}
-		switch {
-		case ck == nil && pk == nil:
-			i.key, i.val = nil, nil
-			return
-		case pk == nil || (ck != nil && bytes.Compare(ck, pk) < 0):
-			i.key, i.val = ck, i.cv
-			return
-		default:
-			p := i.pend[i.pi]
-			if ck != nil && bytes.Equal(ck, pk) {
-				i.ck, i.cv = i.cur.Next() // shadowed by the buffered write
-			}
-			if p.val == nil {
-				i.pi++ // deleted in this transaction
-				continue
-			}
-			i.key, i.val = p.key, p.val
-			return
-		}
-	}
-}
+func (c *cursor) Next() { c.k, c.v = c.cur.Next() }
 
-func (i *iterator) Valid() bool { return !i.closed && i.key != nil }
-
-func (i *iterator) Next() {
-	if !i.Valid() {
-		return
-	}
-	if i.pi < len(i.pend) && bytes.Equal(i.key, i.pend[i.pi].key) {
-		i.pi++
-	} else {
-		i.ck, i.cv = i.cur.Next()
-	}
-	i.settle()
-}
-
-func (i *iterator) Key() []byte { return bytes.Clone(i.key) }
-
-func (i *iterator) Value() ([]byte, error) {
-	v := make([]byte, len(i.val))
-	copy(v, i.val)
-	return v, nil
-}
-
-func (i *iterator) Close() error {
-	i.closed = true
+func (c *cursor) Close() error {
+	c.k = nil
 	return nil
 }
