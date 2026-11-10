@@ -97,6 +97,16 @@ func main() {
 }
 ```
 
+A result value is one of `nil`, `bool`, `int64`, `float64`, `string`, `[]any`,
+`map[string]any`, or — when a query returns a whole entity — `intreccio.Node` /
+`intreccio.Relationship`:
+
+```go
+res, _ := db.Query(ctx, "MATCH (p:Person)-[r:KNOWS]->(f) RETURN p, r", nil)
+p := res.Rows[0][0].(intreccio.Node)         // p.ID, p.Labels, p.Props
+r := res.Rows[0][1].(intreccio.Relationship) // r.ID, r.Type, r.Start, r.End, r.Props
+```
+
 By default every committed write is made durable (fsynced) before `Query`
 returns, so it survives an OS crash or power loss. If you prefer higher write
 throughput and can tolerate losing the most recent writes on such a crash, open

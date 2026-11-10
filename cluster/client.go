@@ -56,7 +56,7 @@ func (c *client) ReadBarrier() error { return nil }
 // Forward sends the query to a voter, trying each in turn (round-robin with
 // failover) until one answers. The contacted voter serves default reads locally
 // and proxies writes/linearizable reads to the leader.
-func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error) {
 	args := &ForwardArgs{
 		Cypher:       cypher,
 		Params:       sanitizeParams(params),
@@ -76,7 +76,7 @@ func (c *client) Forward(ctx context.Context, cypher string, params map[string]a
 			lastErr = errors.New(rep.Err)
 			continue // e.g. no leader momentarily: try another voter
 		}
-		return rep.Columns, desanitizeRows(rep.Rows), nil
+		return rep.Columns, rep.Rows, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("cluster: no voters available")

@@ -13,17 +13,19 @@ import (
 )
 
 // localExecutor runs a query string entirely on this node (no forwarding) and
-// returns serializable columns/rows. It is injected by the root package, which
-// owns the Cypher pipeline; the cluster layer stays ignorant of it.
-type localExecutor func(cypher string, params map[string]any) (cols []string, rows [][]any, err error)
+// returns the columns plus the rows in the root package's canonical row
+// encoding. It is injected by the root package, which owns the Cypher pipeline
+// and the result value model; the cluster layer carries rows as opaque bytes
+// and stays ignorant of both.
+type localExecutor func(cypher string, params map[string]any) (cols []string, rows [][]byte, err error)
 
 // nullValue is a gob-encodable stand-in for a nil interface element, since gob
-// cannot encode a nil interface inside a slice/map. Rows and params are
-// sanitized on the wire and restored at the destination.
+// cannot encode a nil interface inside a slice/map. Params are sanitized on the
+// wire and restored at the destination.
 type nullValue struct{}
 
 func init() {
-	// Register the scalar types that may appear in query results and parameters.
+	// Register the scalar types that may appear in query parameters.
 	gob.Register(nullValue{})
 	gob.Register(int(0))
 	gob.Register(int64(0))
@@ -43,11 +45,11 @@ type ForwardArgs struct {
 	Linearizable bool
 }
 
-// ForwardReply is the leader's response. Exported for the same reason as
-// ForwardArgs.
+// ForwardReply is the leader's response. Rows holds one canonically encoded
+// row per element. Exported for the same reason as ForwardArgs.
 type ForwardReply struct {
 	Columns []string
-	Rows    [][]any
+	Rows    [][]byte
 	Err     string
 }
 
@@ -96,7 +98,7 @@ func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
 		return nil
 	}
 	reply.Columns = cols
-	reply.Rows = sanitizeRows(rows)
+	reply.Rows = rows
 	return nil
 }
 
@@ -138,8 +140,8 @@ func (n *Node) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply
 }
 
 // forward is the voter-side entry used by the root router: it forwards a query
-// to the leader (writes, linearizable reads) and returns desanitized rows.
-func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error) {
+// to the leader (writes, linearizable reads) and returns the encoded rows.
+func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error) {
 	args := &ForwardArgs{
 		Cypher:       cypher,
 		Params:       sanitizeParams(params),
@@ -153,7 +155,7 @@ func (n *Node) forward(ctx context.Context, cypher string, params map[string]any
 	if rep.Err != "" {
 		return nil, nil, errors.New(rep.Err)
 	}
-	return rep.Columns, desanitizeRows(rep.Rows), nil
+	return rep.Columns, rep.Rows, nil
 }
 
 // --- nil-safe wire sanitization -------------------------------------------------
@@ -170,30 +172,6 @@ func desanitizeValue(v any) any {
 		return nil
 	}
 	return v
-}
-
-func sanitizeRows(rows [][]any) [][]any {
-	out := make([][]any, len(rows))
-	for i, row := range rows {
-		r := make([]any, len(row))
-		for j, v := range row {
-			r[j] = sanitizeValue(v)
-		}
-		out[i] = r
-	}
-	return out
-}
-
-func desanitizeRows(rows [][]any) [][]any {
-	out := make([][]any, len(rows))
-	for i, row := range rows {
-		r := make([]any, len(row))
-		for j, v := range row {
-			r[j] = desanitizeValue(v)
-		}
-		out[i] = r
-	}
-	return out
 }
 
 func sanitizeParams(params map[string]any) map[string]any {

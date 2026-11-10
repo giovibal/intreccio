@@ -55,13 +55,17 @@ type clusterBackend interface {
 	// dataless client returns false, so every query is forwarded.
 	Local() bool
 	ReadBarrier() error
-	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]any, error)
+	// Forward runs the query on another member and returns its rows in the
+	// canonical row encoding (see rowcodec.go), which the backend carries as
+	// opaque bytes.
+	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error)
 }
 
 // localExecutorSetter lets a backend receive this DB's local executor (used by a
-// leader to run forwarded queries).
+// leader to run forwarded queries). The executor returns rows in the canonical
+// row encoding, so the backend never needs to know the result value types.
 type localExecutorSetter interface {
-	SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]any, error))
+	SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]byte, error))
 }
 
 // QueryOption configures a single Query call.
@@ -150,7 +154,9 @@ func (db *DB) Close() error {
 	return db.be.Close()
 }
 
-// Result is the outcome of a read query.
+// Result is the outcome of a query. Rows holds one slice per row, in column
+// order. Each value is one of: nil, bool, int64, float64, string, []any,
+// map[string]any, Node or Relationship (lists and maps may nest any of these).
 type Result struct {
 	Columns []string
 	Rows    [][]any
@@ -190,7 +196,11 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 			(write && !cb.IsLeader()) ||
 			(o.linearizable && !write && !cb.IsLeader())
 		if forward {
-			cols, rows, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write)
+			cols, enc, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write)
+			if err != nil {
+				return nil, fmt.Errorf("query: %w", err)
+			}
+			rows, err := decodeRows(enc)
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
 			}
@@ -239,9 +249,10 @@ func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, para
 }
 
 // executeLocalText parses and runs a query entirely on the local node, returning
-// serializable columns/rows. It is wired into a clustered backend so the leader
-// can execute forwarded queries; it never forwards.
-func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, [][]any, error) {
+// the columns and the rows in the canonical row encoding. It is wired into a
+// clustered backend so the leader can execute forwarded queries; it never
+// forwards.
+func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, [][]byte, error) {
 	q, err := parser.Parse(cypher)
 	if err != nil {
 		return nil, nil, err
@@ -254,12 +265,17 @@ func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	return res.Columns, res.Rows, nil
+	enc, err := encodeRows(res.Rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	return res.Columns, enc, nil
 }
 
 // runQuery plans and executes an already-parsed, already-analyzed query against
 // txn. It is the single execution path shared by the local and clustered
-// backends.
+// backends. The rows are exported to the public value model (Node,
+// Relationship) while txn is still open, since that needs the dictionaries.
 func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any, ctx context.Context, maxRows int64) (*Result, error) {
 	p, err := plan.Plan(q, planCatalog{txn: txn})
 	if err != nil {
@@ -267,6 +283,9 @@ func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string
 	}
 	rows, err := exec.Run(p, columns, &exec.Context{Txn: txn, Params: params, Ctx: ctx, MaxRows: maxRows})
 	if err != nil {
+		return nil, err
+	}
+	if err := newExporter(txn).rows(rows); err != nil {
 		return nil, err
 	}
 	return &Result{Columns: columns, Rows: rows}, nil
