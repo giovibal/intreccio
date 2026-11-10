@@ -182,6 +182,23 @@ reopen after crash is consistent.
 
 ---
 
+## Live queries track (post-v1)
+Reactive changefeeds, per ADR 0010 (semantics, capture, evaluation) and ADR 0011
+(transport). Same philosophy: an embedded vertical slice first, then the cluster.
+
+| Phase | Deliverable | Done when |
+|---|---|---|
+| L0 | ADRs 0010 and 0011; DESIGN §8/§12 updated | decisions recorded |
+| L1 | Public result values (`Node`, `Relationship`) and a canonical row encoding (ADR 0012) | `RETURN n` works embedded and forwarded |
+| L2 | Delta capture: a `storage.Txn` wrapper producing a logical `ChangeSet` from `n`/`e` keys with before-images, hooked into the embedded commit | property test: the deltas rebuild the state after random mutation sequences |
+| L3 | Embedded live queries: `STREAM` in the parser, footprint from the AST, watcher registry, `db.Subscribe`, REPL output | green under `-race`; no goroutine left after `Close` |
+| L4 | Clustered voters: capture in `fsm.Apply`, wake-all on `fsm.Restore` | a follower's subscription sees the leader's writes and survives a leader change and a snapshot restore |
+| L5 | Framed wire protocol at feature parity, replacing `net/rpc` | existing cluster tests green; cancellation and `WithMaxRows` reach the executing node; decoder fuzzed |
+| L6 | Dataless subscriptions with transparent failover | killing the serving voter shows the application only the net difference |
+| L7 | Anchored evaluation for plain `MATCH` queries; benchmarks; README | a benchmark shows cost following the neighbourhood of the change |
+
+---
+
 ## Recommended order of attack for CC
 1. Phases 0–2 in tight sequence (foundation; do not skip the codec property
    tests).

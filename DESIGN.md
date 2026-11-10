@@ -180,6 +180,10 @@ Deferred (post-v1, in likely priority order):
 - `CALL` on defined procedures / functions.
 - Full TCK conformance.
 
+One deliberate **extension outside openCypher 9**: a `STREAM` prefix
+(`STREAM MATCH … RETURN …`) marks a read query as a live query. See §12 and
+ADR 0010.
+
 ### Semantics not to get wrong
 - **No repeated relationships** within the same path of a `MATCH` (openCypher 9
   "trail" semantics): while expanding variable-length paths, track the
@@ -281,6 +285,14 @@ intreccio/
   used, so the embedded
   single-binary default stays pure Go and dependency-light. See ADR 0007. (NATS
   JetStream was considered as the replication log and rejected for this purpose.)
+- **Live queries (reactive changefeeds)**: a read query registered once
+  (`db.Subscribe`, or the `STREAM` prefix on text surfaces) whose result is kept
+  up to date; the subscriber receives coalesced `{Added, Removed}` row batches.
+  Deltas are derived from the physical write-set at the commit point, so the
+  feature is identical embedded and on every voter. See ADR 0010.
+- **Framed wire protocol** for cluster forwarding and streaming, replacing
+  `net/rpc`; it carries live queries to dataless clients with transparent
+  failover. See ADR 0011.
 - Cost-based planner with statistics.
 - Full-text and vector indexes (for GraphRAG), if the use case requires it.
 - Extension toward GQL / post-9 constructs.
