@@ -151,7 +151,7 @@ the local replica.
 ### Loading data in bulk
 
 Each `Query` call is one transaction, and the default engine caps how many
-writes a transaction can hold: roughly **25 000–35 000 new nodes** per
+writes a transaction can hold: roughly **50 000 new nodes** per
 statement, fewer when nodes carry many properties or labels. A statement over
 the limit fails with `intreccio.ErrTxnTooLarge` and commits nothing.
 
@@ -169,6 +169,18 @@ for start := 0; start < len(rows); start += batch {
     }
     ...
 }
+```
+
+Relationships load the same way, finding their endpoints through an index
+(create it before the load). Each row costs about the same however large the
+batch is:
+
+```go
+db.Query(ctx, "CREATE INDEX FOR (p:Person) ON (p.uid)", nil)
+// rows: []map[string]any{{"a": 1, "b": 2}, ...}, about 10 000 per call
+db.Query(ctx, `UNWIND $rows AS r
+    MATCH (a:Person {uid: r.a}), (b:Person {uid: r.b})
+    CREATE (a)-[:KNOWS]->(b)`, map[string]any{"rows": batch})
 ```
 
 `CREATE INDEX` indexes the existing nodes of its label in the same

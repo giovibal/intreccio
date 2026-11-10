@@ -24,7 +24,7 @@ func TestTxnTooLargeIsRecognisable(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	const total = 40000 // above the ~26k-35k nodes one statement can hold
+	const total = 80000 // above the ~50k nodes one statement can hold
 	ids := make([]any, total)
 	for i := range ids {
 		ids[i] = i
