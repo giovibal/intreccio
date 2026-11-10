@@ -6,6 +6,7 @@ package sema
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/giovibal/intreccio/query/ast"
@@ -25,6 +26,9 @@ func (e *SemaError) Error() string {
 // (empty for write-only queries without RETURN).
 type Result struct {
 	Columns []string
+	// Params lists the parameters the query reads ($name), sorted, without
+	// duplicates.
+	Params []string
 }
 
 // Analyze validates the query and computes its output columns.
@@ -51,10 +55,17 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 	}
 	for _, u := range q.Unions {
 		// Each UNION arm is analysed in isolation; columns must match by name.
-		armCols, err := (&analyzer{}).analyzeArm(u.Clauses)
+		arm := &analyzer{}
+		armCols, err := arm.analyzeArm(u.Clauses)
 		if err != nil {
 			return nil, err
 		}
+		for _, p := range arm.result.Params {
+			if !slices.Contains(a.result.Params, p) {
+				a.result.Params = append(a.result.Params, p)
+			}
+		}
+		slices.Sort(a.result.Params)
 		if !sameColumns(cols, armCols) {
 			return nil, a.errf(u.Pos, "UNION arms must produce the same columns (got %v vs %v)", cols, armCols)
 		}
@@ -422,7 +433,13 @@ func (a *analyzer) checkProjectionTail(sc *scope, orderBy []ast.SortItem, skip, 
 // checkExpr validates variable references and the use of aggregations.
 func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 	switch ex := e.(type) {
-	case *ast.Literal, *ast.Param:
+	case *ast.Literal:
+		return nil
+	case *ast.Param:
+		if !slices.Contains(a.result.Params, ex.Name) {
+			a.result.Params = append(a.result.Params, ex.Name)
+			slices.Sort(a.result.Params)
+		}
 		return nil
 	case *ast.Variable:
 		if !sc.has(ex.Name) {

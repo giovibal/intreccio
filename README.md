@@ -169,20 +169,15 @@ writes a transaction can hold: roughly **50 000 new nodes** per
 statement, fewer when nodes carry many properties or labels. A statement over
 the limit fails with `intreccio.ErrTxnTooLarge` and commits nothing.
 
-Load large datasets in batches of about **10 000 rows** per call:
+Load large datasets with `Import`: it runs one write query over many rows,
+passing them as `$rows` in batches of separate transactions (10 000 rows by
+default, `intreccio.WithBatchSize(n)` to change it), and halves a batch that
+turns out too large for one transaction:
 
 ```go
-const batch = 10000
-for start := 0; start < len(rows); start += batch {
-    end := min(start+batch, len(rows))
-    _, err := db.Query(ctx,
-        "UNWIND $rows AS r CREATE (p:Person) SET p = r",
-        map[string]any{"rows": rows[start:end]})
-    if errors.Is(err, intreccio.ErrTxnTooLarge) {
-        // lower the batch size
-    }
-    ...
-}
+// people: []map[string]any{{"uid": 1, "name": "Ann"}, ...}, any length
+res, err := db.Import(ctx,
+    "UNWIND $rows AS r CREATE (p:Person) SET p = r", people, nil)
 ```
 
 Relationships load the same way, finding their endpoints through an index
@@ -191,11 +186,15 @@ batch is:
 
 ```go
 db.Query(ctx, "CREATE INDEX FOR (p:Person) ON (p.uid)", nil)
-// rows: []map[string]any{{"a": 1, "b": 2}, ...}, about 10 000 per call
-db.Query(ctx, `UNWIND $rows AS r
+// links: []map[string]any{{"a": 1, "b": 2}, ...}
+res, err = db.Import(ctx, `UNWIND $rows AS r
     MATCH (a:Person {uid: r.a}), (b:Person {uid: r.b})
-    CREATE (a)-[:KNOWS]->(b)`, map[string]any{"rows": batch})
+    CREATE (a)-[:KNOWS]->(b)`, links, nil)
 ```
+
+Each batch is atomic, the import as a whole is not: if a batch fails, the
+earlier ones stay committed, the error names the failed rows and `res.Rows`
+says how many rows were written, so the import can resume from there.
 
 `CREATE INDEX` indexes the existing nodes of its label in the same
 transaction, so on a label with more nodes than the limit, create the index
