@@ -171,7 +171,9 @@ func (db *DB) Close() error {
 	return db.be.Close()
 }
 
-// Result is the outcome of a read query.
+// Result is the outcome of a query. Each value in Rows is nil, bool, int64,
+// float64, string, []any, map[string]any, Node, Relationship or Path (a
+// variable-length relationship is a []any of Relationship).
 type Result struct {
 	Columns []string
 	Rows    [][]any
@@ -291,8 +293,15 @@ func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string
 	if err != nil {
 		return nil, err
 	}
+	params, err = engineParams(txn, params)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := exec.Run(p, columns, &exec.Context{Txn: txn, Params: params, Ctx: ctx, MaxRows: maxRows})
 	if err != nil {
+		return nil, err
+	}
+	if err := publicRows(txn, rows); err != nil {
 		return nil, err
 	}
 	return &Result{Columns: columns, Rows: rows}, nil

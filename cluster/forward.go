@@ -35,6 +35,9 @@ func init() {
 	gob.Register("")
 	gob.Register([]any(nil))
 	gob.Register(map[string]any(nil))
+	gob.Register(intreccio.Node{})
+	gob.Register(intreccio.Relationship{})
+	gob.Register(intreccio.Path{})
 }
 
 // ForwardArgs is the request sent to the leader. It is exported only because
