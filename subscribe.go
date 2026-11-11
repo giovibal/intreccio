@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/wire"
 	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/parser"
 	"github.com/giovibal/intreccio/query/sema"
@@ -124,6 +127,27 @@ type changeReporter interface {
 	SetChangeHub(h *changefeed.Hub)
 }
 
+// remoteSubscriber is implemented by a backend that holds no data and so
+// cannot evaluate a live query itself, but can have another member do it: a
+// dataless cluster client. The stream it returns survives the loss of the
+// member serving it (ADR 0011).
+type remoteSubscriber interface {
+	SubscribeRemote(ctx context.Context, req wire.Request) ([]string, wire.BatchStream, error)
+}
+
+// localSubscriberSetter lets a backend receive this DB's live-query server,
+// used to run the live queries other members subscribe to on it.
+type localSubscriberSetter interface {
+	SetLocalSubscriber(fn func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error)
+}
+
+// catchUpTimeout bounds how long a member waits to reach the index a
+// subscriber asks it to start after, before telling it to try elsewhere.
+var catchUpTimeout = 5 * time.Second
+
+// catchUpPoll is how often that wait re-reads the applied index.
+const catchUpPoll = 10 * time.Millisecond
+
 // Subscribe starts a live query: it runs the read query once, delivers that
 // result as the first batch, then keeps delivering the changes to the result as
 // writes are committed, until the subscription is closed or ctx is done. The
@@ -131,6 +155,10 @@ type changeReporter interface {
 //
 // Errors in the query — syntax, semantics, a missing parameter, a result over
 // the row cap — are reported by Subscribe itself.
+//
+// On a dataless cluster client the query is evaluated by a voter. If that
+// voter is lost the subscription moves to another one by itself, and the
+// application sees only the net difference, if any.
 func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]any, opts ...SubscribeOption) (*Subscription, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -154,7 +182,8 @@ func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]an
 	if isWriteQuery(q) {
 		return nil, errors.New("subscribe: a live query must be read-only")
 	}
-	if !db.watchable {
+	remote, isRemote := db.be.(remoteSubscriber)
+	if !db.watchable && !isRemote {
 		return nil, fmt.Errorf("subscribe: %w", ErrSubscribeUnsupported)
 	}
 	if db.isClosed() {
@@ -162,48 +191,236 @@ func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]an
 	}
 
 	sctx, cancel := context.WithCancelCause(ctx)
-	lq := &liveQuery{
-		db:      db,
-		parent:  ctx,
-		ctx:     sctx,
-		q:       q,
-		columns: semaRes.Columns,
-		params:  params,
-		maxRows: o.maxRows,
-	}
-	// Register before the first evaluation: a commit landing in between then
-	// marks the watcher dirty instead of being lost.
-	lq.watcher = db.hub.Register(changefeed.FootprintOf(q))
-
-	initial, _, err := lq.evaluate()
-	if err != nil {
-		db.hub.Unregister(lq.watcher)
-		cancel(nil)
-		return nil, fmt.Errorf("subscribe: %w", err)
-	}
-
-	lq.sub = &Subscription{
-		columns: semaRes.Columns,
+	sub := &Subscription{
 		changes: make(chan Change),
 		cancel:  cancel,
 		done:    make(chan struct{}),
 	}
-	if !db.track(lq.sub) { // the database was closed meanwhile
-		db.hub.Unregister(lq.watcher)
+	// run is what the subscription's goroutine does: deliver batches until it
+	// has to stop, and report why. cleanup releases what start acquired.
+	var (
+		run     func() error
+		cleanup func()
+	)
+	if db.watchable {
+		run, cleanup, err = db.startLocal(sctx, sub, q, semaRes.Columns, params, o.maxRows)
+	} else {
+		run, cleanup, err = db.startRemote(sctx, sub, remote, cypher, params, o.maxRows)
+	}
+	if err != nil {
+		cancel(nil)
+		return nil, fmt.Errorf("subscribe: %w", err)
+	}
+	if !db.track(sub) { // the database was closed meanwhile
+		cleanup()
 		cancel(nil)
 		return nil, fmt.Errorf("subscribe: %w", ErrClosed)
 	}
-	go lq.run(initial)
-	return lq.sub, nil
+
+	go func() {
+		err := run()
+		// When the context ended, why it ended is the reason, whatever error
+		// the interrupted work happened to return.
+		switch cause := context.Cause(sctx); {
+		case cause == nil: // run ended on its own: keep its error
+		case errors.Is(cause, errSubscriptionClosed):
+			err = nil
+		case errors.Is(cause, ErrClosed):
+			err = ErrClosed
+		default:
+			// The caller's context: report its plain error, so errors.Is works
+			// whatever cancellation cause the caller attached.
+			err = ctx.Err()
+		}
+		cleanup()
+		db.untrack(sub)
+		cancel(nil) // release the context if run ended on its own
+		sub.err = err
+		close(sub.changes)
+		close(sub.done)
+	}()
+	return sub, nil
 }
 
-// liveQuery is the running state of one subscription: the watcher that wakes
-// it and the last result it emitted.
+// deliver sends c to the subscriber, or reports false if the subscription
+// ended first.
+func (s *Subscription) deliver(ctx context.Context, c Change) bool {
+	select {
+	case s.changes <- c:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// startLocal starts a live query evaluated by this database.
+func (db *DB) startLocal(ctx context.Context, sub *Subscription, q *ast.Query, columns []string, params map[string]any, maxRows int64) (run func() error, cleanup func(), err error) {
+	lq := db.newLiveQuery(ctx, q, columns, params, maxRows)
+	ev, err := lq.evaluate()
+	if err != nil {
+		lq.close()
+		return nil, nil, err
+	}
+	sub.columns = columns
+
+	run = func() error {
+		if !sub.deliver(ctx, Change{Added: ev.rows, Initial: true}) {
+			return nil
+		}
+		for {
+			ev, err := lq.next()
+			if err != nil || ev == nil {
+				return err
+			}
+			c := Change{Added: ev.addedRows()}
+			for _, b := range ev.removed {
+				row, err := decodeRow(b)
+				if err != nil {
+					return fmt.Errorf("subscription: %w", err)
+				}
+				c.Removed = append(c.Removed, row)
+			}
+			if !sub.deliver(ctx, c) {
+				return nil
+			}
+		}
+	}
+	return run, lq.close, nil
+}
+
+// startRemote starts a live query evaluated by another member, for a backend
+// that holds no data. The backend's stream hides the loss of that member.
+func (db *DB) startRemote(ctx context.Context, sub *Subscription, remote remoteSubscriber, cypher string, params map[string]any, maxRows int64) (run func() error, cleanup func(), err error) {
+	encParams, err := encodeParams(params)
+	if err != nil {
+		return nil, nil, err
+	}
+	columns, stream, err := remote.SubscribeRemote(ctx, wire.Request{Cypher: cypher, Params: encParams, MaxRows: maxRows})
+	if err != nil {
+		return nil, nil, fromRemote(err)
+	}
+	sub.columns = columns
+
+	run = func() error {
+		for {
+			batch, err := stream.Recv()
+			if err != nil {
+				return fmt.Errorf("subscription: %w", fromRemote(err))
+			}
+			c := Change{Initial: batch.Initial}
+			if c.Added, err = decodeRows(batch.Added); err != nil {
+				return fmt.Errorf("subscription: %w", err)
+			}
+			if c.Removed, err = decodeRows(batch.Removed); err != nil {
+				return fmt.Errorf("subscription: %w", err)
+			}
+			if !sub.deliver(ctx, c) {
+				return nil
+			}
+		}
+	}
+	// The stream is bound to ctx: ending the subscription ends it.
+	return run, func() {}, nil
+}
+
+// serveSubscription runs a live query on behalf of another member, sending its
+// batches to sink until ctx ends or the query fails. It is wired into a
+// clustered backend so a voter can serve the subscriptions of dataless clients.
+//
+// sink.Batch returns only when the subscriber is ready for more, so a slow
+// subscriber is coalesced here exactly as a local one is.
+func (db *DB) serveSubscription(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error {
+	if !db.watchable || db.isClosed() {
+		return &wire.Error{Code: wire.CodeUnavailable, Msg: "this member cannot serve live queries"}
+	}
+	params, err := decodeParams(req.Params)
+	if err != nil {
+		return err
+	}
+	q, err := parser.Parse(req.Cypher)
+	if err != nil {
+		return err
+	}
+	semaRes, err := sema.Analyze(q)
+	if err != nil {
+		return err
+	}
+	if isWriteQuery(q) {
+		return errors.New("subscribe: a live query must be read-only")
+	}
+
+	lq := db.newLiveQuery(ctx, q, semaRes.Columns, params, req.MaxRows)
+	defer lq.close()
+	if err := db.awaitApplied(ctx, req.AfterIndex); err != nil {
+		return err
+	}
+	ev, err := lq.evaluate()
+	if err != nil {
+		return toRemote(err)
+	}
+	if err := sink.Columns(semaRes.Columns); err != nil {
+		return err
+	}
+	if err := sink.Batch(wire.Batch{Initial: true, Index: ev.index, Added: ev.enc}); err != nil {
+		return err
+	}
+	for {
+		ev, err := lq.next()
+		if err != nil {
+			return toRemote(err)
+		}
+		if ev == nil {
+			return ctx.Err()
+		}
+		batch := wire.Batch{Index: ev.index, Removed: ev.removed}
+		for _, i := range ev.added {
+			batch.Added = append(batch.Added, ev.enc[i])
+		}
+		if err := sink.Batch(batch); err != nil {
+			return err
+		}
+	}
+}
+
+// awaitApplied waits until this member has applied at least index, so that a
+// subscriber arriving from another member does not see the result move
+// backwards. It gives up after catchUpTimeout with a CodeBehind error.
+func (db *DB) awaitApplied(ctx context.Context, index uint64) error {
+	if index == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(catchUpTimeout)
+	for {
+		var applied uint64
+		err := db.be.View(func(txn storage.Txn) error {
+			var err error
+			applied, err = catalog.AppliedIndex(txn)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if applied >= index {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return &wire.Error{Code: wire.CodeBehind,
+				Msg: fmt.Sprintf("this member has applied index %d, the subscriber needs %d", applied, index)}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(catchUpPoll):
+		}
+	}
+}
+
+// liveQuery is a registered live query: the watcher that wakes it and the last
+// result it produced. It is the core shared by local subscriptions and by the
+// ones served to other members.
 type liveQuery struct {
 	db      *DB
-	parent  context.Context // the caller's context
-	ctx     context.Context // derived from parent; ended by Close and by the database
-	sub     *Subscription
+	ctx     context.Context
 	watcher *changefeed.Watcher
 	q       *ast.Query
 	columns []string
@@ -212,95 +429,86 @@ type liveQuery struct {
 	result  changefeed.ResultSet
 }
 
+// newLiveQuery registers the watcher. That happens before the first
+// evaluation on purpose: a commit landing in between then marks the watcher
+// dirty instead of being lost.
+func (db *DB) newLiveQuery(ctx context.Context, q *ast.Query, columns []string, params map[string]any, maxRows int64) *liveQuery {
+	return &liveQuery{
+		db:      db,
+		ctx:     ctx,
+		watcher: db.hub.Register(changefeed.FootprintOf(q)),
+		q:       q,
+		columns: columns,
+		params:  params,
+		maxRows: maxRows,
+	}
+}
+
+func (lq *liveQuery) close() { lq.db.hub.Unregister(lq.watcher) }
+
+// evaluation is one run of a live query and how it differs from the previous.
+type evaluation struct {
+	rows    [][]any  // the full current result
+	enc     [][]byte // the same rows, canonically encoded
+	added   []int    // indexes into rows/enc of the rows that are new
+	removed [][]byte // encoded rows that are gone
+	// index is the applied Raft index of the state the result was read from
+	// (0 on an embedded database).
+	index uint64
+}
+
+func (ev *evaluation) addedRows() [][]any {
+	out := make([][]any, len(ev.added))
+	for i, idx := range ev.added {
+		out[i] = ev.rows[idx]
+	}
+	return out
+}
+
 // evaluate runs the query against the current state and folds the outcome into
-// the held result. It returns the rows that are new and those that are gone.
-func (lq *liveQuery) evaluate() (added, removed [][]any, err error) {
-	var res *Result
-	err = lq.db.be.View(func(txn storage.Txn) error {
-		r, err := runQuery(txn, lq.q, lq.columns, lq.params, lq.ctx, lq.maxRows)
+// the held result.
+func (lq *liveQuery) evaluate() (*evaluation, error) {
+	ev := &evaluation{}
+	err := lq.db.be.View(func(txn storage.Txn) error {
+		res, err := runQuery(txn, lq.q, lq.columns, lq.params, lq.ctx, lq.maxRows)
 		if err != nil {
 			return err
 		}
-		res = r
-		return nil
+		ev.rows = res.Rows
+		// Read in the same transaction as the rows: the index is exact.
+		ev.index, err = catalog.AppliedIndex(txn)
+		return err
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	enc, err := encodeRows(res.Rows)
-	if err != nil {
-		return nil, nil, err
+	if ev.enc, err = encodeRows(ev.rows); err != nil {
+		return nil, err
 	}
-	addedIdx, removedEnc := lq.result.Replace(enc)
-	for _, i := range addedIdx {
-		added = append(added, res.Rows[i])
-	}
-	for _, b := range removedEnc {
-		row, err := decodeRow(b)
-		if err != nil {
-			return nil, nil, err
-		}
-		removed = append(removed, row)
-	}
-	return added, removed, nil
+	ev.added, ev.removed = lq.result.Replace(ev.enc)
+	return ev, nil
 }
 
-// run delivers the initial batch, then one batch per evaluation that changed
-// the result. A wake-up that arrives while a batch is waiting to be received
-// stays pending, so the next evaluation covers every commit since.
-func (lq *liveQuery) run(initial [][]any) {
-	err := lq.loop(initial)
-	// When the context ended, why it ended is the reason, whatever error the
-	// interrupted evaluation happened to return.
-	switch cause := context.Cause(lq.ctx); {
-	case cause == nil: // the loop ended on its own: keep its error
-	case errors.Is(cause, errSubscriptionClosed):
-		err = nil
-	case errors.Is(cause, ErrClosed):
-		err = ErrClosed
-	default:
-		// The caller's context: report its plain error, so errors.Is works
-		// whatever cancellation cause the caller attached.
-		err = lq.parent.Err()
-	}
-	lq.db.hub.Unregister(lq.watcher)
-	lq.db.untrack(lq.sub)
-	lq.sub.cancel(nil) // release the context if the loop ended on its own
-	lq.sub.err = err
-	close(lq.sub.changes)
-	close(lq.sub.done)
-}
-
-func (lq *liveQuery) loop(initial [][]any) error {
-	if !lq.send(Change{Added: initial, Initial: true}) {
-		return nil
-	}
+// next waits for the next evaluation that changed the result. It returns nil
+// when the context ended. A wake-up that arrives while the caller is busy
+// delivering stays pending, so the next evaluation covers every commit since.
+func (lq *liveQuery) next() (*evaluation, error) {
 	for {
 		select {
 		case <-lq.ctx.Done():
-			return nil
+			return nil, nil
 		case <-lq.watcher.Dirty():
 		}
-		added, removed, err := lq.evaluate()
+		ev, err := lq.evaluate()
 		if err != nil {
-			return fmt.Errorf("subscription: %w", err)
+			if lq.ctx.Err() != nil {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("subscription: %w", err)
 		}
-		if len(added) == 0 && len(removed) == 0 {
-			continue
+		if len(ev.added) > 0 || len(ev.removed) > 0 {
+			return ev, nil
 		}
-		if !lq.send(Change{Added: added, Removed: removed}) {
-			return nil
-		}
-	}
-}
-
-// send delivers c, or reports false if the subscription ended first.
-func (lq *liveQuery) send(c Change) bool {
-	select {
-	case lq.sub.changes <- c:
-		return true
-	case <-lq.ctx.Done():
-		return false
 	}
 }
 

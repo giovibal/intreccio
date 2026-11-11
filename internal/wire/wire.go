@@ -11,6 +11,12 @@
 // Error frame closes it; stream 0 is reserved for connection-level frames
 // (Ping / Pong).
 //
+// Two kinds of stream exist. A query stream is Query, then Result, Rows* and
+// End. A subscription stream is Subscribe, then Result and an open-ended
+// sequence of batches, each made of one or more Change frames and acknowledged
+// by the subscriber with an Ack before the next is sent; the subscriber ends it
+// with Cancel, the server with Error.
+//
 // The package holds only the encoding: it does no I/O scheduling and knows
 // nothing about Cypher. Query parameters and result rows travel as opaque
 // bytes in the root package's canonical row encoding (ADR 0012).
@@ -77,6 +83,13 @@ const (
 	// FramePing and FramePong are the keepalive, on stream 0.
 	FramePing
 	FramePong
+	// FrameSubscribe opens a live-query stream: its payload is a
+	// SubscribeRequest.
+	FrameSubscribe
+	// FrameChange carries a Batch, or part of one, of a live query.
+	FrameChange
+	// FrameAck tells the server the subscriber is ready for the next batch.
+	FrameAck
 
 	frameTypeEnd // one past the last known type
 )
@@ -322,6 +335,12 @@ const (
 	CodeGeneric Code = iota
 	// CodeResultLimit means the result exceeded Request.MaxRows.
 	CodeResultLimit
+	// CodeUnavailable means this member cannot serve the request right now
+	// (it is shutting down, say); another member may.
+	CodeUnavailable
+	// CodeBehind means this member has not yet applied the index a subscriber
+	// asked it to start after; another member may have.
+	CodeBehind
 )
 
 // Error is a failure reported by the member that ran a request.
@@ -418,4 +437,143 @@ func (d *decoder) finish(what string) error {
 		return fmt.Errorf("%w: %s: %d trailing bytes", ErrProtocol, what, len(d.b)-d.i)
 	}
 	return nil
+}
+
+// SubscribeRequest opens a live query on a member.
+type SubscribeRequest struct {
+	Request
+	// AfterIndex, when non-zero, is the applied index of the last batch the
+	// subscriber saw from another member. The serving member must have applied
+	// at least that much before it answers, so the subscriber never sees the
+	// result move backwards.
+	AfterIndex uint64
+}
+
+// EncodeSubscribe serializes r: uvarint(afterIndex) bytes(request).
+func EncodeSubscribe(r SubscribeRequest) []byte {
+	return appendBytes(binary.AppendUvarint(nil, r.AfterIndex), EncodeRequest(r.Request))
+}
+
+// DecodeSubscribe is the inverse of EncodeSubscribe.
+func DecodeSubscribe(b []byte) (SubscribeRequest, error) {
+	d := decoder{b: b}
+	after := d.uvarint()
+	inner := d.bytes()
+	if err := d.finish("subscribe"); err != nil {
+		return SubscribeRequest{}, err
+	}
+	req, err := DecodeRequest(inner)
+	if err != nil {
+		return SubscribeRequest{}, err
+	}
+	return SubscribeRequest{Request: req, AfterIndex: after}, nil
+}
+
+// Batch is one batch of changes to a live query's result, with rows as opaque
+// bytes. It mirrors intreccio.Change.
+type Batch struct {
+	// Initial marks a full result rather than a difference: every row is in
+	// Added, in the order the query produced it.
+	Initial bool
+	// More marks a Change frame that does not complete its batch: the frames
+	// that follow, up to one without More, belong to the same batch.
+	More bool
+	// Index is the applied index of the state the batch reflects.
+	Index uint64
+	// Added and Removed are the rows that entered and left the result.
+	Added   [][]byte
+	Removed [][]byte
+}
+
+const (
+	batchInitial byte = 1 << iota
+	batchMore
+
+	knownBatchFlags = batchInitial | batchMore
+)
+
+// EncodeBatch serializes b: flags(1) uvarint(index) rows(added) rows(removed).
+func EncodeBatch(b Batch) []byte {
+	var flags byte
+	if b.Initial {
+		flags |= batchInitial
+	}
+	if b.More {
+		flags |= batchMore
+	}
+	out := binary.AppendUvarint([]byte{flags}, b.Index)
+	out = appendBytes(out, EncodeRows(b.Added))
+	return appendBytes(out, EncodeRows(b.Removed))
+}
+
+// DecodeBatch is the inverse of EncodeBatch.
+func DecodeBatch(b []byte) (Batch, error) {
+	d := decoder{b: b}
+	flags := d.byte()
+	index := d.uvarint()
+	added := d.bytes()
+	removed := d.bytes()
+	if err := d.finish("batch"); err != nil {
+		return Batch{}, err
+	}
+	if flags&^knownBatchFlags != 0 {
+		return Batch{}, fmt.Errorf("%w: batch: unknown flags 0x%02x", ErrProtocol, flags)
+	}
+	out := Batch{Initial: flags&batchInitial != 0, More: flags&batchMore != 0, Index: index}
+	var err error
+	if out.Added, err = DecodeRows(added); err != nil {
+		return Batch{}, err
+	}
+	if out.Removed, err = DecodeRows(removed); err != nil {
+		return Batch{}, err
+	}
+	return out, nil
+}
+
+// SplitBatch splits b into parts whose rows total at most target bytes each,
+// so that a large batch — an initial result, typically — travels as several
+// Change frames. Every part but the last has More set; removed rows come
+// before added ones. A batch with no rows is still one part.
+func SplitBatch(b Batch, target int) []Batch {
+	var parts []Batch
+	for _, chunk := range ChunkRows(b.Removed, target) {
+		parts = append(parts, Batch{Initial: b.Initial, Index: b.Index, Removed: chunk})
+	}
+	for _, chunk := range ChunkRows(b.Added, target) {
+		parts = append(parts, Batch{Initial: b.Initial, Index: b.Index, Added: chunk})
+	}
+	if len(parts) == 0 {
+		parts = []Batch{{Initial: b.Initial, Index: b.Index}}
+	}
+	for i := range len(parts) - 1 {
+		parts[i].More = true
+	}
+	return parts
+}
+
+// Merge appends the rows of part to b, which accumulates the parts of one
+// batch as they arrive.
+func (b *Batch) Merge(part Batch) {
+	b.Initial = part.Initial
+	b.Index = part.Index
+	b.More = part.More
+	b.Added = append(b.Added, part.Added...)
+	b.Removed = append(b.Removed, part.Removed...)
+}
+
+// BatchSink is where a member serving a live query sends its output.
+type BatchSink interface {
+	// Columns sends the column names; it is called once, before any batch.
+	Columns(cols []string) error
+	// Batch sends one batch and returns once the subscriber is ready for the
+	// next. While it blocks, further changes should be coalesced, not queued.
+	Batch(b Batch) error
+}
+
+// BatchStream is the subscriber's end of a live query.
+type BatchStream interface {
+	// Recv returns the next batch, blocking until there is one. Calling it
+	// signals that the previous batch has been consumed. It returns an error
+	// when the stream has ended.
+	Recv() (Batch, error)
 }

@@ -67,7 +67,8 @@ connection per member address).
   answers, even on a mismatch, so the dialler reports which version it met.
   A peer that does not send the magic is dropped without a reply.
 - **Frames**: `Query` (opens a stream), `Result` (column names), `Rows`
-  (a chunk of rows), `End`, `Error`, `Cancel`, and `Ping` / `Pong` on stream 0.
+  (a chunk of rows), `End`, `Error`, `Cancel`, `Ping` / `Pong` on stream 0, and
+  `Subscribe`, `Change`, `Ack` for live queries (below).
   The dialling side allocates stream IDs. A frame the receiver may not be sent
   closes the connection.
 - **Request**: flags (write, linearizable), row cap, relative timeout, query
@@ -88,6 +89,43 @@ connection per member address).
 - **Retry**: as before, a request whose connection fails before the reply is
   complete is retried once on a fresh connection, and a dataless client then
   moves on to the next voter. See the caveat below.
+
+### Subscriptions as implemented
+A subscription is a second kind of stream, served by any voter from its own
+replica (there is nothing to proxy to the leader):
+
+    Subscribe  ->
+               <-  Result            column names
+               <-  Change+           one batch, in one or more frames
+    Ack        ->                    "ready for the next batch"
+               <-  Change+ ...
+    Cancel     ->                    or  <- Error
+
+- **Flow control is one batch at a time.** The voter sends a batch and waits
+  for the `Ack`, which the client sends when the application has taken the
+  batch. A slow application therefore holds the query on the voter, where
+  commits coalesce (ADR 0010), and can never fill the connection its
+  subscription shares with the client's other requests. A large batch — an
+  initial result — is split over several `Change` frames.
+- **The applied index is stored with the data.** `fsm.Apply` writes the Raft
+  index of each write in the same transaction (catalog key `A`), so every
+  evaluation reads the exact index of the state it saw, and every batch
+  carries it. This replaces the "upper bound" of the original decision: an
+  in-memory counter cannot be exact across a snapshot restore.
+- **Failover** is in the client (`cluster/remote_sub.go`). It keeps a mirror of
+  the result as a multiset of encoded rows. When the stream is lost, or the
+  voter answers that it cannot serve (`CodeUnavailable`), the client
+  resubscribes to the next voter with the last index it saw. That voter waits
+  up to 5 s to have applied it (else `CodeBehind`), then sends its result; the
+  client diffs it against the mirror and passes on only the difference — or
+  nothing. An error about the query itself (`CodeGeneric`, `CodeResultLimit`)
+  ends the subscription instead.
+- **Bounds**: the client retries over the voters with backoff for 30 s, then
+  ends the subscription with an error. If *every* voter answers `CodeBehind`,
+  the cluster itself went back (a restore): the client drops the index
+  requirement and follows it rather than stall.
+- **Cleanup**: when the client cancels, closes or just disappears (keepalive),
+  the stream's context ends and the voter unregisters the watcher.
 
 What it does **not** do yet: a result is chunked on the wire but still
 materialised on both ends — the executor returns whole results. Streaming rows

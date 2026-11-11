@@ -321,3 +321,138 @@ func FuzzDecodeMessages(f *testing.F) {
 		}
 	})
 }
+
+func genBatch(r *rand.Rand) Batch {
+	rows := func() [][]byte {
+		out := make([][]byte, r.Intn(6))
+		for i := range out {
+			out[i] = randBytes(r, 40)
+		}
+		return out
+	}
+	return Batch{Initial: r.Intn(2) == 0, More: r.Intn(2) == 0, Index: r.Uint64(), Added: rows(), Removed: rows()}
+}
+
+func sameRows(a, b [][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestSubscribeAndBatchRoundTrip(t *testing.T) {
+	prop := func(seed int64) bool {
+		r := rand.New(rand.NewSource(seed))
+		sub := SubscribeRequest{Request: genRequest(r), AfterIndex: r.Uint64()}
+		gotSub, err := DecodeSubscribe(EncodeSubscribe(sub))
+		if err != nil || gotSub.AfterIndex != sub.AfterIndex || gotSub.Cypher != sub.Cypher ||
+			!bytes.Equal(gotSub.Params, sub.Params) || gotSub.MaxRows != sub.MaxRows {
+			return false
+		}
+		b := genBatch(r)
+		got, err := DecodeBatch(EncodeBatch(b))
+		return err == nil && got.Initial == b.Initial && got.More == b.More && got.Index == b.Index &&
+			sameRows(got.Added, b.Added) && sameRows(got.Removed, b.Removed)
+	}
+	if err := quick.Check(prop, &quick.Config{MaxCount: 500}); err != nil {
+		t.Error(err)
+	}
+
+	r := rand.New(rand.NewSource(5))
+	for name, enc := range map[string][]byte{
+		"subscribe": EncodeSubscribe(SubscribeRequest{Request: genRequest(r), AfterIndex: 7}),
+		"batch":     EncodeBatch(Batch{Initial: true, Index: 9, Added: [][]byte{{1}, {2, 3}}, Removed: [][]byte{{4}}}),
+	} {
+		decode := func(b []byte) error {
+			if name == "subscribe" {
+				_, err := DecodeSubscribe(b)
+				return err
+			}
+			_, err := DecodeBatch(b)
+			return err
+		}
+		for cut := range len(enc) {
+			if decode(enc[:cut]) == nil {
+				t.Errorf("%s: a %d/%d-byte prefix decoded", name, cut, len(enc))
+			}
+		}
+		if decode(append(append([]byte(nil), enc...), 0)) == nil {
+			t.Errorf("%s: a trailing byte was accepted", name)
+		}
+	}
+	if _, err := DecodeBatch([]byte{0xf0, 0, 1, 0, 1, 0}); err == nil {
+		t.Error("batch with unknown flags: want an error")
+	}
+}
+
+// TestSplitBatchReassembles checks that a batch split into parts and merged
+// back is the batch itself, that only the last part ends it, and that parts
+// respect the size target.
+func TestSplitBatchReassembles(t *testing.T) {
+	prop := func(seed int64) bool {
+		r := rand.New(rand.NewSource(seed))
+		b := genBatch(r)
+		b.More = false
+		target := 1 + r.Intn(120)
+		parts := SplitBatch(b, target)
+		if len(parts) == 0 {
+			return false
+		}
+		var got Batch
+		for i, p := range parts {
+			if p.More != (i < len(parts)-1) {
+				t.Logf("part %d/%d: More = %v", i, len(parts), p.More)
+				return false
+			}
+			if n := len(p.Added) + len(p.Removed); n > 1 {
+				size := 0
+				for _, row := range append(append([][]byte{}, p.Added...), p.Removed...) {
+					size += len(row)
+				}
+				if size > target {
+					t.Logf("part of %d rows and %d bytes over target %d", n, size, target)
+					return false
+				}
+			}
+			// Each part survives the wire on its own.
+			dec, err := DecodeBatch(EncodeBatch(p))
+			if err != nil {
+				return false
+			}
+			got.Merge(dec)
+		}
+		return got.Initial == b.Initial && got.Index == b.Index && !got.More &&
+			sameRows(got.Added, b.Added) && sameRows(got.Removed, b.Removed)
+	}
+	if err := quick.Check(prop, &quick.Config{MaxCount: 500}); err != nil {
+		t.Error(err)
+	}
+
+	parts := SplitBatch(Batch{Initial: true, Index: 3}, 100)
+	if len(parts) != 1 || !parts[0].Initial || parts[0].Index != 3 || parts[0].More {
+		t.Errorf("empty batch split into %+v, want one empty part", parts)
+	}
+}
+
+func FuzzDecodeSubscription(f *testing.F) {
+	f.Add(EncodeSubscribe(SubscribeRequest{Request: Request{Cypher: "MATCH (n) RETURN n"}, AfterIndex: 4}))
+	f.Add(EncodeBatch(Batch{Initial: true, Index: 2, Added: [][]byte{{1}}, Removed: [][]byte{{2}}}))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if sub, err := DecodeSubscribe(data); err == nil {
+			if again, err := DecodeSubscribe(EncodeSubscribe(sub)); err != nil || again.AfterIndex != sub.AfterIndex {
+				t.Fatalf("subscribe does not survive re-encoding: %v", err)
+			}
+		}
+		if b, err := DecodeBatch(data); err == nil {
+			again, err := DecodeBatch(EncodeBatch(b))
+			if err != nil || again.Index != b.Index || !sameRows(again.Added, b.Added) || !sameRows(again.Removed, b.Removed) {
+				t.Fatalf("batch does not survive re-encoding: %v", err)
+			}
+		}
+	})
+}

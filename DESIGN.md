@@ -145,6 +145,10 @@ needed.
   `c`.
 - **Index registry**: which `(label, propKey)` pairs have an active `p` index, so
   the write path knows which indexes to maintain.
+- **Applied index** (clustered voters only): the Raft index of the last applied
+  write, stored in the same transaction as the write under key `A`. A reader
+  thus knows exactly which index its snapshot reflects (ADR 0011). It is
+  node-local bookkeeping, not part of the replicated write-set.
 
 ## 7. Transactions and consistency invariants
 

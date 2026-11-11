@@ -62,6 +62,9 @@ func New(be Backend) *DB {
 	if s, ok := be.(localExecutorSetter); ok {
 		s.SetLocalExecutor(db.executeLocal)
 	}
+	if s, ok := be.(localSubscriberSetter); ok {
+		s.SetLocalSubscriber(db.serveSubscription)
+	}
 	return db
 }
 

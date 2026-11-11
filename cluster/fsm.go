@@ -9,6 +9,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/storage"
 )
@@ -49,7 +50,15 @@ func (f *fsm) Apply(l *raft.Log) any {
 	if l.Type != raft.LogCommand {
 		return nil
 	}
-	apply := func(txn storage.Txn) error { return applyWriteSet(l.Data, txn) }
+	apply := func(txn storage.Txn) error {
+		if err := applyWriteSet(l.Data, txn); err != nil {
+			return err
+		}
+		// Recorded with the data it describes, so a reader always knows
+		// exactly which index its snapshot reflects. A dataless client's
+		// subscription relies on it to change voter without going backwards.
+		return catalog.SetAppliedIndex(txn, l.Index)
+	}
 	if hub := f.hub.Load(); hub != nil {
 		// Commits through the store, then reports the write to the watchers.
 		return hub.Update(f.store, apply)

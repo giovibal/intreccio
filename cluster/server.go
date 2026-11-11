@@ -17,12 +17,17 @@ import (
 // deadline passes.
 type requestHandler func(ctx context.Context, req wire.Request) ([]string, [][]byte, error)
 
+// subscriptionHandler runs one live query on this member, sending its output to
+// sink until ctx ends or the query fails.
+type subscriptionHandler func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error
+
 // forwardServer is the accepting side of the forwarding protocol: it serves
 // the requests other members send to this one.
 type forwardServer struct {
-	ln      net.Listener
-	handler requestHandler
-	ka      keepalive
+	ln        net.Listener
+	handler   requestHandler
+	subscribe subscriptionHandler // nil: this member serves no live queries
+	ka        keepalive
 
 	mu     sync.Mutex
 	conns  map[*serverConn]struct{}
@@ -49,7 +54,7 @@ func (s *forwardServer) accept() {
 			return // the listener was closed
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		c := &serverConn{srv: s, conn: conn, ctx: ctx, cancel: cancel, streams: map[uint32]context.CancelFunc{}}
+		c := &serverConn{srv: s, conn: conn, ctx: ctx, cancel: cancel, streams: map[uint32]*serverStream{}}
 
 		s.mu.Lock()
 		if s.closed {
@@ -99,7 +104,15 @@ type serverConn struct {
 	wmu sync.Mutex // serializes frame writes
 
 	mu      sync.Mutex
-	streams map[uint32]context.CancelFunc // requests in flight
+	streams map[uint32]*serverStream // requests and subscriptions in flight
+}
+
+// serverStream is one stream being served.
+type serverStream struct {
+	cancel context.CancelFunc
+	// acks receives the subscriber's acknowledgements on a subscription
+	// stream. It holds at most one: an Ack means "ready for the next batch".
+	acks chan struct{}
 }
 
 func (c *serverConn) close() {
@@ -143,15 +156,23 @@ func (c *serverConn) run() {
 				return
 			}
 		case wire.FrameQuery:
-			if !c.begin(f) {
+			if !c.begin(f, c.serve) {
 				return
 			}
+		case wire.FrameSubscribe:
+			if !c.begin(f, c.serveSubscription) {
+				return
+			}
+		case wire.FrameAck:
+			if st := c.stream(f.Stream); st != nil {
+				select {
+				case st.acks <- struct{}{}:
+				default: // an Ack is already pending
+				}
+			}
 		case wire.FrameCancel:
-			c.mu.Lock()
-			cancel := c.streams[f.Stream]
-			c.mu.Unlock()
-			if cancel != nil {
-				cancel()
+			if st := c.stream(f.Stream); st != nil {
+				st.cancel()
 			}
 		default:
 			return // a frame only this side may send: protocol violation
@@ -159,20 +180,27 @@ func (c *serverConn) run() {
 	}
 }
 
-// begin starts serving the request in f on its own goroutine. It reports false
-// on a protocol violation.
-func (c *serverConn) begin(f wire.Frame) bool {
+func (c *serverConn) stream(id uint32) *serverStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.streams[id]
+}
+
+// begin starts serving the stream opened by f on its own goroutine. It reports
+// false on a protocol violation.
+func (c *serverConn) begin(f wire.Frame, serve func(ctx context.Context, st *serverStream, stream uint32, payload []byte)) bool {
 	if f.Stream == 0 {
 		return false
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
+	st := &serverStream{cancel: cancel, acks: make(chan struct{}, 1)}
 	c.mu.Lock()
 	if _, dup := c.streams[f.Stream]; dup {
 		c.mu.Unlock()
 		cancel()
 		return false
 	}
-	c.streams[f.Stream] = cancel
+	c.streams[f.Stream] = st
 	c.mu.Unlock()
 
 	c.srv.wg.Add(1)
@@ -184,12 +212,12 @@ func (c *serverConn) begin(f wire.Frame) bool {
 			c.mu.Unlock()
 			cancel()
 		}()
-		c.serve(ctx, f.Stream, f.Payload)
+		serve(ctx, st, f.Stream, f.Payload)
 	}()
 	return true
 }
 
-func (c *serverConn) serve(ctx context.Context, stream uint32, payload []byte) {
+func (c *serverConn) serve(ctx context.Context, _ *serverStream, stream uint32, payload []byte) {
 	req, err := wire.DecodeRequest(payload)
 	if err != nil {
 		c.reply(ctx, stream, nil, nil, err)
@@ -202,6 +230,70 @@ func (c *serverConn) serve(ctx context.Context, stream uint32, payload []byte) {
 	}
 	cols, rows, err := c.srv.handler(ctx, req)
 	c.reply(ctx, stream, cols, rows, err)
+}
+
+// serveSubscription runs a live query for the subscriber on the other end. It
+// ends when the subscriber cancels or disconnects, or when the query fails, in
+// which case the subscriber is told why.
+func (c *serverConn) serveSubscription(ctx context.Context, st *serverStream, stream uint32, payload []byte) {
+	req, err := wire.DecodeSubscribe(payload)
+	if err == nil && c.srv.subscribe == nil {
+		err = &wire.Error{Code: wire.CodeUnavailable, Msg: "cluster: this member serves no live queries"}
+	}
+	if err == nil {
+		err = c.srv.subscribe(ctx, req, &streamSink{c: c, ctx: ctx, st: st, stream: stream})
+	}
+	if errors.Is(context.Cause(ctx), context.Canceled) {
+		return // cancelled or disconnected: nobody is listening
+	}
+	if err == nil {
+		_ = c.write(stream, wire.FrameEnd, nil)
+		return
+	}
+	c.replyError(stream, err)
+}
+
+// streamSink sends a live query's output down one stream.
+type streamSink struct {
+	c      *serverConn
+	ctx    context.Context
+	st     *serverStream
+	stream uint32
+}
+
+func (s *streamSink) Columns(cols []string) error {
+	return s.c.write(s.stream, wire.FrameResult, wire.EncodeColumns(cols))
+}
+
+// Batch sends b, split over as many Change frames as its size needs, then
+// waits for the subscriber's Ack. That wait is the flow control: a subscriber
+// that is slow to consume holds the live query here, where further commits
+// coalesce, instead of filling the connection it shares with other streams.
+func (s *streamSink) Batch(b wire.Batch) error {
+	for _, part := range wire.SplitBatch(b, wire.RowsChunkTarget) {
+		payload := wire.EncodeBatch(part)
+		if len(payload) > wire.MaxPayload {
+			return fmt.Errorf("cluster: a result row exceeds the %d-byte frame limit", wire.MaxPayload)
+		}
+		if err := s.c.write(s.stream, wire.FrameChange, payload); err != nil {
+			return err
+		}
+	}
+	select {
+	case <-s.st.acks:
+		return nil
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
+}
+
+// replyError sends err as an Error frame, keeping its code if it has one.
+func (c *serverConn) replyError(stream uint32, err error) {
+	var remote *wire.Error
+	if !errors.As(err, &remote) {
+		remote = &wire.Error{Code: wire.CodeGeneric, Msg: err.Error()}
+	}
+	_ = c.write(stream, wire.FrameError, wire.EncodeError(remote))
 }
 
 // reply sends the outcome of a request: an Error frame, or the columns, the
@@ -219,11 +311,7 @@ func (c *serverConn) reply(ctx context.Context, stream uint32, cols []string, ro
 		}
 	}
 	if err != nil {
-		var remote *wire.Error
-		if !errors.As(err, &remote) {
-			remote = &wire.Error{Code: wire.CodeGeneric, Msg: err.Error()}
-		}
-		_ = c.write(stream, wire.FrameError, wire.EncodeError(remote))
+		c.replyError(stream, err)
 		return
 	}
 	if c.write(stream, wire.FrameResult, wire.EncodeColumns(cols)) != nil {

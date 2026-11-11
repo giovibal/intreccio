@@ -61,6 +61,7 @@ type Node struct {
 	// localExec is set once the owning DB exists, possibly while the forward
 	// server is already accepting, hence the atomic pointer.
 	localExec    atomic.Pointer[localExecutor]
+	localSub     atomic.Pointer[localSubscriber]
 	applyTimeout time.Duration
 	// tlsServer/tlsClient are nil on a plaintext cluster.
 	tlsServer *tls.Config
@@ -254,6 +255,13 @@ func (n *Node) Local() bool { return true }
 func (n *Node) SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error)) {
 	exec := localExecutor(fn)
 	n.localExec.Store(&exec)
+}
+
+// SetLocalSubscriber wires the root package's live-query server, used to run
+// the live queries dataless clients subscribe to on this node.
+func (n *Node) SetLocalSubscriber(fn func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error) {
+	sub := localSubscriber(fn)
+	n.localSub.Store(&sub)
 }
 
 // SetChangeHub wires the hub of the owning DB into the FSM, which reports every

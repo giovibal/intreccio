@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -222,16 +221,4 @@ func TestSubscriptionFollowsSnapshotRestore(t *testing.T) {
 	run(t, tc.dbs[tc.leaderIndex(t)], "CREATE (:Person {name: 'Dee'})")
 	onLeader.until(t, "Ann", "Bob", "Dee")
 	onFollower.until(t, "Ann", "Bob", "Dee")
-}
-
-// TestClientSubscribeUnsupported pins the current limit: a dataless client
-// cannot subscribe until the streaming transport exists (ADR 0011).
-func TestClientSubscribeUnsupported(t *testing.T) {
-	tc := startCluster(t, 3)
-	tc.leaderIndex(t)
-	clientDB := tc.openClient(t, "client-live")
-	_, err := clientDB.Subscribe(context.Background(), liveNames, nil)
-	if !errors.Is(err, intreccio.ErrSubscribeUnsupported) {
-		t.Fatalf("client Subscribe error = %v, want ErrSubscribeUnsupported", err)
-	}
 }

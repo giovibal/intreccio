@@ -48,6 +48,21 @@ func (n *Node) serve(ctx context.Context, req wire.Request) ([]string, [][]byte,
 	return (*exec)(ctx, req)
 }
 
+// localSubscriber runs a live query on this node for a subscriber elsewhere. It
+// is injected by the root package, like localExecutor.
+type localSubscriber func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error
+
+// serveSubscription serves a live query to another member — a dataless client —
+// from this voter's own replica. Any voter can: a live query follows the local
+// apply stream, so there is nothing to proxy to the leader.
+func (n *Node) serveSubscription(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error {
+	sub := n.localSub.Load()
+	if sub == nil {
+		return &wire.Error{Code: wire.CodeUnavailable, Msg: "cluster: no live-query server wired"}
+	}
+	return (*sub)(ctx, req, sink)
+}
+
 // startForwardServer starts serving forwarded requests on cfg.ForwardAddr.
 func (n *Node) startForwardServer() error {
 	var (
@@ -63,6 +78,7 @@ func (n *Node) startForwardServer() error {
 		return fmt.Errorf("cluster: forward listen: %w", err)
 	}
 	n.fwd = newForwardServer(l, n.serve)
+	n.fwd.subscribe = n.serveSubscription
 	n.fwd.start()
 	return nil
 }

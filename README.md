@@ -171,10 +171,15 @@ Each relevant commit re-runs the query, so live queries suit selective queries
 on a modest number of subscriptions; a write that cannot affect a query (other
 labels, relationship types or properties) does not wake it.
 
-Live queries work on embedded databases and on cluster **voters**. Each voter
-serves its subscriptions from its own replica, so they keep working across a
-leader change; on a follower the result may briefly trail the leader's. A
-dataless client cannot subscribe yet (see ADR 0011).
+Live queries work on embedded databases and on every cluster member. Each
+**voter** serves its subscriptions from its own replica, so they keep working
+across a leader change; on a follower the result may briefly trail the
+leader's. A dataless **client** has a voter evaluate the query for it. If that
+voter is lost the subscription moves to another one by itself and the
+application sees only the net difference, if any — never the whole result
+again, and never an older state. To make that possible the client keeps a copy
+of the result in memory, and it gives up (the subscription ends with an error)
+only if no voter can take over for 30 seconds.
 
 ### Use the CLI / REPL
 

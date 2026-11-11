@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"sync/atomic"
+	"time"
 
 	"github.com/giovibal/intreccio/internal/storage"
 	"github.com/giovibal/intreccio/internal/wire"
@@ -18,6 +19,9 @@ type client struct {
 	peers []Peer // voters to contact (each with a ForwardAddr)
 	next  atomic.Uint64
 	pool  *connPool
+	// failoverTimeout bounds how long a live query that lost its voter keeps
+	// looking for another one.
+	failoverTimeout time.Duration
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -42,7 +46,7 @@ func newClient(cfg Config) (*client, error) {
 			return nil, err
 		}
 	}
-	return &client{peers: voters, pool: newConnPool(tlsClient)}, nil
+	return &client{peers: voters, pool: newConnPool(tlsClient), failoverTimeout: defaultFailoverTimeout}, nil
 }
 
 // IsLeader is always false for a client.

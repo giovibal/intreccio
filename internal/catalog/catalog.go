@@ -8,6 +8,8 @@
 //	K + name                     -> id(4)    property-key dictionary
 //	R + kind(1) + id(4)          -> name     dictionary reverse
 //	X + label(4) + propKey(4)    -> {}       registry of active `p` indexes
+//	A                            -> uint64   applied Raft index (clustered voters only)
+//	F                            -> uint32   on-disk format version
 //
 // IDs start at 1; ID 0 is reserved as "none".
 package catalog
