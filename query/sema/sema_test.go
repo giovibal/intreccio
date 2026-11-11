@@ -214,3 +214,72 @@ func TestStreamMustBeReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestOrderByScope covers #75: what the sort keys of a RETURN / WITH may read.
+func TestOrderByScope(t *testing.T) {
+	valid := []string{
+		// A plain projection: the variables before it are still readable.
+		"MATCH (p) RETURN p.name AS name ORDER BY p.score",
+		"MATCH (p) RETURN p.name AS name ORDER BY name, p.score DESC",
+		"MATCH (p) WITH p.name AS name ORDER BY p.score RETURN name",
+		"MATCH (p) WITH p.name AS name ORDER BY p.score LIMIT 2 RETURN name",
+		"MATCH (p)-[r]->(q) RETURN q.name AS name ORDER BY r.since, p.name",
+		"MATCH (p) RETURN * ORDER BY p.score",
+		// DISTINCT / aggregation: projected columns and expressions only.
+		"MATCH (p) RETURN DISTINCT p.age AS age ORDER BY age",
+		"MATCH (p) RETURN DISTINCT p.age ORDER BY p.age",
+		"MATCH (p) RETURN DISTINCT p ORDER BY p.age",
+		"MATCH (p) RETURN DISTINCT p.age + 1 AS next ORDER BY p.age + 1",
+		"MATCH (p) RETURN p.city AS city, count(*) AS n ORDER BY n DESC, city",
+		"MATCH (p) RETURN p.city AS city, count(*) AS n ORDER BY count(*) DESC, p.city",
+		"MATCH (p) RETURN p.city, count(*) ORDER BY count(*) + 1",
+		"MATCH (p) RETURN p, count(*) AS n ORDER BY p.name",
+		"MATCH (p) WITH p.city AS city, count(*) AS n ORDER BY count(*) RETURN city",
+		"MATCH (p) WITH DISTINCT p.city AS city ORDER BY p.city RETURN city",
+	}
+	for _, src := range valid {
+		t.Run(src, func(t *testing.T) {
+			if _, err := analyze(t, src); err != nil {
+				t.Errorf("Analyze(%q): %v", src, err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		src  string
+		want string // substring of the message
+		col  int    // 0 = not checked
+	}{
+		{"MATCH (p) RETURN DISTINCT p.name AS name ORDER BY p.score", "ORDER BY cannot use variable p", 51},
+		{"MATCH (p) RETURN DISTINCT p.name ORDER BY p.score", "ORDER BY cannot use variable p", 0},
+		{"MATCH (p) RETURN p.city AS city, count(*) AS n ORDER BY p.score", "ORDER BY cannot use variable p", 0},
+		{"MATCH (p) RETURN count(*) AS n ORDER BY p.score", "ORDER BY cannot use variable p", 0},
+		{"MATCH (p) WITH DISTINCT p.name AS name ORDER BY p.score RETURN name", "ORDER BY cannot use variable p", 0},
+		{"MATCH (p) WITH p.city AS city, count(*) AS n ORDER BY p.score RETURN city", "ORDER BY cannot use variable p", 0},
+		// An aggregation that is not projected cannot be a sort key.
+		{"MATCH (p) RETURN p.city AS city, count(*) AS n ORDER BY sum(p.score)", "ORDER BY cannot compute sum", 0},
+		{"MATCH (p) RETURN p.name AS name ORDER BY count(*)", "ORDER BY cannot compute count", 0},
+		// Still plain undefined variables.
+		{"MATCH (p) RETURN p.name AS name ORDER BY q.score", "undefined variable: q", 0},
+		{"MATCH (p) RETURN DISTINCT p.name AS name ORDER BY q.score", "undefined variable: q", 0},
+		// WHERE of a WITH still sees the projected columns only.
+		{"MATCH (p) WITH p.name AS name WHERE p.score > 1 RETURN name", "undefined variable: p", 0},
+		// A variable dropped by WITH stays dropped for later clauses.
+		{"MATCH (p) WITH p.name AS name ORDER BY p.score RETURN p", "undefined variable: p", 0},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.src, func(t *testing.T) {
+			_, err := analyze(t, tc.src)
+			se, ok := err.(*SemaError)
+			if !ok {
+				t.Fatalf("Analyze(%q) = %v, want a *SemaError", tc.src, err)
+			}
+			if !strings.Contains(se.Msg, tc.want) {
+				t.Errorf("message = %q, want it to contain %q", se.Msg, tc.want)
+			}
+			if tc.col != 0 && se.Pos.Col != tc.col {
+				t.Errorf("column = %d, want %d", se.Pos.Col, tc.col)
+			}
+		})
+	}
+}

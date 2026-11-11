@@ -181,7 +181,10 @@ Included in v1:
 - `MATCH` with node/edge patterns, directions, labels and types.
 - `WHERE`: comparisons, `AND`/`OR`/`NOT`, property access, label predicates.
 - `RETURN` with projection, aliases, `DISTINCT`.
-- `ORDER BY`, `SKIP`, `LIMIT`.
+- `ORDER BY`, `SKIP`, `LIMIT`. A sort key may read the projected columns and
+  the variables in scope before the projection; the planner then sorts below
+  the projection. After `DISTINCT` or an aggregation only the projected columns
+  and expressions are left to sort on.
 - `WITH` for chaining and scope reset.
 - **Bounded** variable-length paths: `-[:T*1..3]->`.
 - Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` with implicit
