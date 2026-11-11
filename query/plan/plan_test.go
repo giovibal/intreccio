@@ -359,3 +359,61 @@ func TestAggregatePlan(t *testing.T) {
 		t.Errorf("wrong aggs: %+v", agg.Aggs)
 	}
 }
+
+// TestPlanSeeded checks that a plan seeded with a bound variable starts from an
+// Argument leaf, expands outward from the bound node in either direction, and
+// still enforces that node's own labels and properties.
+func TestPlanSeeded(t *testing.T) {
+	seeded := func(src string, bound ...string) string {
+		t.Helper()
+		q, err := parser.Parse(src)
+		if err != nil {
+			t.Fatalf("parse(%q): %v", src, err)
+		}
+		op, err := PlanSeeded(q, NoIndexes, bound)
+		if err != nil {
+			t.Fatalf("PlanSeeded(%q): %v", src, err)
+		}
+		return Explain(op)
+	}
+	const q = "MATCH (a:Person {vip: true})-[:KNOWS]->(b:Person) RETURN a.name, b.name"
+
+	fromA := seeded(q, "a")
+	for _, want := range []string{"Argument", "Expand(a)-[", "KNOWS", "a:Person", "a.vip"} {
+		if !strings.Contains(fromA, want) {
+			t.Errorf("seeded on a: plan lacks %q:\n%s", want, fromA)
+		}
+	}
+	if strings.Contains(fromA, "Scan") {
+		t.Errorf("seeded on a: plan still scans:\n%s", fromA)
+	}
+
+	fromB := seeded(q, "b")
+	for _, want := range []string{"Argument", "Expand(b)", "b:Person", "a:Person"} {
+		if !strings.Contains(fromB, want) {
+			t.Errorf("seeded on b: plan lacks %q:\n%s", want, fromB)
+		}
+	}
+	if strings.Contains(fromB, "Scan") {
+		t.Errorf("seeded on b: plan still scans:\n%s", fromB)
+	}
+
+	// A part the seed does not reach is still scanned and joined.
+	apart := seeded("MATCH (a:A), (b:B) RETURN a.x, b.y", "a")
+	for _, want := range []string{"CartesianProduct", "Argument", "NodeByLabelScan(b:B)", "a:A"} {
+		if !strings.Contains(apart, want) {
+			t.Errorf("disconnected parts: plan lacks %q:\n%s", want, apart)
+		}
+	}
+	if strings.Contains(apart, "Scan(a") {
+		t.Errorf("disconnected parts: the seeded variable is scanned:\n%s", apart)
+	}
+
+	u, err := parser.Parse("MATCH (a) RETURN a.x AS x UNION MATCH (a) RETURN a.y AS x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanSeeded(u, NoIndexes, []string{"a"}); err == nil {
+		t.Error("PlanSeeded on a UNION query: want an error")
+	}
+}

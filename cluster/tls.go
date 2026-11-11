@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-// TLSConfig enables TLS for a cluster node's Raft transport and forwarding RPC
+// TLSConfig enables TLS for a cluster node's Raft transport and forwarding
 // endpoint. Both are enabled together and share the same key pair, so every
 // inter-node connection (Raft replication and query forwarding) is encrypted.
 //

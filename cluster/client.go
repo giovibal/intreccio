@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"sync/atomic"
+	"time"
 
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 // client is a dataless cluster member: it stores nothing and forwards every
@@ -17,6 +19,9 @@ type client struct {
 	peers []Peer // voters to contact (each with a ForwardAddr)
 	next  atomic.Uint64
 	pool  *connPool
+	// failoverTimeout bounds how long a live query that lost its voter keeps
+	// looking for another one.
+	failoverTimeout time.Duration
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -41,7 +46,7 @@ func newClient(cfg Config) (*client, error) {
 			return nil, err
 		}
 	}
-	return &client{peers: voters, pool: newConnPoolTLS(0, tlsClient)}, nil
+	return &client{peers: voters, pool: newConnPool(tlsClient), failoverTimeout: defaultFailoverTimeout}, nil
 }
 
 // IsLeader is always false for a client.
@@ -53,34 +58,27 @@ func (c *client) Local() bool { return false }
 // ReadBarrier is never invoked on a client (it is not the leader).
 func (c *client) ReadBarrier() error { return nil }
 
-// Forward sends the query to a voter, trying each in turn (round-robin with
+// Forward sends the request to a voter, trying each in turn (round-robin with
 // failover) until one answers. The contacted voter serves default reads locally
 // and proxies writes/linearizable reads to the leader.
-func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
-	args, err := newForwardArgs(ctx, cypher, params, write, linearizable, maxRows)
-	if err != nil {
-		return nil, nil, err
-	}
+func (c *client) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	start := int(c.next.Add(1))
 	var lastErr error
 	for i := range c.peers {
 		p := c.peers[(start+i)%len(c.peers)]
-		rep, err := c.pool.call(ctx, p.ForwardAddr, args)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, nil, err // the caller gave up: no point trying others
-			}
-			lastErr = err
-			continue // voter unreachable: try the next one
+		cols, rows, err := c.pool.call(ctx, p.ForwardAddr, req)
+		if err == nil {
+			return cols, rows, nil
 		}
-		if rep.Err != "" {
-			lastErr = rep.error()
-			if rep.Code != "" {
-				return nil, nil, lastErr // a definite answer (limit, conflict, timeout...)
-			}
-			continue // e.g. no leader momentarily: try another voter
+		if ctx.Err() != nil {
+			return nil, nil, err // the caller gave up: no point trying elsewhere
 		}
-		return rep.Columns, desanitizeRows(rep.Rows), nil
+		var remote *wire.Error
+		if errors.As(err, &remote) && remote.Code != wire.CodeGeneric && !retryable(remote) {
+			return nil, nil, err // a definite answer (limit, conflict, timeout...)
+		}
+		// Voter unreachable, or e.g. no leader momentarily: try the next one.
+		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("cluster: no voters available")

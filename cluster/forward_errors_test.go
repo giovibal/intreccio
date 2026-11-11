@@ -3,11 +3,11 @@ package cluster
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/giovibal/intreccio"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 // TestForwardCarriesDeadlineAndMaxRows covers #32 on the serving side: the
@@ -18,22 +18,22 @@ func TestForwardCarriesDeadlineAndMaxRows(t *testing.T) {
 		gotLeft     time.Duration
 		gotMax      int64
 	)
-	n := &raftNode{localExec: func(ctx context.Context, _ string, _ map[string]any, maxRows int64) ([]string, [][]any, error) {
+	n := &raftNode{}
+	n.SetLocalExecutor(func(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 		var d time.Time
 		d, gotDeadline = ctx.Deadline()
 		gotLeft = time.Until(d)
-		gotMax = maxRows
-		return []string{"x"}, [][]any{{int64(1)}}, nil
-	}}
+		gotMax = req.MaxRows
+		return []string{"x"}, [][]byte{{1}}, nil
+	})
+	// The node's handler behind a real forwarding server: local reads need no Raft.
+	addr, _ := startServer(t, n.serve)
+	pool := newTestPool(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	args, err := newForwardArgs(ctx, "RETURN 1 AS x", nil, false, false, 7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reply ForwardReply
-	if err := (&forwardService{node: n}).Query(args, &reply); err != nil || reply.Err != "" {
-		t.Fatalf("Query: %v / %q", err, reply.Err)
+	if _, _, err := pool.call(ctx, addr, wire.Request{Cypher: "RETURN 1 AS x", MaxRows: 7}); err != nil {
+		t.Fatalf("call: %v", err)
 	}
 	if !gotDeadline || gotLeft <= 0 || gotLeft > 5*time.Second {
 		t.Errorf("executor deadline = %v (set %v), want within 5s", gotLeft, gotDeadline)
@@ -43,8 +43,7 @@ func TestForwardCarriesDeadlineAndMaxRows(t *testing.T) {
 	}
 
 	// Without a caller deadline the executor gets none either.
-	args, _ = newForwardArgs(context.Background(), "RETURN 1 AS x", nil, false, false, 0)
-	if err := (&forwardService{node: n}).Query(args, &reply); err != nil {
+	if _, _, err := pool.call(context.Background(), addr, wire.Request{Cypher: "RETURN 1 AS x"}); err != nil {
 		t.Fatal(err)
 	}
 	if gotDeadline {
@@ -54,27 +53,8 @@ func TestForwardCarriesDeadlineAndMaxRows(t *testing.T) {
 	// An already expired deadline fails before anything is sent.
 	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel2()
-	if _, err := newForwardArgs(expired, "RETURN 1", nil, false, false, 0); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := pool.call(expired, addr, wire.Request{Cypher: "RETURN 1"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expired deadline = %v, want DeadlineExceeded", err)
-	}
-}
-
-func TestForwardErrorRoundTrip(t *testing.T) {
-	for _, w := range wireErrors {
-		var rep ForwardReply
-		rep.setError(fmt.Errorf("query: %w", w.err))
-		if rep.Code != w.code {
-			t.Errorf("%v: code = %q, want %q", w.err, rep.Code, w.code)
-		}
-		err := rep.error()
-		if !errors.Is(err, w.err) || err.Error() != "query: "+w.err.Error() {
-			t.Errorf("%v: round trip = %v", w.err, err)
-		}
-	}
-	var rep ForwardReply
-	rep.setError(errors.New("parse error"))
-	if rep.Code != "" || rep.error().Error() != "parse error" {
-		t.Errorf("plain error round trip = %q / %v", rep.Code, rep.error())
 	}
 }
 

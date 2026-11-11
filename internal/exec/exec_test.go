@@ -1081,3 +1081,77 @@ func TestLimit(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// TestRunSeeded runs a pattern outward from a given node, in both directions,
+// and checks it finds exactly the matches that node takes part in.
+func TestRunSeeded(t *testing.T) {
+	s := newStore(t)
+	runQuery(t, s, "CREATE (a:P {n: 'a'})-[:K]->(b:P {n: 'b'})-[:K]->(c:P {n: 'c'}), (a)-[:K]->(c), (d:Q {n: 'd'})-[:K]->(b)", nil)
+
+	const cypher = "MATCH (x:P)-[:K]->(y:P) RETURN x.n AS x, y.n AS y"
+	q, err := parser.Parse(cypher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded := func(variable, name string) []string {
+		t.Helper()
+		var out []string
+		err := s.View(func(txn storage.Txn) error {
+			ids, err := graph.AllNodes(txn)
+			if err != nil {
+				return err
+			}
+			for _, id := range ids {
+				node, err := graph.GetNode(txn, id)
+				if err != nil {
+					return err
+				}
+				kid, _, _ := catalog.LookupKey(txn, "n")
+				if node.Props[kid] != name {
+					continue
+				}
+				p, err := plan.PlanSeeded(q, testCatalog{txn: txn}, []string{variable})
+				if err != nil {
+					return err
+				}
+				rows, err := RunSeeded(p, []string{"x", "y"}, &Context{Txn: txn}, map[string]any{variable: node})
+				if err != nil {
+					return err
+				}
+				for _, r := range rows {
+					out = append(out, r[0].(string)+">"+r[1].(string))
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("seeded on %s=%s: %v", variable, name, err)
+		}
+		sort.Strings(out)
+		return out
+	}
+	cases := []struct {
+		variable, name string
+		want           []string
+	}{
+		{"x", "a", []string{"a>b", "a>c"}},
+		{"y", "a", nil},
+		{"x", "b", []string{"b>c"}},
+		{"y", "b", []string{"a>b"}}, // d is a Q: (d)-[:K]->(b) does not match x:P
+		{"y", "c", []string{"a>c", "b>c"}},
+		{"x", "d", nil}, // the seed itself fails the label check
+	}
+	for _, c := range cases {
+		got := seeded(c.variable, c.name)
+		if len(got) != len(c.want) {
+			t.Errorf("seeded on %s=%s: %v, want %v", c.variable, c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("seeded on %s=%s: %v, want %v", c.variable, c.name, got, c.want)
+				break
+			}
+		}
+	}
+}

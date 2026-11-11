@@ -3,14 +3,19 @@ package intreccio
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/giovibal/intreccio/internal/backend"
 	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/exec"
 	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/wire"
 	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/parser"
 	"github.com/giovibal/intreccio/query/plan"
@@ -20,6 +25,22 @@ import (
 // DB is the database handle.
 type DB struct {
 	be backend.Backend
+	// hub is the registry of live-query watchers. Commit points report to it;
+	// it costs next to nothing while no watcher is registered.
+	hub *changefeed.Hub
+	// watchable is set when the backend reports its commits to hub, i.e. when
+	// this database can evaluate live queries itself.
+	watchable bool
+
+	mu     sync.Mutex
+	subs   map[*Subscription]struct{} // running subscriptions
+	closed bool
+
+	// liveStats counts live-query evaluations by kind, for tests and benchmarks.
+	liveStats struct {
+		full     atomic.Int64 // the query was run in full
+		anchored atomic.Int64 // the query was re-evaluated around changed nodes
+	}
 }
 
 func init() {
@@ -31,11 +52,39 @@ func init() {
 // forwards leader-bound queries, its local executor is wired here.
 func wrapBackend(be backend.Backend) *DB {
 	db := &DB{be: be}
+	db.hub = changefeed.NewHub(dictionary{view: be.View})
+	if r, ok := be.(changeReporter); ok {
+		r.SetChangeHub(db.hub)
+		db.watchable = true
+	}
 	if s, ok := be.(localExecutorSetter); ok {
-		s.SetLocalExecutor(db.executeLocalText)
+		s.SetLocalExecutor(db.executeLocal)
+	}
+	if s, ok := be.(localSubscriberSetter); ok {
+		s.SetLocalSubscriber(db.serveSubscription)
 	}
 	return db
 }
+
+// dictionary resolves dictionary IDs to names through short read transactions.
+// It is the hub's changefeed.Resolver; the hub caches what it returns.
+type dictionary struct {
+	view func(fn func(storage.Txn) error) error
+}
+
+func (d dictionary) name(resolve func(storage.Txn, uint32) (string, error), id uint32) (string, error) {
+	var name string
+	err := d.view(func(txn storage.Txn) error {
+		var err error
+		name, err = resolve(txn, id)
+		return err
+	})
+	return name, err
+}
+
+func (d dictionary) LabelName(id uint32) (string, error) { return d.name(catalog.LabelName, id) }
+func (d dictionary) TypeName(id uint32) (string, error)  { return d.name(catalog.TypeName, id) }
+func (d dictionary) KeyName(id uint32) (string, error)   { return d.name(catalog.KeyName, id) }
 
 // clusterBackend is the optional capability set of a clustered backend. The core
 // package never imports the clustering package; it discovers these methods via
@@ -46,16 +95,21 @@ type clusterBackend interface {
 	// dataless client returns false, so every query is forwarded.
 	Local() bool
 	ReadBarrier() error
-	// Forward runs the query on another node. ctx's deadline and maxRows (0 =
-	// no cap) apply there too, and known sentinel errors (ErrResultLimit,
-	// ErrConflict, context.DeadlineExceeded, ...) survive the trip.
-	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error)
+	// Forward runs the request on another member and returns its rows in the
+	// canonical row encoding (see rowcodec.go); the backend carries parameters
+	// and rows as opaque bytes. ctx's deadline and cancellation and the
+	// request's MaxRows apply there too, and known sentinel errors
+	// (ErrResultLimit, ErrConflict, context.DeadlineExceeded, ...) survive the
+	// trip as *wire.Error codes.
+	Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error)
 }
 
-// localExecutorSetter lets a backend receive this DB's local executor (used by a
-// leader to run forwarded queries).
+// localExecutorSetter lets a backend receive this DB's local executor (used to
+// run the requests other members forward to it). The executor takes parameters
+// and returns rows in the canonical row encoding, so the backend never needs to
+// know the value model.
 type localExecutorSetter interface {
-	SetLocalExecutor(fn func(ctx context.Context, cypher string, params map[string]any, maxRows int64) ([]string, [][]any, error))
+	SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error))
 }
 
 // QueryOption configures a single Query call.
@@ -138,7 +192,7 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return &DB{be: &localBackend{store: store}}, nil
+	return wrapBackend(&localBackend{store: store}), nil
 }
 
 // openMemStore opens the store behind OpenInMemory. It is a variable only so
@@ -155,7 +209,7 @@ func OpenInMemory() (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return &DB{be: &localBackend{store: store}}, nil
+	return wrapBackend(&localBackend{store: store}), nil
 }
 
 // ensureFormat initialises the on-disk format marker on a fresh database and
@@ -166,8 +220,10 @@ func ensureFormat(store storage.Store) error {
 	})
 }
 
-// Close releases the database resources.
+// Close releases the database resources. Running subscriptions are ended first
+// (their Err is ErrClosed).
 func (db *DB) Close() error {
+	db.closeSubscriptions()
 	return db.be.Close()
 }
 
@@ -203,6 +259,9 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 	if err != nil {
 		return nil, err
 	}
+	if q.Stream {
+		return nil, fmt.Errorf("query: %w", ErrStreamQuery)
+	}
 	semaRes, err := sema.Analyze(q)
 	if err != nil {
 		return nil, err
@@ -217,7 +276,21 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 			(write && !cb.IsLeader()) ||
 			(o.linearizable && !write && !cb.IsLeader())
 		if forward {
-			cols, rows, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write, o.maxRows)
+			encParams, err := encodeParams(params)
+			if err != nil {
+				return nil, fmt.Errorf("query: %w", err)
+			}
+			cols, enc, err := cb.Forward(ctx, wire.Request{
+				Cypher:       cypher,
+				Params:       encParams,
+				Write:        write,
+				Linearizable: o.linearizable && !write,
+				MaxRows:      o.maxRows,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("query: %w", fromRemote(err))
+			}
+			rows, err := decodeRows(enc)
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
 			}
@@ -265,24 +338,119 @@ func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, para
 	return result, nil
 }
 
-// executeLocalText parses and runs a query entirely on the local node, returning
-// serializable columns/rows. It is wired into a clustered backend so the leader
-// can execute forwarded queries; it never forwards. ctx and maxRows carry the
-// caller's deadline and WithMaxRows.
-func (db *DB) executeLocalText(ctx context.Context, cypher string, params map[string]any, maxRows int64) ([]string, [][]any, error) {
-	q, err := parser.Parse(cypher)
+// executeLocal parses and runs a forwarded request entirely on the local node,
+// returning the columns and the rows in the canonical row encoding. It is wired
+// into a clustered backend so a member can execute the queries others forward
+// to it; it never forwards. ctx carries the requester's deadline and
+// cancellation, and the request its WithMaxRows.
+func (db *DB) executeLocal(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+	params, err := decodeParams(req.Params)
 	if err != nil {
 		return nil, nil, err
+	}
+	q, err := parser.Parse(req.Cypher)
+	if err != nil {
+		return nil, nil, err
+	}
+	if q.Stream {
+		return nil, nil, ErrStreamQuery
 	}
 	semaRes, err := sema.Analyze(q)
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err := db.runLocal(ctx, q, semaRes.Columns, params, isWriteQuery(q), maxRows)
+	res, err := db.runLocal(ctx, q, semaRes.Columns, params, isWriteQuery(q), req.MaxRows)
+	if err != nil {
+		return nil, nil, toRemote(err)
+	}
+	enc, err := encodeRows(res.Rows)
 	if err != nil {
 		return nil, nil, err
 	}
-	return res.Columns, res.Rows, nil
+	return res.Columns, enc, nil
+}
+
+// remoteSentinels are the sentinel errors that keep their identity across a
+// forward, each with its wire code. The codes are part of the wire format.
+var remoteSentinels = []struct {
+	code wire.Code
+	err  error
+}{
+	{wire.CodeResultLimit, ErrResultLimit},
+	{wire.CodeConflict, ErrConflict},
+	{wire.CodeTxnTooLarge, ErrTxnTooLarge},
+	{wire.CodeIntegerOverflow, ErrIntegerOverflow},
+	{wire.CodeConstraintViolation, ErrConstraintViolation},
+	{wire.CodeDeadlineExceeded, context.DeadlineExceeded},
+	{wire.CodeCanceled, context.Canceled},
+}
+
+// toRemote tags an error that the requesting member must be able to recognise
+// with its wire code; any other error travels as its message.
+func toRemote(err error) error {
+	var already *wire.Error
+	if errors.As(err, &already) {
+		return err
+	}
+	for _, s := range remoteSentinels {
+		if errors.Is(err, s.err) {
+			return &wire.Error{Code: s.code, Msg: err.Error()}
+		}
+	}
+	return err
+}
+
+// fromRemote is the inverse of toRemote on the requesting member: the original
+// message, unwrapping to the sentinel its code names (an unknown code from a
+// newer member is left as it is).
+func fromRemote(err error) error {
+	var remote *wire.Error
+	if !errors.As(err, &remote) {
+		return err
+	}
+	for _, s := range remoteSentinels {
+		if s.code == remote.Code {
+			return &remoteError{msg: remote.Msg, sentinel: s.err}
+		}
+	}
+	return err
+}
+
+// remoteError is an error that happened on another member.
+type remoteError struct {
+	msg      string
+	sentinel error
+}
+
+func (e *remoteError) Error() string { return e.msg }
+func (e *remoteError) Unwrap() error { return e.sentinel }
+
+// encodeParams serializes a query's parameter map for forwarding, as a
+// one-value row. A nil map stays empty bytes.
+func encodeParams(params map[string]any) ([]byte, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	return encodeRow([]any{params})
+}
+
+// decodeParams is the inverse of encodeParams.
+func decodeParams(b []byte) (map[string]any, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	row, err := decodeRow(b)
+	if err != nil {
+		return nil, err
+	}
+	if len(row) != 1 {
+		return nil, errors.New("intreccio: malformed parameters")
+	}
+	params, ok := row[0].(map[string]any)
+	if !ok {
+		return nil, errors.New("intreccio: malformed parameters")
+	}
+	return params, nil
 }
 
 // runQuery plans and executes an already-parsed, already-analyzed query against
@@ -335,9 +503,7 @@ func (db *DB) Explain(ctx context.Context, cypher string) (string, error) {
 
 func isWriteQuery(q *ast.Query) bool {
 	for _, c := range q.Clauses {
-		switch c.(type) {
-		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex, *ast.DropIndex,
-			*ast.CreateConstraint, *ast.DropConstraint:
+		if sema.IsWriteClause(c) {
 			return true
 		}
 	}
@@ -345,18 +511,28 @@ func isWriteQuery(q *ast.Query) bool {
 }
 
 // localBackend is the default, non-clustered backend: a local store where writes
-// commit directly.
+// commit directly. It is the embedded commit point for live queries: every
+// committed write — a write query, a DB.Update transaction, each batch of an
+// Import — is reported to the hub.
 type localBackend struct {
 	store storage.Store
+	hub   *changefeed.Hub
 }
 
-var _ backend.Backend = (*localBackend)(nil)
+var (
+	_ backend.Backend = (*localBackend)(nil)
+	_ changeReporter  = (*localBackend)(nil)
+)
+
+// SetChangeHub wires the hub this backend reports its commits to.
+func (b *localBackend) SetChangeHub(h *changefeed.Hub) { b.hub = h }
 
 func (b *localBackend) View(fn func(storage.Txn) error) error { return b.store.View(fn) }
 
 func (b *localBackend) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
 	var result any
-	err := b.store.Update(func(txn storage.Txn) error {
+	// hub.Update commits through the store and then reports the write.
+	err := b.hub.Update(b.store, func(txn storage.Txn) error {
 		r, err := stage(txn)
 		if err != nil {
 			return err

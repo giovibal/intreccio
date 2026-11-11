@@ -157,6 +157,10 @@ needed.
   `c`.
 - **Index registry**: which `(label, propKey)` pairs have an active `p` index, so
   the write path knows which indexes to maintain.
+- **Applied index** (clustered voters only): the Raft index of the last applied
+  write, stored in the same transaction as the write under key `A`. A reader
+  thus knows exactly which index its snapshot reflects (ADR 0011). It is
+  node-local bookkeeping, not part of the replicated write-set.
 
 ## 7. Transactions and consistency invariants
 
@@ -191,6 +195,10 @@ Deferred (post-v1, in likely priority order):
 - Subqueries: `EXISTS { }`, `CALL { }`.
 - `CALL` on defined procedures / functions.
 - Full TCK conformance.
+
+One deliberate **extension outside openCypher 9**: a `STREAM` prefix
+(`STREAM MATCH … RETURN …`) marks a read query as a live query. See §12 and
+ADR 0010.
 
 ### Semantics not to get wrong
 - **No repeated relationships** within the same path of a `MATCH` (openCypher 9
@@ -252,6 +260,17 @@ for res.Next() {
 Reads and writes can share `Query` (the planner knows whether the plan writes) or
 stay separate (`Query` read-only, `Execute` write). Decision in Phase 7.
 
+Live queries use `Subscribe` (ADR 0010): the same read query, delivered once and
+then as coalesced batches of rows added to / removed from its result.
+
+```go
+sub, err := db.Subscribe(ctx, `MATCH (p:Person) RETURN p.name AS name`, nil)
+defer sub.Close()
+for change := range sub.Changes() {
+    // change.Initial, change.Added, change.Removed
+}
+```
+
 ## 11. Project layout (Go)
 
 ```
@@ -293,6 +312,14 @@ intreccio/
   used, so the embedded
   single-binary default stays pure Go and dependency-light. See ADR 0007. (NATS
   JetStream was considered as the replication log and rejected for this purpose.)
+- **Live queries (reactive changefeeds)**: a read query registered once
+  (`db.Subscribe`, or the `STREAM` prefix on text surfaces) whose result is kept
+  up to date; the subscriber receives coalesced `{Added, Removed}` row batches.
+  Deltas are derived from the physical write-set at the commit point, so the
+  feature is identical embedded and on every voter. See ADR 0010.
+- **Framed wire protocol** for cluster forwarding and streaming, replacing
+  `net/rpc`; it carries live queries to dataless clients with transparent
+  failover. See ADR 0011.
 - Cost-based planner with statistics.
 - Full-text and vector indexes (for GraphRAG), if the use case requires it.
 - Extension toward GQL / post-9 constructs.

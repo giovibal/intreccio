@@ -20,13 +20,13 @@ var (
 	clusterID        = flag.String("cluster-id", "", "node id; setting it enables cluster mode")
 	clusterData      = flag.String("cluster-data", "", "data directory (voters)")
 	clusterBind      = flag.String("cluster-bind", "", "Raft bind address host:port (voters)")
-	clusterForward   = flag.String("cluster-forward", "", "forwarding RPC address host:port (voters)")
+	clusterForward   = flag.String("cluster-forward", "", "forwarding address host:port (voters)")
 	clusterRole      = flag.String("cluster-role", "voter", "voter|client")
 	clusterBootstrap = flag.Bool("cluster-bootstrap", false, "bootstrap a new cluster (one voter only)")
 	clusterPeers     = flag.String("cluster-peers", "",
 		"comma-separated voter set: id=raftAddr=forwardAddr,...")
 
-	clusterTLSCert       = flag.String("cluster-tls-cert", "", "PEM certificate for the Raft transport and forwarding RPC")
+	clusterTLSCert       = flag.String("cluster-tls-cert", "", "PEM certificate for the Raft transport and forwarding")
 	clusterTLSKey        = flag.String("cluster-tls-key", "", "PEM private key for -cluster-tls-cert")
 	clusterTLSCA         = flag.String("cluster-tls-ca", "", "PEM CA bundle for mutual TLS peer verification")
 	clusterTLSServerName = flag.String("cluster-tls-server-name", "", "override the verified server name (optional)")

@@ -10,6 +10,8 @@
 //	X + label(4) + propKey(4)    -> name     registry of active `p` indexes
 //	U + label(4) + propKey(4)    -> flags+name  registry of unique constraints
 //	Y + type(4) + propKey(4)     -> name     registry of relationship `r` indexes
+//	A                            -> uint64   applied Raft index (clustered voters only)
+//	F                            -> uint32   on-disk format version
 //
 // IDs start at 1; ID 0 is reserved as "none".
 package catalog

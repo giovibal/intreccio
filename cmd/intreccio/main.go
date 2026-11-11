@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime/debug"
 	"strings"
 	"text/tabwriter"
@@ -253,11 +255,66 @@ func runBatch(db *intreccio.DB, content string, out, errOut io.Writer) {
 // execute runs a single query and writes the formatted result to out.
 func execute(db *intreccio.DB, query string, out io.Writer) error {
 	res, err := db.Query(context.Background(), query, nil)
+	if errors.Is(err, intreccio.ErrStreamQuery) {
+		// A STREAM query is a live query: follow it until interrupted.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return stream(ctx, db, query, out)
+	}
 	if err != nil {
 		return err
 	}
 	printResult(out, res)
 	return nil
+}
+
+// stream runs a live query, printing its current result and then every change
+// to it until ctx is done. Rows entering the result are prefixed with '+', rows
+// leaving it with '-'; a changed row shows as a '-' line followed by a '+' line.
+func stream(ctx context.Context, db *intreccio.DB, query string, out io.Writer) error {
+	sub, err := db.Subscribe(ctx, query, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sub.Close() }()
+
+	for c := range sub.Changes() {
+		w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+		if c.Initial {
+			cols := sub.Columns()
+			sep := make([]string, len(cols))
+			for i, col := range cols {
+				sep[i] = strings.Repeat("-", len(col))
+			}
+			_, _ = fmt.Fprintln(w, "  "+strings.Join(cols, "\t"))
+			_, _ = fmt.Fprintln(w, "  "+strings.Join(sep, "\t"))
+		}
+		printSigned(w, "- ", c.Removed)
+		printSigned(w, "+ ", c.Added)
+		_ = w.Flush()
+		if c.Initial {
+			plural := "s"
+			if len(c.Added) == 1 {
+				plural = ""
+			}
+			_, _ = fmt.Fprintf(out, "(%d row%s; live - press Ctrl-C to stop)\n", len(c.Added), plural)
+		}
+	}
+	if err := sub.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	_, _ = fmt.Fprintln(out, "(stream stopped)")
+	return nil
+}
+
+func printSigned(w io.Writer, sign string, rows [][]any) {
+	for _, row := range rows {
+		parts := make([]string, len(row))
+		for i, v := range row {
+			parts[i] = renderValue(v)
+		}
+		_, _ = fmt.Fprintln(w, sign+strings.Join(parts, "\t"))
+	}
 }
 
 func printResult(out io.Writer, res *intreccio.Result) {
@@ -306,6 +363,8 @@ func printHelp(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "  :quit, :exit    leave the REPL")
 	_, _ = fmt.Fprintln(out, "  :help           show this message")
 	_, _ = fmt.Fprintln(out, "  :edit, :e       open the current buffer in $EDITOR and run the result")
+	_, _ = fmt.Fprintln(out, "Live queries: prefix a read query with STREAM to follow its result;")
+	_, _ = fmt.Fprintln(out, "  rows are printed with '+' when they appear and '-' when they go. Ctrl-C stops it.")
 	_, _ = fmt.Fprintln(out, "Note: ';' inside string literals is not recognized as a statement boundary.")
 }
 

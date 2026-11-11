@@ -70,8 +70,34 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 			return nil, a.errf(u.Pos, "UNION arms must produce the same columns (got %v vs %v)", cols, armCols)
 		}
 	}
+	if q.Stream {
+		// A live query is re-evaluated whenever the data it reads changes: it
+		// must not change data itself.
+		arms := [][]ast.Clause{q.Clauses}
+		for _, u := range q.Unions {
+			arms = append(arms, u.Clauses)
+		}
+		for _, arm := range arms {
+			for _, c := range arm {
+				if IsWriteClause(c) {
+					return nil, a.errf(clausePos(c), "STREAM requires a read-only query")
+				}
+			}
+		}
+	}
 	a.result.Columns = cols
 	return &a.result, nil
+}
+
+// IsWriteClause reports whether c modifies the database.
+func IsWriteClause(c ast.Clause) bool {
+	switch c.(type) {
+	case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex, *ast.DropIndex,
+		*ast.CreateConstraint, *ast.DropConstraint:
+		return true
+	default:
+		return false
+	}
 }
 
 // analyzeArm validates a single query "arm" (the clauses before/between/after

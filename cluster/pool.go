@@ -5,128 +5,148 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"net/rpc"
 	"sync"
-)
+	"time"
 
-const defaultMaxIdleConns = 4
+	"github.com/giovibal/intreccio/internal/wire"
+)
 
 var errPoolClosed = errors.New("cluster: connection pool closed")
 
-// connPool keeps a small set of reusable net/rpc connections per address so a
-// forwarded query avoids a TCP + RPC handshake on every call. net/rpc multiplexes
-// concurrent calls over a connection; the per-address free-list bounds idle
-// connections and lets independent calls run in parallel. A connection that
-// errors is discarded and the call retried once on a fresh one, so a stale
-// pooled connection — e.g. to a voter that restarted — recovers transparently.
+// connPool keeps one multiplexed connection per member address. Requests to
+// the same member share it, each on its own stream, so a forwarded query costs
+// neither a TCP nor a TLS handshake. A connection that fails is dropped and
+// redialled on the next request, so a member that restarted is reached again
+// transparently.
 type connPool struct {
-	maxIdle int
-	mu      sync.Mutex
-	idle    map[string][]*rpc.Client
-	closed  bool
 	// tls is nil for a plaintext cluster; otherwise outgoing connections are
 	// wrapped in TLS (with a client certificate for mutual authentication).
 	tls *tls.Config
+	ka  keepalive
+
+	mu      sync.Mutex
+	entries map[string]*poolEntry
+	closed  bool
 }
 
-func newConnPool(maxIdle int) *connPool { return newConnPoolTLS(maxIdle, nil) }
-
-func newConnPoolTLS(maxIdle int, tlsClient *tls.Config) *connPool {
-	if maxIdle <= 0 {
-		maxIdle = defaultMaxIdleConns
-	}
-	return &connPool{maxIdle: maxIdle, idle: make(map[string][]*rpc.Client), tls: tlsClient}
+// poolEntry is the connection to one address, or the dial that is producing
+// it. All fields are guarded by connPool.mu.
+type poolEntry struct {
+	conn    *muxConn
+	dialing chan struct{} // non-nil while a dial is in flight; closed when it ends
+	err     error         // the outcome of the last dial
 }
 
-// get returns an idle connection for addr, or dials a new one.
-func (p *connPool) get(addr string) (*rpc.Client, error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, errPoolClosed
-	}
-	if conns := p.idle[addr]; len(conns) > 0 {
-		c := conns[len(conns)-1]
-		p.idle[addr] = conns[:len(conns)-1]
-		p.mu.Unlock()
-		return c, nil
-	}
-	p.mu.Unlock()
+func newConnPool(tlsClient *tls.Config) *connPool {
+	return &connPool{tls: tlsClient, ka: defaultKeepalive, entries: map[string]*poolEntry{}}
+}
 
-	if p.tls != nil {
-		conn, err := tls.Dial("tcp", addr, p.tls)
-		if err != nil {
-			return nil, fmt.Errorf("cluster: dial %s: %w", addr, err)
+// get returns a live connection to addr, dialling if there is none. Concurrent
+// callers share a single dial, and each stops waiting when its own ctx ends.
+func (p *connPool) get(ctx context.Context, addr string) (*muxConn, error) {
+	for {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return nil, errPoolClosed
 		}
-		return rpc.NewClient(conn), nil
-	}
-
-	c, err := rpc.Dial("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("cluster: dial %s: %w", addr, err)
-	}
-	return c, nil
-}
-
-// put returns a healthy connection to the pool, closing it if the pool is full
-// or already closed.
-func (p *connPool) put(addr string, c *rpc.Client) {
-	p.mu.Lock()
-	if p.closed || len(p.idle[addr]) >= p.maxIdle {
+		e := p.entries[addr]
+		if e == nil {
+			e = &poolEntry{}
+			p.entries[addr] = e
+		}
+		if e.conn != nil && !e.conn.broken() {
+			c := e.conn
+			p.mu.Unlock()
+			return c, nil
+		}
+		e.conn = nil
+		if e.dialing == nil {
+			e.dialing = make(chan struct{})
+			go p.dial(addr, e)
+		}
+		wait := e.dialing
 		p.mu.Unlock()
-		_ = c.Close()
-		return
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-wait:
+		}
+		p.mu.Lock()
+		c, err := e.conn, e.err
+		p.mu.Unlock()
+		if c != nil && !c.broken() {
+			return c, nil
+		}
+		if err != nil {
+			return nil, err // the dial failed, whoever started it
+		}
+		// The fresh connection broke already: go round again.
 	}
-	p.idle[addr] = append(p.idle[addr], c)
-	p.mu.Unlock()
 }
 
-// call performs a forwarding RPC to addr over a pooled connection, retrying once
-// on a fresh connection if a pooled one turns out to be broken. ctx bounds the
-// wait for a reply: if it is done first the call returns ctx.Err() and the
-// connection is dropped.
-func (p *connPool) call(ctx context.Context, addr string, args *ForwardArgs) (*ForwardReply, error) {
+// dial connects to addr in the background, so that the dial outlives the
+// context of whichever caller happened to start it.
+func (p *connPool) dial(addr string, e *poolEntry) {
+	c, err := dialMux(context.Background(), addr, p.tls, p.ka)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed && c != nil {
+		c.Close()
+		c, err = nil, errPoolClosed
+	}
+	e.conn, e.err = c, err
+	close(e.dialing)
+	e.dialing = nil
+}
+
+// call runs req on the member at addr and returns its columns and encoded
+// rows. If the connection fails mid-request the call is retried once on a
+// fresh one, so a stale pooled connection recovers transparently. ctx bounds
+// the whole call; its deadline travels with the request so that the member
+// executing it stops too.
+func (p *connPool) call(ctx context.Context, addr string, req wire.Request) ([]string, [][]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		c, err := p.get(addr)
-		if err != nil {
-			return nil, err
-		}
-		var reply ForwardReply
-		call := c.Go("Forward.Query", args, &reply, nil)
-		select {
-		case <-call.Done:
-			if call.Error != nil {
-				_ = c.Close() // broken connection: drop it, don't return it to the pool
-				lastErr = call.Error
-				continue
+		req.Timeout = 0
+		if dl, ok := ctx.Deadline(); ok {
+			if req.Timeout = time.Until(dl); req.Timeout <= 0 {
+				return nil, nil, context.DeadlineExceeded
 			}
-			p.put(addr, c)
-			return &reply, nil
-		case <-ctx.Done():
-			_ = c.Close()
-			return nil, ctx.Err()
 		}
+		c, err := p.get(ctx, addr)
+		if err != nil {
+			return nil, nil, err
+		}
+		cols, rows, err := c.query(ctx, req)
+		var ce *connError
+		if errors.As(err, &ce) {
+			lastErr = err
+			continue
+		}
+		return cols, rows, err
 	}
-	return nil, fmt.Errorf("cluster: forward call: %w", lastErr)
+	return nil, nil, fmt.Errorf("cluster: forward call: %w", lastErr)
 }
 
-// Close closes all idle connections and prevents further pooling.
+// Close closes every connection and fails further use of the pool.
 func (p *connPool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed = true
-	for addr, conns := range p.idle {
-		for _, c := range conns {
-			_ = c.Close()
+	for addr, e := range p.entries {
+		if e.conn != nil {
+			e.conn.Close()
 		}
-		delete(p.idle, addr)
+		delete(p.entries, addr)
 	}
 	return nil
 }

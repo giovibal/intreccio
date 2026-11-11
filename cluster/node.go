@@ -14,14 +14,17 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
 	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 const (
@@ -51,11 +54,15 @@ type raftNode struct {
 	trans *raft.NetworkTransport
 	log   *raftboltdb.BoltStore
 
-	// forwardAddrByID maps a Raft ServerID to that node's forwarding RPC address.
+	// forwardAddrByID maps a Raft ServerID to that node's forwarding address.
 	forwardAddrByID map[string]string
-	fwdListener     net.Listener
-	localExec       localExecutor
-	applyTimeout    time.Duration
+	// fwd serves the requests other members forward to this node.
+	fwd *forwardServer
+	// localExec is set once the owning DB exists, possibly while the forward
+	// server is already accepting, hence the atomic pointer.
+	localExec    atomic.Pointer[localExecutor]
+	localSub     atomic.Pointer[localSubscriber]
+	applyTimeout time.Duration
 	// tlsServer/tlsClient are nil on a plaintext cluster.
 	tlsServer *tls.Config
 	tlsClient *tls.Config
@@ -182,7 +189,7 @@ func newNode(cfg Config) (*raftNode, error) {
 		storeMu:         storeMu,
 		tlsServer:       tlsServer,
 		tlsClient:       tlsClient,
-		pool:            newConnPoolTLS(0, tlsClient),
+		pool:            newConnPool(tlsClient),
 		stop:            make(chan struct{}),
 	}
 
@@ -237,20 +244,34 @@ func (n *raftNode) ReadBarrier() error {
 	return nil
 }
 
-// Forward sends a query to the leader for execution (used by followers for
-// writes and linearizable reads). ctx bounds the wait for a reply.
-func (n *raftNode) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool, maxRows int64) ([]string, [][]any, error) {
-	return n.forward(ctx, cypher, params, write, linearizable, maxRows)
+// Forward sends a request to the leader for execution (used by followers for
+// writes and linearizable reads). ctx bounds the wait for a reply, and ending
+// it stops the execution on the leader.
+func (n *raftNode) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+	return n.callLeader(ctx, req)
 }
 
 // Local reports that a voter can serve reads from its local store.
 func (n *raftNode) Local() bool { return true }
 
-// SetLocalExecutor wires the root package's local query execution, used by the
-// leader to run forwarded queries.
-func (n *raftNode) SetLocalExecutor(fn func(ctx context.Context, cypher string, params map[string]any, maxRows int64) ([]string, [][]any, error)) {
-	n.localExec = fn
+// SetLocalExecutor wires the root package's local query execution, used to run
+// the requests other members forward to this node.
+func (n *raftNode) SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error)) {
+	exec := localExecutor(fn)
+	n.localExec.Store(&exec)
 }
+
+// SetLocalSubscriber wires the root package's live-query server, used to run
+// the live queries dataless clients subscribe to on this node.
+func (n *raftNode) SetLocalSubscriber(fn func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error) {
+	sub := localSubscriber(fn)
+	n.localSub.Store(&sub)
+}
+
+// SetChangeHub wires the hub of the owning DB into the FSM, which reports every
+// applied write and every snapshot restore to it. This is what lets a voter
+// serve live queries.
+func (n *raftNode) SetChangeHub(h *changefeed.Hub) { n.fsm.hub.Store(h) }
 
 // View runs fn in a local read-only transaction (snapshot read; may be slightly
 // stale on a follower unless a ReadBarrier preceded it). The shared read-lock
@@ -326,14 +347,19 @@ func (n *raftNode) Close() error {
 			firstErr = err
 		}
 	}
-	if n.fwdListener != nil {
-		keep(n.fwdListener.Close())
+	if n.fwd != nil {
+		keep(n.fwd.shutdown()) // stop accepting; cancel forwarded requests
 	}
 	if n.pool != nil {
 		keep(n.pool.Close())
 	}
 	if n.raft != nil {
 		keep(n.raft.Shutdown().Error())
+	}
+	if n.fwd != nil {
+		// Raft is down, so no forwarded request can still be waiting on it:
+		// let them all return before the store goes away under them.
+		n.fwd.wait()
 	}
 	if n.trans != nil {
 		keep(n.trans.Close())

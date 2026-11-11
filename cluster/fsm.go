@@ -9,6 +9,8 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/storage"
 )
 
@@ -17,6 +19,10 @@ import (
 // storage.Update, preserving the engine's index-consistency invariant (the
 // write-set already contains every base record and index key produced by the
 // leader's normal execution).
+//
+// It is also the clustered commit point for live queries (ADR 0010): because
+// every node applies every committed write here, each voter can serve its own
+// watchers from its own apply stream, whoever the leader is.
 type fsm struct {
 	store  storage.Store
 	snap   storage.Snapshotter
@@ -27,6 +33,10 @@ type fsm struct {
 	// the owning Node. Apply and Snapshot run on Raft's single FSM goroutine, so
 	// they never overlap Restore and do not need it.
 	storeMu *sync.RWMutex
+	// hub receives every applied write and every restore. It is set once the
+	// owning DB exists, which may be after Raft has started replaying the log,
+	// hence the atomic pointer; nil means nobody can be watching yet.
+	hub atomic.Pointer[changefeed.Hub]
 	// beforeApply, when set, runs before each command is applied. Tests use it
 	// to make a replica's state machine lag behind its log; it is nil in
 	// production.
@@ -47,9 +57,20 @@ func (f *fsm) Apply(l *raft.Log) any {
 	if hook := f.beforeApply.Load(); hook != nil {
 		(*hook)()
 	}
-	return f.store.Update(func(txn storage.Txn) error {
-		return applyWriteSet(l.Data, txn)
-	})
+	apply := func(txn storage.Txn) error {
+		if err := applyWriteSet(l.Data, txn); err != nil {
+			return err
+		}
+		// Recorded with the data it describes, so a reader always knows
+		// exactly which index its snapshot reflects. A dataless client's
+		// subscription relies on it to change voter without going backwards.
+		return catalog.SetAppliedIndex(txn, l.Index)
+	}
+	if hub := f.hub.Load(); hub != nil {
+		// Commits through the store, then reports the write to the watchers.
+		return hub.Update(f.store, apply)
+	}
+	return f.store.Update(apply)
 }
 
 // Snapshot captures the full store state at the current applied index by backing
@@ -78,8 +99,16 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 func (f *fsm) Restore(rc io.ReadCloser) error {
 	defer func() { _ = rc.Close() }()
 	f.storeMu.Lock()
-	defer f.storeMu.Unlock()
-	if err := f.snap.Load(rc); err != nil {
+	err := f.snap.Load(rc)
+	f.storeMu.Unlock()
+	// The state was replaced wholesale, with no write-set to describe it — and
+	// a failed load leaves it empty or partial. Either way every watcher must
+	// re-evaluate; this runs after the lock is released because doing so reads
+	// the store.
+	if hub := f.hub.Load(); hub != nil {
+		hub.Invalidate()
+	}
+	if err != nil {
 		return fmt.Errorf("fsm: restore: %w", err)
 	}
 	return nil

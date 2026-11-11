@@ -32,6 +32,8 @@ medium-sized graphs. It is *not* an analytical (OLAP) engine.
   returns, so they survive an OS crash or power loss (`WithSyncWrites(false)`
   opts out for higher throughput).
 - **Rule-based query planner** with an inspectable textual `EXPLAIN`.
+- **Live queries** — subscribe to a read query and receive the changes to its
+  result (rows added / removed) as writes are committed.
 
 ## Quickstart
 
@@ -199,6 +201,68 @@ says how many rows were written, so the import can resume from there.
 `CREATE INDEX` indexes the existing nodes of its label in the same
 transaction, so on a label with more nodes than the limit, create the index
 before loading the data.
+### Live queries
+
+`Subscribe` runs a read query once, delivers the result, and then keeps
+delivering how that result **changes** as writes are committed — no polling:
+
+```go
+sub, err := db.Subscribe(ctx, "MATCH (p:Person) RETURN p.name AS name", nil)
+if err != nil {
+	log.Fatal(err)
+}
+defer sub.Close()
+
+for change := range sub.Changes() {
+	// The first batch has change.Initial set: the current result, in Added.
+	for _, row := range change.Removed {
+		fmt.Println("-", row[0])
+	}
+	for _, row := range change.Added {
+		fmt.Println("+", row[0])
+	}
+}
+if err := sub.Err(); err != nil { // why it ended; nil after Close
+	log.Print(err)
+}
+```
+
+- Rows have the same shape as `Result.Rows`. A row that stops matching is
+  reported in `Removed`; a row whose contents change arrives as the old row in
+  `Removed` and the new one in `Added`, in the same batch.
+- Any read query works, including aggregations and `ORDER BY … LIMIT`.
+- Batches are **coalesced**: a consumer that is slow to receive gets the net
+  difference since its last batch rather than one batch per commit, so it may
+  skip intermediate states but never falls behind or grows a queue.
+- A subscription keeps its last result in memory; `WithSubscriptionMaxRows(n)`
+  caps it (default 10 000 rows; exceeding it ends the subscription with
+  `ErrResultLimit`).
+- It ends on `Close`, when `ctx` is done, or when the database is closed.
+
+A write that cannot affect a query (other labels, relationship types or
+properties) does not wake it. What a relevant write costs depends on the query:
+
+- A plain `MATCH … [WHERE …] RETURN …` (fixed-length relationships, no
+  aggregation, `DISTINCT`, `ORDER BY`, `SKIP` or `LIMIT`) is re-evaluated only
+  **around the nodes that changed**. The cost follows the neighbourhood of the
+  change, not the size of the result: in the benchmark, renaming one node under
+  a live query over 100, 1 000 and 10 000 relationships takes about 0.1–0.2 ms
+  each time, against 4 ms, 33 ms and 325 ms for re-running the query. Such a
+  subscription keeps an index of its matches, so it uses more memory per row.
+- Any other query is **re-run** on each relevant commit and diffed. That suits
+  selective queries on a modest number of subscriptions.
+
+Either way every batch reflects one consistent snapshot of the database.
+
+Live queries work on embedded databases and on every cluster member. Each
+**voter** serves its subscriptions from its own replica, so they keep working
+across a leader change; on a follower the result may briefly trail the
+leader's. A dataless **client** has a voter evaluate the query for it. If that
+voter is lost the subscription moves to another one by itself and the
+application sees only the net difference, if any — never the whole result
+again, and never an older state. To make that possible the client keeps a copy
+of the result in memory, and it gives up (the subscription ends with an error)
+only if no voter can take over for 30 seconds.
 
 ### Use the CLI / REPL
 
@@ -287,17 +351,21 @@ Notes for operators:
   a client) runs under the caller's context deadline and `WithMaxRows`, and its
   errors still match `ErrResultLimit`, `ErrConflict`, `ErrTxnTooLarge`,
   `ErrIntegerOverflow` and `context.DeadlineExceeded` with `errors.Is`. Canceling
-  a context without a deadline stops the wait, not the work on the leader.
+  the context stops the work on the leader too, with or without a deadline.
 - Set `Config.LogOutput` (e.g. `os.Stderr`) for Raft logs and `Config.ApplyTimeout`
   to tune write/read-barrier deadlines.
 - It uses **full replication** to the quorum (each voter holds the whole graph);
   sharding is out of scope.
 - **TLS is opt-in**: set `Config.TLS` to encrypt the Raft transport and the
-  forwarding RPC endpoint and (with a CA) require mutually authenticated peers.
+  forwarding endpoint and (with a CA) require mutually authenticated peers.
+
+Members speak a versioned binary protocol on the forwarding address, so **every
+member of a cluster must run the same version**; a mismatch is reported at
+connection time.
 
 ### Securing the cluster with TLS
 
-The Raft transport and the forwarding RPC endpoint use plaintext TCP by default.
+The Raft transport and the forwarding endpoint use plaintext TCP by default.
 Set `Config.TLS` to encrypt both and, when a CA is supplied, require mutually
 authenticated peers:
 
@@ -429,6 +497,11 @@ front-end (usable without a database), and the opt-in `cluster` package; the
 engine and the write path stay under `internal/`.
 
 ## Supported Cypher
+
+One extension outside openCypher: a **`STREAM`** prefix (`STREAM MATCH …
+RETURN …`) marks a read query as a live query. In the REPL it follows the
+result until Ctrl-C, printing `+` / `-` rows; in Go, use `db.Subscribe`
+(`db.Query` rejects it with `ErrStreamQuery`).
 
 Read side:
 - `MATCH` / `OPTIONAL MATCH` with node/relationship patterns, directions, labels
