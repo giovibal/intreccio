@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/giovibal/intreccio/internal/storage"
 	"github.com/giovibal/intreccio/internal/storage/codec"
 )
 
@@ -153,6 +154,59 @@ func removeFrom(index map[string]watcherSet, name string, w *Watcher) {
 	if len(set) == 0 {
 		delete(index, name)
 	}
+}
+
+// Update is how a commit point runs a write transaction: it executes fn through
+// store.Update and, once the transaction has committed, reports its effect to
+// the hub. It is the single implementation of the commit-reporting rule:
+//
+//   - a capture is installed only while a watcher exists, so a write nobody
+//     watches pays one atomic load;
+//   - every attempt starts from a fresh capture, because store.Update may run
+//     fn again on a conflict;
+//   - nothing is reported unless the commit succeeded;
+//   - a commit that cannot be described — it ran without a capture, or its
+//     ChangeSet could not be built — is reported as unknown and wakes every
+//     watcher. That also covers a watcher registering while a write that began
+//     without a capture is still in flight;
+//   - describing the write never fails it.
+func (h *Hub) Update(store storage.Store, fn func(storage.Txn) error) error {
+	var changes *ChangeSet
+	err := store.Update(func(txn storage.Txn) error {
+		changes = nil
+		var capture *Capture
+		if h.Active() {
+			capture = NewCapture(txn)
+			txn = capture
+		}
+		if err := fn(txn); err != nil {
+			return err
+		}
+		if capture != nil {
+			if cs, err := capture.ChangeSet(); err == nil {
+				changes = cs
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	h.Committed(changes)
+	return nil
+}
+
+// Invalidate reports that the whole state was replaced without going through a
+// write transaction (a snapshot restore). Cached dictionary names are dropped
+// and every watcher is woken; each one's next evaluation yields the net
+// difference.
+func (h *Hub) Invalidate() {
+	h.nameMu.Lock()
+	h.labels = map[uint32]string{}
+	h.types = map[uint32]string{}
+	h.keys = map[uint32]string{}
+	h.nameMu.Unlock()
+	h.WakeAll()
 }
 
 // WakeAll wakes every watcher. It is the answer to any state change the hub

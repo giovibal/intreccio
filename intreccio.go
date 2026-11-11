@@ -390,40 +390,19 @@ func (b *localBackend) SetChangeHub(h *changefeed.Hub) { b.hub = h }
 func (b *localBackend) View(fn func(storage.Txn) error) error { return b.store.View(fn) }
 
 func (b *localBackend) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
-	var (
-		result any
-		// changes stays nil when the transaction ran without a capture or its
-		// ChangeSet could not be built; the hub then treats the commit as an
-		// unknown change. That also covers a watcher registering while a write
-		// that started without a capture is still in flight.
-		changes *changefeed.ChangeSet
-	)
-	err := b.store.Update(func(txn storage.Txn) error {
-		// Update may run this function again on a conflict: every attempt
-		// starts from a fresh capture.
-		changes = nil
-		var capture *changefeed.Capture
-		if b.hub.Active() {
-			capture = changefeed.NewCapture(txn)
-			txn = capture
-		}
+	var result any
+	// hub.Update commits through the store and then reports the write.
+	err := b.hub.Update(b.store, func(txn storage.Txn) error {
 		r, err := stage(txn)
 		if err != nil {
 			return err
 		}
 		result = r
-		if capture != nil {
-			// A failure to describe the write must not fail the write.
-			if cs, err := capture.ChangeSet(); err == nil {
-				changes = cs
-			}
-		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	b.hub.Committed(changes) // only after a successful commit
 	return result, nil
 }
 

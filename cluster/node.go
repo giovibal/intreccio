@@ -20,6 +20,7 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
 	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 )
@@ -247,6 +248,11 @@ func (n *Node) Local() bool { return true }
 func (n *Node) SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]byte, error)) {
 	n.localExec = fn
 }
+
+// SetChangeHub wires the hub of the owning DB into the FSM, which reports every
+// applied write and every snapshot restore to it. This is what lets a voter
+// serve live queries.
+func (n *Node) SetChangeHub(h *changefeed.Hub) { n.fsm.hub.Store(h) }
 
 // View runs fn in a local read-only transaction (snapshot read; may be slightly
 // stale on a follower unless a ReadBarrier preceded it). The shared read-lock

@@ -249,3 +249,27 @@ func TestHubConcurrentUse(t *testing.T) {
 		t.Error("watchers leaked")
 	}
 }
+
+func TestHubInvalidate(t *testing.T) {
+	d := newDict()
+	h := NewHub(d)
+	w := h.Register(Footprint{Labels: set("Company")})
+	cs := &ChangeSet{Nodes: []NodeChange{{ID: 1, After: node([]uint32{lPerson}, nil)}}}
+	h.Committed(cs)
+	if woken(w) {
+		t.Fatal("an irrelevant change woke the watcher")
+	}
+
+	// After a restore the same ID may name something else.
+	d.mu.Lock()
+	d.labels[lPerson] = "Company"
+	d.mu.Unlock()
+	h.Invalidate()
+	if !woken(w) {
+		t.Error("Invalidate must wake every watcher")
+	}
+	h.Committed(cs)
+	if !woken(w) {
+		t.Error("Invalidate must drop cached names")
+	}
+}

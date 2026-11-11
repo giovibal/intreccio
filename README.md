@@ -169,9 +169,12 @@ if err := sub.Err(); err != nil { // why it ended; nil after Close
 
 Each relevant commit re-runs the query, so live queries suit selective queries
 on a modest number of subscriptions; a write that cannot affect a query (other
-labels, relationship types or properties) does not wake it. Live queries
-currently work on embedded databases; clustered support is in progress
-(ADR 0010).
+labels, relationship types or properties) does not wake it.
+
+Live queries work on embedded databases and on cluster **voters**. Each voter
+serves its subscriptions from its own replica, so they keep working across a
+leader change; on a follower the result may briefly trail the leader's. A
+dataless client cannot subscribe yet (see ADR 0011).
 
 ### Use the CLI / REPL
 
