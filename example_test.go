@@ -29,3 +29,26 @@ func ExampleDB_Explain() {
 	// Project(p.name AS name)
 	//   NodeByLabelScan(p:Person)
 }
+
+func ExampleDB_Subscribe() {
+	db, _ := intreccio.OpenInMemory()
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	_, _ = db.Query(ctx, "CREATE (:Person {name: 'Alice'})", nil)
+
+	sub, _ := db.Subscribe(ctx, "MATCH (p:Person) RETURN p.name AS name", nil)
+	defer func() { _ = sub.Close() }()
+
+	// The first batch is the current result.
+	first := <-sub.Changes()
+	fmt.Println("initial:", first.Added)
+
+	// Later batches describe how the result changed.
+	_, _ = db.Query(ctx, "MATCH (p:Person) SET p.name = 'Alicia'", nil)
+	change := <-sub.Changes()
+	fmt.Println("removed:", change.Removed, "added:", change.Added)
+	// Output:
+	// initial: [[Alice]]
+	// removed: [[Alice]] added: [[Alicia]]
+}

@@ -4,6 +4,7 @@ package intreccio
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/changefeed"
@@ -37,6 +38,13 @@ type DB struct {
 	// hub is the registry of live-query watchers. Commit points report to it;
 	// it costs nothing while no watcher is registered.
 	hub *changefeed.Hub
+	// watchable is set when the backend reports its commits to hub, i.e. when
+	// Subscribe can work.
+	watchable bool
+
+	mu     sync.Mutex
+	subs   map[*Subscription]struct{} // running subscriptions
+	closed bool
 }
 
 // New wraps a Backend in a DB. It is the seam used by the clustering package;
@@ -45,17 +53,13 @@ type DB struct {
 func New(be Backend) *DB {
 	db := &DB{be: be}
 	db.hub = changefeed.NewHub(dictionary{view: be.View})
+	if r, ok := be.(changeReporter); ok {
+		r.SetChangeHub(db.hub)
+		db.watchable = true
+	}
 	if s, ok := be.(localExecutorSetter); ok {
 		s.SetLocalExecutor(db.executeLocalText)
 	}
-	return db
-}
-
-// newLocal builds the DB of an embedded store, whose commits report to the hub.
-func newLocal(store storage.Store) *DB {
-	be := &localBackend{store: store}
-	db := New(be)
-	be.hub = db.hub
 	return db
 }
 
@@ -158,7 +162,7 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return newLocal(store), nil
+	return New(&localBackend{store: store}), nil
 }
 
 // OpenInMemory opens a fully in-RAM database (useful in tests).
@@ -171,7 +175,7 @@ func OpenInMemory() (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return newLocal(store), nil
+	return New(&localBackend{store: store}), nil
 }
 
 // ensureFormat initialises the on-disk format marker on a fresh database and
@@ -182,8 +186,10 @@ func ensureFormat(store storage.Store) error {
 	})
 }
 
-// Close releases the database resources.
+// Close releases the database resources. Running subscriptions are ended first
+// (their Err is ErrClosed).
 func (db *DB) Close() error {
+	db.closeSubscriptions()
 	return db.be.Close()
 }
 
@@ -214,6 +220,9 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 	q, err := parser.Parse(cypher)
 	if err != nil {
 		return nil, err
+	}
+	if q.Stream {
+		return nil, fmt.Errorf("query: %w", ErrStreamQuery)
 	}
 	semaRes, err := sema.Analyze(q)
 	if err != nil {
@@ -290,6 +299,9 @@ func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	if q.Stream {
+		return nil, nil, ErrStreamQuery
+	}
 	semaRes, err := sema.Analyze(q)
 	if err != nil {
 		return nil, nil, err
@@ -352,8 +364,7 @@ func (db *DB) Explain(ctx context.Context, cypher string) (string, error) {
 
 func isWriteQuery(q *ast.Query) bool {
 	for _, c := range q.Clauses {
-		switch c.(type) {
-		case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex:
+		if sema.IsWriteClause(c) {
 			return true
 		}
 	}
@@ -368,7 +379,13 @@ type localBackend struct {
 	hub   *changefeed.Hub
 }
 
-var _ Backend = (*localBackend)(nil)
+var (
+	_ Backend        = (*localBackend)(nil)
+	_ changeReporter = (*localBackend)(nil)
+)
+
+// SetChangeHub wires the hub this backend reports its commits to.
+func (b *localBackend) SetChangeHub(h *changefeed.Hub) { b.hub = h }
 
 func (b *localBackend) View(fn func(storage.Txn) error) error { return b.store.View(fn) }
 

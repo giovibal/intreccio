@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/giovibal/intreccio"
 )
@@ -183,5 +186,91 @@ func TestExecuteReturnsWholeNode(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, `(:Person {name: "Bob"})`) {
 		t.Errorf("output = %q, want the node rendered as a pattern", got)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to write from one goroutine and read from
+// another.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func waitForOutput(t *testing.T, out *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("output never contained %q:\n%s", want, out.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStreamPrintsInitialResultThenChanges(t *testing.T) {
+	db := newDB(t)
+	var sink bytes.Buffer
+	if err := execute(db, "CREATE (:Person {name: 'Ann'})", &sink); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &syncBuffer{}
+	done := make(chan error, 1)
+	go func() { done <- stream(ctx, db, "STREAM MATCH (p:Person) RETURN p.name AS name", out) }()
+
+	waitForOutput(t, out, "(1 row; live - press Ctrl-C to stop)")
+	if got := out.String(); !strings.Contains(got, "  name") || !strings.Contains(got, "+ Ann") {
+		t.Errorf("initial output = %q", got)
+	}
+
+	if err := execute(db, "CREATE (:Person {name: 'Bob'})", &sink); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutput(t, out, "+ Bob")
+
+	if err := execute(db, "MATCH (p:Person {name: 'Ann'}) SET p.name = 'Anna'", &sink); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutput(t, out, "+ Anna")
+	if got := out.String(); strings.Index(got, "- Ann\n") < 0 || strings.Index(got, "- Ann\n") > strings.Index(got, "+ Anna") {
+		t.Errorf("an update must print the old row before the new one:\n%s", got)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("stream returned %v after cancellation, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not stop after cancellation")
+	}
+	if got := out.String(); !strings.HasSuffix(got, "(stream stopped)\n") {
+		t.Errorf("final output = %q", got)
+	}
+}
+
+func TestStreamReportsQueryErrors(t *testing.T) {
+	db := newDB(t)
+	var out bytes.Buffer
+	if err := stream(context.Background(), db, "STREAM CREATE (n) RETURN n", &out); err == nil {
+		t.Error("stream of a writing query: expected an error")
+	}
+	if err := stream(context.Background(), db, "STREAM MATCH (n) RETURN m", &out); err == nil {
+		t.Error("stream of an invalid query: expected an error")
 	}
 }

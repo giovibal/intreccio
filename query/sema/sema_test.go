@@ -2,6 +2,7 @@ package sema
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/giovibal/intreccio/query/parser"
@@ -181,4 +182,35 @@ func wantSemaError(t *testing.T, err error) *SemaError {
 		t.Fatalf("expected *SemaError, got %T: %v", err, err)
 	}
 	return se
+}
+
+// TestStreamMustBeReadOnly checks that a STREAM (live) query is accepted when
+// it only reads and rejected as soon as any arm writes.
+func TestStreamMustBeReadOnly(t *testing.T) {
+	for _, src := range []string{
+		"STREAM MATCH (n:Person) RETURN n.name AS name",
+		"STREAM MATCH (n) WITH n.x AS x WHERE x > 1 RETURN x ORDER BY x LIMIT 3",
+		"STREAM MATCH (n) RETURN count(n) AS c",
+		"STREAM UNWIND [1, 2] AS x RETURN x",
+		"STREAM MATCH (a) RETURN a.x AS x UNION MATCH (b) RETURN b.x AS x",
+	} {
+		if _, err := analyze(t, src); err != nil {
+			t.Errorf("Analyze(%q): %v", src, err)
+		}
+	}
+	for _, src := range []string{
+		"STREAM CREATE (n:Person)",
+		"STREAM CREATE (n:Person) RETURN n",
+		"STREAM MATCH (n) SET n.x = 1 RETURN n",
+		"STREAM MATCH (n) REMOVE n.x RETURN n",
+		"STREAM MATCH (n) DETACH DELETE n",
+		"STREAM MERGE (n:Person {name: 'a'}) RETURN n",
+		"STREAM CREATE INDEX FOR (p:Person) ON (p.email)",
+	} {
+		_, err := analyze(t, src)
+		se := wantSemaError(t, err)
+		if se != nil && !strings.Contains(se.Msg, "STREAM") {
+			t.Errorf("Analyze(%q): error %q does not mention STREAM", src, se.Msg)
+		}
+	}
 }

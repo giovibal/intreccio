@@ -458,3 +458,48 @@ func dump(v any) string {
 	}
 	return string(b)
 }
+
+// TestParseStream covers the STREAM prefix (ADR 0010): it flags the query as a
+// live query and leaves the rest of the grammar alone.
+func TestParseStream(t *testing.T) {
+	plain, err := Parse("MATCH (n:Person) WHERE n.age > 1 RETURN n.name AS name UNION MATCH (n:Bot) RETURN n.name AS name")
+	if err != nil {
+		t.Fatalf("parse plain: %v", err)
+	}
+	if plain.Stream {
+		t.Fatal("a plain query must not be flagged as a stream")
+	}
+	for _, kw := range []string{"STREAM", "stream", "Stream"} {
+		got, err := Parse(kw + " MATCH (n:Person) WHERE n.age > 1 RETURN n.name AS name UNION MATCH (n:Bot) RETURN n.name AS name;")
+		if err != nil {
+			t.Fatalf("parse %s query: %v", kw, err)
+		}
+		if !got.Stream {
+			t.Errorf("%s prefix: Stream flag not set", kw)
+		}
+		if len(got.Clauses) != len(plain.Clauses) || len(got.Unions) != len(plain.Unions) {
+			t.Errorf("%s prefix changed the parsed clauses", kw)
+		}
+	}
+
+	// "stream" stays an ordinary identifier everywhere else.
+	q, err := Parse("MATCH (stream:Stream {stream: 1}) RETURN stream.stream AS stream")
+	if err != nil {
+		t.Fatalf("stream as an identifier: %v", err)
+	}
+	if q.Stream {
+		t.Error("an identifier named stream must not set the Stream flag")
+	}
+
+	for _, src := range []string{
+		"STREAM",
+		"STREAM;",
+		"STREAM STREAM MATCH (n) RETURN n",
+		"MATCH (n) STREAM RETURN n",
+		"MATCH (n) RETURN n UNION STREAM MATCH (n) RETURN n",
+	} {
+		if _, err := Parse(src); err == nil {
+			t.Errorf("Parse(%q): expected an error", src)
+		}
+	}
+}

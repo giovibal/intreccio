@@ -89,8 +89,10 @@ outside the MVP slice of DESIGN §8.
   existed yet) and watchers exist at commit, all of them are woken.
 - **Snapshot restore** (clustered) replaces the state without deltas: all
   watchers are woken and the diff emits the net change.
-- A per-subscription **row cap** bounds memory; exceeding it ends the
-  subscription with an error.
+- A per-subscription **row cap** (10 000 rows by default) bounds memory;
+  exceeding it ends the subscription with an error.
+- A backend opts in by accepting the hub its commit points report to
+  (`SetChangeHub`); `Subscribe` refuses a backend that does not.
 
 ## Consequences
 - This is the first **long-lived in-memory state** in the engine (registry,

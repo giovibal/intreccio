@@ -244,6 +244,17 @@ for res.Next() {
 Reads and writes can share `Query` (the planner knows whether the plan writes) or
 stay separate (`Query` read-only, `Execute` write). Decision in Phase 7.
 
+Live queries use `Subscribe` (ADR 0010): the same read query, delivered once and
+then as coalesced batches of rows added to / removed from its result.
+
+```go
+sub, err := db.Subscribe(ctx, `MATCH (p:Person) RETURN p.name AS name`, nil)
+defer sub.Close()
+for change := range sub.Changes() {
+    // change.Initial, change.Added, change.Removed
+}
+```
+
 ## 11. Project layout (Go)
 
 ```

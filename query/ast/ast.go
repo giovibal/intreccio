@@ -12,7 +12,12 @@ type Pos struct {
 
 // Query is a regular query: a sequence of clauses optionally followed by one
 // or more UNION arms.
+//
+// Stream is set by the STREAM prefix (`STREAM MATCH … RETURN …`), which marks
+// the whole query as a live query: one whose result is kept up to date instead
+// of being returned once. It is an extension outside openCypher 9 (ADR 0010).
 type Query struct {
+	Stream  bool
 	Clauses []Clause
 	Unions  []QueryUnion
 }

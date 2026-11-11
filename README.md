@@ -31,6 +31,8 @@ medium-sized graphs. It is *not* an analytical (OLAP) engine.
   returns, so they survive an OS crash or power loss (`WithSyncWrites(false)`
   opts out for higher throughput).
 - **Rule-based query planner** with an inspectable textual `EXPLAIN`.
+- **Live queries** — subscribe to a read query and receive the changes to its
+  result (rows added / removed) as writes are committed.
 
 ## Quickstart
 
@@ -126,6 +128,50 @@ res, err := db.Query(ctx,
     nil,
     intreccio.WithMaxRows(1000)) // optional cap, ErrResultLimit if exceeded
 ```
+
+### Live queries
+
+`Subscribe` runs a read query once, delivers the result, and then keeps
+delivering how that result **changes** as writes are committed — no polling:
+
+```go
+sub, err := db.Subscribe(ctx, "MATCH (p:Person) RETURN p.name AS name", nil)
+if err != nil {
+	log.Fatal(err)
+}
+defer sub.Close()
+
+for change := range sub.Changes() {
+	// The first batch has change.Initial set: the current result, in Added.
+	for _, row := range change.Removed {
+		fmt.Println("-", row[0])
+	}
+	for _, row := range change.Added {
+		fmt.Println("+", row[0])
+	}
+}
+if err := sub.Err(); err != nil { // why it ended; nil after Close
+	log.Print(err)
+}
+```
+
+- Rows have the same shape as `Result.Rows`. A row that stops matching is
+  reported in `Removed`; a row whose contents change arrives as the old row in
+  `Removed` and the new one in `Added`, in the same batch.
+- Any read query works, including aggregations and `ORDER BY … LIMIT`.
+- Batches are **coalesced**: a consumer that is slow to receive gets the net
+  difference since its last batch rather than one batch per commit, so it may
+  skip intermediate states but never falls behind or grows a queue.
+- A subscription keeps its last result in memory; `WithSubscriptionMaxRows(n)`
+  caps it (default 10 000 rows; exceeding it ends the subscription with
+  `ErrResultLimit`).
+- It ends on `Close`, when `ctx` is done, or when the database is closed.
+
+Each relevant commit re-runs the query, so live queries suit selective queries
+on a modest number of subscriptions; a write that cannot affect a query (other
+labels, relationship types or properties) does not wake it. Live queries
+currently work on embedded databases; clustered support is in progress
+(ADR 0010).
 
 ### Use the CLI / REPL
 
@@ -351,6 +397,11 @@ front-end (usable without a database), and the opt-in `cluster` package; the
 engine and the write path stay under `internal/`.
 
 ## Supported Cypher
+
+One extension outside openCypher: a **`STREAM`** prefix (`STREAM MATCH …
+RETURN …`) marks a read query as a live query. In the REPL it follows the
+result until Ctrl-C, printing `+` / `-` rows; in Go, use `db.Subscribe`
+(`db.Query` rejects it with `ErrStreamQuery`).
 
 Read side:
 - `MATCH` / `OPTIONAL MATCH` with node/relationship patterns, directions, labels

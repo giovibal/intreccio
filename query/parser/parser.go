@@ -116,6 +116,12 @@ func (p *parser) identName() (string, error) {
 
 func (p *parser) parseQuery() (*ast.Query, error) {
 	q := &ast.Query{}
+	// STREAM is only a keyword here, at the very start of a query, where no
+	// clause can begin with an identifier; elsewhere it stays an ordinary name.
+	if p.atKw("STREAM") {
+		p.advance()
+		q.Stream = true
+	}
 	clauses, err := p.parseClauseList()
 	if err != nil {
 		return nil, err
