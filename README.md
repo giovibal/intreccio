@@ -280,6 +280,16 @@ REPL commands: `:quit` / `:exit` to leave, `:help` for help. Statements can span
 multiple lines; the terminator is `;` (a `;` inside a string literal is not
 currently recognized as a boundary).
 
+On a terminal the REPL edits lines and remembers the statements of the session:
+
+| Key / command | What it does |
+|---|---|
+| Up / Down | Recall earlier statements onto the prompt, to edit or run again. A statement typed over several lines comes back on one. |
+| `:edit` (or `:e`) | Open the statement being typed in `$VISUAL` / `$EDITOR` (default `vi`); on an empty prompt, the **previous statement**. What you save is run. |
+| Ctrl-X | Open the line on the prompt in the editor — after an Up, the recalled statement as it was originally typed. |
+| Ctrl-C | Discard what is being typed (and stop a running `STREAM` query). |
+| Ctrl-D | Leave the REPL. |
+
 ### Use the Cypher parser standalone
 
 The openCypher front-end lives in `query/*` and is importable on its own — a

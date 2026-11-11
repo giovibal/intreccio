@@ -103,6 +103,8 @@ go test -bench . ./...        # benchmark
   route is chosen; otherwise no dependency (hand-written parser).
 - Record serialization: to be decided (custom stdlib `encoding/binary`, or a pure
   Go CBOR/MessagePack).
+- `golang.org/x/term` — line editing and history in the CLI's REPL only
+  (`cmd/intreccio`); the library does not import it.
 
 ## What NOT to do
 - Do not introduce cgo for any reason.

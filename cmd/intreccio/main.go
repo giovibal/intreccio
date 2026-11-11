@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -107,48 +106,65 @@ func openDB(path string) (*intreccio.DB, error) {
 }
 
 // repl runs the read-eval-print loop, reading multi-line statements terminated
-// by ';' from in and writing results to out / errors to errOut.
+// by ';' from in and writing results to out / errors to errOut. On a terminal
+// it edits lines and keeps a statement history (see lineedit.go).
 func repl(db *intreccio.DB, in io.Reader, out, errOut io.Writer) {
-	tty := false
-	if f, ok := in.(*os.File); ok {
-		tty = isTerminal(f)
-	}
-	if tty {
-		// _, _ = fmt.Fprintln(out, "intreccio REPL — end statements with ';', type :quit to exit, :help for help")
+	replWith(db, newLineSource(in, out), out, errOut)
+}
+
+func replWith(db *intreccio.DB, src lineSource, out, errOut io.Writer) {
+	if src.interactive() {
 		printHelp(out)
 	}
+	hist := &history{}
+	src.setHistory(hist)
 
-	reader := bufio.NewReader(in)
+	// edit opens text in the editor and runs what comes back, statement by
+	// statement; each one becomes the previous statement in turn.
+	edit := func(text string) {
+		content, err := openEditor(text)
+		if err != nil {
+			_, _ = fmt.Fprintln(errOut, err)
+			return
+		}
+		runStatements(db, content, out, errOut, hist)
+	}
+
 	var buf strings.Builder
 	for {
-		if tty {
-			if buf.Len() == 0 {
-				_, _ = fmt.Fprint(out, "> ")
-			} else {
-				_, _ = fmt.Fprint(out, ". ")
-			}
+		prompt := "> "
+		if buf.Len() > 0 {
+			prompt = ". "
 		}
-		line, err := reader.ReadString('\n')
+		line, event, err := src.readLine(prompt)
 		if err != nil && err != io.EOF {
 			_, _ = fmt.Fprintln(errOut, err)
 			return
 		}
 		eof := err == io.EOF
-		line = strings.TrimRight(line, "\n\r")
 		trimmed := strings.TrimSpace(line)
 
-		// :edit/:e is handled regardless of buffer state: with a partial buffer
-		// it pre-populates the editor with what was typed so far, then resets
-		// the buffer and runs the edited content as a batch.
-		if trimmed == ":edit" || trimmed == ":e" {
-			initial := buf.String()
+		switch event {
+		case lineInterrupted: // Ctrl-C: drop whatever was being typed
 			buf.Reset()
-			content, err := openEditor(initial)
-			if err != nil {
-				_, _ = fmt.Fprintln(errOut, err)
-			} else {
-				runBatch(db, content, out, errOut)
+			continue
+		case lineEdit: // Ctrl-X: what is on the prompt goes to the editor
+			text := buf.String() + hist.original(line)
+			buf.Reset()
+			edit(text)
+			continue
+		}
+
+		// :edit/:e is handled regardless of buffer state. With a partial
+		// buffer it opens what was typed so far; on an empty prompt it opens
+		// the previous statement. Either way the result is run.
+		if trimmed == ":edit" || trimmed == ":e" {
+			text := buf.String()
+			buf.Reset()
+			if strings.TrimSpace(text) == "" {
+				text = hist.last()
 			}
+			edit(text)
 			if eof {
 				return
 			}
@@ -179,11 +195,11 @@ func repl(db *intreccio.DB, in io.Reader, out, errOut io.Writer) {
 		}
 
 		if strings.HasSuffix(trimmed, ";") || (eof && buf.Len() > 0) {
-			query := strings.TrimSpace(buf.String())
-			query = strings.TrimRight(query, ";")
-			query = strings.TrimSpace(query)
+			text := strings.TrimSpace(buf.String())
+			query := strings.TrimSpace(strings.TrimRight(text, ";"))
 			buf.Reset()
 			if query != "" {
+				hist.record(text)
 				if err := execute(db, query, out); err != nil {
 					_, _ = fmt.Fprintln(errOut, err)
 				}
@@ -241,10 +257,19 @@ func openEditor(initial string) (string, error) {
 // runBatch splits content on ';' and runs each non-empty statement in order.
 // Errors are reported on errOut but do not interrupt the batch.
 func runBatch(db *intreccio.DB, content string, out, errOut io.Writer) {
+	runStatements(db, content, out, errOut, nil)
+}
+
+// runStatements runs the ';'-separated statements of content, recording each
+// in hist when there is one.
+func runStatements(db *intreccio.DB, content string, out, errOut io.Writer, hist *history) {
 	for _, stmt := range strings.Split(content, ";") {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
 			continue
+		}
+		if hist != nil {
+			hist.record(stmt + ";")
 		}
 		if err := execute(db, stmt, out); err != nil {
 			_, _ = fmt.Fprintln(errOut, err)
@@ -362,7 +387,9 @@ func printHelp(out io.Writer) {
 	_, _ = fmt.Fprintln(out, "Commands:")
 	_, _ = fmt.Fprintln(out, "  :quit, :exit    leave the REPL")
 	_, _ = fmt.Fprintln(out, "  :help           show this message")
-	_, _ = fmt.Fprintln(out, "  :edit, :e       open the current buffer in $EDITOR and run the result")
+	_, _ = fmt.Fprintln(out, "  :edit, :e       open the statement being typed, or the previous one, in $EDITOR and run the result")
+	_, _ = fmt.Fprintln(out, "Keys: Up/Down recall earlier statements, Ctrl-X opens the line in $EDITOR,")
+	_, _ = fmt.Fprintln(out, "  Ctrl-C discards what is being typed, Ctrl-D leaves the REPL.")
 	_, _ = fmt.Fprintln(out, "Live queries: prefix a read query with STREAM to follow its result;")
 	_, _ = fmt.Fprintln(out, "  rows are printed with '+' when they appear and '-' when they go. Ctrl-C stops it.")
 	_, _ = fmt.Fprintln(out, "Note: ';' inside string literals is not recognized as a statement boundary.")
