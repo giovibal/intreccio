@@ -131,7 +131,9 @@ func (e *expand) next() (binding, bool, error) {
 	}
 }
 
-// gather collects the candidate edges from nodeID according to direction and types.
+// gather collects the candidate edges from nodeID according to direction and
+// types. An undirected pattern reads both adjacency lists; a self-loop is in
+// both and is one relationship, so it is taken from the outgoing one only.
 func (e *expand) gather(nodeID uint64) ([]edgeHit, error) {
 	var hits []edgeHit
 	addOut := e.dir == ast.DirOut || e.dir == ast.DirBoth
@@ -155,6 +157,9 @@ func (e *expand) gather(nodeID uint64) ([]edgeHit, error) {
 				return nil, err
 			}
 			for _, r := range refs {
+				if addOut && r.Src == r.Dst {
+					continue // a self-loop: already found among the outgoing edges
+				}
 				hits = append(hits, edgeHit{ref: r, other: r.Src})
 			}
 		}
@@ -371,6 +376,9 @@ func (e *varExpand) neighbors(nodeID uint64) ([]neighborHit, error) {
 				return nil, err
 			}
 			for _, r := range refs {
+				if addOut && r.Src == r.Dst {
+					continue // a self-loop: already found among the outgoing edges
+				}
 				out = append(out, neighborHit{edgeID: r.ID, otherID: r.Src})
 			}
 		}
