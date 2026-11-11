@@ -264,7 +264,7 @@ func (db *DB) startLocal(ctx context.Context, sub *Subscription, q *ast.Query, c
 	sub.columns = columns
 
 	run = func() error {
-		if !sub.deliver(ctx, Change{Added: ev.rows, Initial: true}) {
+		if !sub.deliver(ctx, Change{Added: ev.added, Initial: true}) {
 			return nil
 		}
 		for {
@@ -272,7 +272,7 @@ func (db *DB) startLocal(ctx context.Context, sub *Subscription, q *ast.Query, c
 			if err != nil || ev == nil {
 				return err
 			}
-			c := Change{Added: ev.addedRows()}
+			c := Change{Added: ev.added}
 			for _, b := range ev.removed {
 				row, err := decodeRow(b)
 				if err != nil {
@@ -361,7 +361,7 @@ func (db *DB) serveSubscription(ctx context.Context, req wire.SubscribeRequest, 
 	if err := sink.Columns(semaRes.Columns); err != nil {
 		return err
 	}
-	if err := sink.Batch(wire.Batch{Initial: true, Index: ev.index, Added: ev.enc}); err != nil {
+	if err := sink.Batch(wire.Batch{Initial: true, Index: ev.index, Added: ev.addedEnc}); err != nil {
 		return err
 	}
 	for {
@@ -372,10 +372,7 @@ func (db *DB) serveSubscription(ctx context.Context, req wire.SubscribeRequest, 
 		if ev == nil {
 			return ctx.Err()
 		}
-		batch := wire.Batch{Index: ev.index, Removed: ev.removed}
-		for _, i := range ev.added {
-			batch.Added = append(batch.Added, ev.enc[i])
-		}
+		batch := wire.Batch{Index: ev.index, Added: ev.addedEnc, Removed: ev.removed}
 		if err := sink.Batch(batch); err != nil {
 			return err
 		}
@@ -426,55 +423,57 @@ type liveQuery struct {
 	columns []string
 	params  map[string]any
 	maxRows int64
-	result  changefeed.ResultSet
+
+	// Exactly one of the two holds the last result. A query that can be
+	// re-evaluated around the nodes that changed has an anchor; any other is
+	// re-run in full and diffed through result.
+	anchor *anchor
+	result changefeed.ResultSet
 }
 
 // newLiveQuery registers the watcher. That happens before the first
 // evaluation on purpose: a commit landing in between then marks the watcher
 // dirty instead of being lost.
 func (db *DB) newLiveQuery(ctx context.Context, q *ast.Query, columns []string, params map[string]any, maxRows int64) *liveQuery {
-	return &liveQuery{
-		db:      db,
-		ctx:     ctx,
-		watcher: db.hub.Register(changefeed.FootprintOf(q)),
-		q:       q,
-		columns: columns,
-		params:  params,
-		maxRows: maxRows,
+	lq := &liveQuery{db: db, ctx: ctx, q: q, columns: columns, params: params, maxRows: maxRows}
+	if anchoringEnabled {
+		lq.anchor = newAnchor(q, columns)
 	}
+	if lq.anchor != nil {
+		lq.watcher = db.hub.RegisterTracking(changefeed.FootprintOf(q))
+	} else {
+		lq.watcher = db.hub.Register(changefeed.FootprintOf(q))
+	}
+	return lq
 }
 
 func (lq *liveQuery) close() { lq.db.hub.Unregister(lq.watcher) }
 
-// evaluation is one run of a live query and how it differs from the previous.
+// evaluation is how one evaluation of a live query changed its result. The
+// first evaluation reports the whole result as added, in query order.
 type evaluation struct {
-	rows    [][]any  // the full current result
-	enc     [][]byte // the same rows, canonically encoded
-	added   []int    // indexes into rows/enc of the rows that are new
-	removed [][]byte // encoded rows that are gone
+	added    [][]any  // rows that entered the result
+	addedEnc [][]byte // the same rows, canonically encoded
+	removed  [][]byte // encoded rows that left it
 	// index is the applied Raft index of the state the result was read from
 	// (0 on an embedded database).
 	index uint64
 }
 
-func (ev *evaluation) addedRows() [][]any {
-	out := make([][]any, len(ev.added))
-	for i, idx := range ev.added {
-		out[i] = ev.rows[idx]
-	}
-	return out
-}
-
-// evaluate runs the query against the current state and folds the outcome into
-// the held result.
+// evaluate brings the held result up to date with the current state.
 func (lq *liveQuery) evaluate() (*evaluation, error) {
+	if lq.anchor != nil {
+		return lq.evaluateAnchored()
+	}
+	lq.db.liveStats.full.Add(1)
 	ev := &evaluation{}
+	var rows [][]any
 	err := lq.db.be.View(func(txn storage.Txn) error {
 		res, err := runQuery(txn, lq.q, lq.columns, lq.params, lq.ctx, lq.maxRows)
 		if err != nil {
 			return err
 		}
-		ev.rows = res.Rows
+		rows = res.Rows
 		// Read in the same transaction as the rows: the index is exact.
 		ev.index, err = catalog.AppliedIndex(txn)
 		return err
@@ -482,11 +481,85 @@ func (lq *liveQuery) evaluate() (*evaluation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ev.enc, err = encodeRows(ev.rows); err != nil {
+	enc, err := encodeRows(rows)
+	if err != nil {
 		return nil, err
 	}
-	ev.added, ev.removed = lq.result.Replace(ev.enc)
+	var addedIdx []int
+	addedIdx, ev.removed = lq.result.Replace(enc)
+	for _, i := range addedIdx {
+		ev.added = append(ev.added, rows[i])
+		ev.addedEnc = append(ev.addedEnc, enc[i])
+	}
 	return ev, nil
+}
+
+// evaluateAnchored is evaluate for a query with an anchor: it re-evaluates only
+// around the nodes that changed, and in full when those cannot be listed.
+//
+// Either way the held result ends up exactly the query's result on one
+// snapshot. For the anchored path that takes care: a write is visible to a new
+// read transaction from the moment it commits, a moment before the hub is told
+// which nodes it touched. So the dirty set is taken twice — before the read
+// transaction opens, and again once every write that transaction could contain
+// has been reported (Hub.AwaitReported). Their union covers the snapshot. The
+// second take may also hold writes that committed too late to be in it; those
+// are put back, at the cost of one more round.
+func (lq *liveQuery) evaluateAnchored() (*evaluation, error) {
+	dirty, full := lq.watcher.TakeDirty()
+	var (
+		ev       *evaluation
+		late     []uint64
+		lateFull bool
+	)
+	err := lq.db.be.View(func(txn storage.Txn) error {
+		var err error
+		if lq.anchor.built && !full {
+			if err = lq.db.hub.AwaitReported(lq.ctx, lq.db.hub.Started()); err != nil {
+				return err
+			}
+			late, lateFull = lq.watcher.TakeDirty()
+		}
+		if !lq.anchor.built || full || lateFull {
+			lq.db.liveStats.full.Add(1)
+			ev, err = lq.anchor.rebuild(txn, lq)
+		} else {
+			lq.db.liveStats.anchored.Add(1)
+			ev, err = lq.anchor.refresh(txn, lq, mergeIDs(dirty, late))
+		}
+		if err != nil {
+			return err
+		}
+		ev.index, err = catalog.AppliedIndex(txn)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(late) > 0 || lateFull {
+		// What the second take saw may not be in this snapshot: look again.
+		lq.watcher.Remark(late, lateFull)
+	}
+	return ev, nil
+}
+
+// mergeIDs returns the sorted union of two sorted ID lists.
+func mergeIDs(a, b []uint64) []uint64 {
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]uint64, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		switch {
+		case a[0] < b[0]:
+			out, a = append(out, a[0]), a[1:]
+		case a[0] > b[0]:
+			out, b = append(out, b[0]), b[1:]
+		default:
+			out, a, b = append(out, a[0]), a[1:], b[1:]
+		}
+	}
+	return append(append(out, a...), b...)
 }
 
 // next waits for the next evaluation that changed the result. It returns nil

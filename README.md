@@ -167,9 +167,20 @@ if err := sub.Err(); err != nil { // why it ended; nil after Close
   `ErrResultLimit`).
 - It ends on `Close`, when `ctx` is done, or when the database is closed.
 
-Each relevant commit re-runs the query, so live queries suit selective queries
-on a modest number of subscriptions; a write that cannot affect a query (other
-labels, relationship types or properties) does not wake it.
+A write that cannot affect a query (other labels, relationship types or
+properties) does not wake it. What a relevant write costs depends on the query:
+
+- A plain `MATCH … [WHERE …] RETURN …` (fixed-length relationships, no
+  aggregation, `DISTINCT`, `ORDER BY`, `SKIP` or `LIMIT`) is re-evaluated only
+  **around the nodes that changed**. The cost follows the neighbourhood of the
+  change, not the size of the result: in the benchmark, renaming one node under
+  a live query over 100, 1 000 and 10 000 relationships takes about 0.1–0.2 ms
+  each time, against 4 ms, 33 ms and 325 ms for re-running the query. Such a
+  subscription keeps an index of its matches, so it uses more memory per row.
+- Any other query is **re-run** on each relevant commit and diffed. That suits
+  selective queries on a modest number of subscriptions.
+
+Either way every batch reflects one consistent snapshot of the database.
 
 Live queries work on embedded databases and on every cluster member. Each
 **voter** serves its subscriptions from its own replica, so they keep working

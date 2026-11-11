@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/changefeed"
@@ -47,6 +48,12 @@ type DB struct {
 	mu     sync.Mutex
 	subs   map[*Subscription]struct{} // running subscriptions
 	closed bool
+
+	// liveStats counts live-query evaluations by kind, for tests and benchmarks.
+	liveStats struct {
+		full     atomic.Int64 // the query was run in full
+		anchored atomic.Int64 // the query was re-evaluated around changed nodes
+	}
 }
 
 // New wraps a Backend in a DB. It is the seam used by the clustering package;

@@ -46,7 +46,22 @@ type op interface {
 // Run builds the operator tree for root and drains it, returning the rows mapped
 // to the given output columns.
 func Run(root plan.Op, columns []string, ctx *Context) ([][]any, error) {
-	o, err := buildWith(root, ctx, nil)
+	return run(root, columns, ctx, nil)
+}
+
+// RunSeeded runs a plan built by plan.PlanSeeded: seed holds the values of the
+// variables that plan takes as already bound (a node variable is a graph.Node),
+// and stands in for the plan's Argument leaf.
+func RunSeeded(root plan.Op, columns []string, ctx *Context, seed map[string]any) ([][]any, error) {
+	row := make(binding, len(seed))
+	for k, v := range seed {
+		row[k] = v
+	}
+	return run(root, columns, ctx, &argumentOp{row: row})
+}
+
+func run(root plan.Op, columns []string, ctx *Context, arg *argumentOp) ([][]any, error) {
+	o, err := buildWith(root, ctx, arg)
 	if err != nil {
 		return nil, err
 	}

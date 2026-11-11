@@ -37,7 +37,9 @@ analytical OLAP engine.
 5. **Live-query commit reporting** (ADR 0010): every commit point reports to the
    `changefeed.Hub` **only after** a successful commit, and reports a commit it
    cannot describe as unknown (wake all). A watcher may be woken needlessly,
-   never missed. Reporting must never fail or block a write.
+   never missed. Reporting must never fail or block a write. Commit points go
+   through `Hub.Update`, which also keeps a write "in flight" until it has been
+   reported — anchored evaluation depends on that to stay on one snapshot.
 
 ## Layout
 ```

@@ -68,7 +68,53 @@ it emitted. This is valid for any read query, including aggregations and
 v2 (an optimisation, same semantics): evaluate plain `MATCH … WHERE … RETURN`
 queries **anchored** on the changed entity, reusing the planner's support for a
 pre-bound variable (`Argument` leaf), so the cost follows the neighbourhood of
-the change instead of the whole query.
+the change instead of the whole query. See "Anchored evaluation as
+implemented" below.
+
+### Anchored evaluation as implemented (v2)
+`anchored.go` re-evaluates a live query around the nodes that changed.
+
+- **Which queries**: `MATCH pattern [WHERE …] RETURN items` — one non-optional
+  `MATCH`, fixed-length relationships, no path variable, a projection without
+  aggregation, `DISTINCT`, `ORDER BY`, `SKIP` or `LIMIT`. For these the result
+  is one row per match, and a match can only appear, disappear or change when
+  a node it binds changes; a relationship change counts as a change to both of
+  its ends. Every other query keeps the v1 path. (A variable-length match is
+  excluded because it depends on nodes it does not bind.)
+- **How**: the query is rewritten so that every pattern element has a name and
+  the projection ends with each element's ID. Those IDs are the match's
+  identity. The anchor keeps every match's row and node IDs, and an index from
+  node to matches. Given the changed nodes, the stale rows are the matches the
+  index lists for them; the rows that replace them come from matching the
+  pattern outward from each changed node, once per node position, with a plan
+  whose leaf is that node (`plan.PlanSeeded`, `exec.RunSeeded`).
+- **Which nodes changed**: a tracking watcher records the node IDs of the
+  commits that concern it. More than 4096 of them, or any change the hub
+  cannot describe (a commit without capture, a snapshot restore), asks for a
+  full run instead.
+- **Still one consistent snapshot per batch.** A write is visible to readers a
+  moment before it is reported. An evaluation therefore takes the dirty set,
+  opens its read transaction, waits until every write that transaction could
+  contain has been reported (`Hub.AwaitReported`, which blocks the evaluation,
+  never a write), and takes the dirty set again. The union covers the
+  snapshot; what the second take saw is re-marked, costing one extra round.
+  Without this an evaluation could deliver rows of two different states.
+- **The executor is the reference.** A match carries a count, so if the
+  executor returns the same binding twice the anchor does too. A property test
+  checks, over random mutation sequences and at every step, that the anchored
+  result equals the query run from scratch and that each reported difference
+  is exact.
+- **Cost**: the benchmark renames one node in a graph of N disjoint
+  `(a)-[:KNOWS]->(b)` pairs with a live query over all of them, and measures
+  the write plus the next batch:
+
+      pairs     anchored      full re-run
+        100     0.14 ms         3.8 ms
+       1000     0.11 ms        33 ms
+      10000     0.16 ms       325 ms
+
+  Anchored cost follows the neighbourhood of the change, not the result. The
+  price is memory: the index roughly triples what a subscription holds per row.
 
 ### Syntax and API
 - Go API (primary): `db.Subscribe(ctx, cypher, params)` returns a subscription
@@ -101,5 +147,6 @@ outside the MVP slice of DESIGN §8.
   0007 (the write-set is the complete effect of a statement) is untouched.
 - v1 cost is (relevant watchers) × (write rate) query executions, on the node
   serving them. Fine for tens to hundreds of selective watchers; not for
-  thousands of broad ones. v2 addresses the per-evaluation cost.
+  thousands of broad ones. v2 removes the per-evaluation cost for plain `MATCH`
+  queries; aggregations and ordered or limited queries still pay it.
 - Dataless clients need a streaming transport; see ADR 0011.

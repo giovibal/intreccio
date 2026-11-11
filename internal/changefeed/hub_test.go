@@ -1,10 +1,14 @@
 package changefeed
 
 import (
+	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/giovibal/intreccio/internal/storage"
 	"github.com/giovibal/intreccio/internal/storage/codec"
 )
 
@@ -271,5 +275,158 @@ func TestHubInvalidate(t *testing.T) {
 	h.Committed(cs)
 	if !woken(w) {
 		t.Error("Invalidate must drop cached names")
+	}
+}
+
+func takeDirty(t *testing.T, w *Watcher) ([]uint64, bool) {
+	t.Helper()
+	ids, full := w.TakeDirty()
+	return ids, full
+}
+
+func TestHubTracksDirtyNodes(t *testing.T) {
+	h := NewHub(newDict())
+	w := h.RegisterTracking(Footprint{Labels: set("Person"), Types: set("KNOWS"), Keys: set("name")})
+	plain := h.Register(Footprint{AnyLabel: true, AnyType: true, AnyKey: true})
+	person := []uint32{lPerson}
+
+	if ids, full := takeDirty(t, w); len(ids) != 0 || full {
+		t.Fatalf("fresh watcher: dirty = %v, full = %v", ids, full)
+	}
+
+	// Relevant node changes are recorded, irrelevant ones are not.
+	h.Committed(&ChangeSet{Nodes: []NodeChange{
+		{ID: 9, After: node(person, nil)},
+		{ID: 3, Before: node(person, map[uint32]any{kName: "a"}), After: node(person, map[uint32]any{kName: "b"})},
+		{ID: 5, After: node([]uint32{lCompany}, nil)},                                                                      // other label
+		{ID: 6, Before: node(person, map[uint32]any{kAge: int64(1)}), After: node(person, map[uint32]any{kAge: int64(2)})}, // unwatched key
+	}})
+	if !woken(w) {
+		t.Fatal("not woken")
+	}
+	if ids, full := takeDirty(t, w); !reflect.DeepEqual(ids, []uint64{3, 9}) || full {
+		t.Errorf("dirty = %v (full %v), want [3 9]", ids, full)
+	}
+	if ids, _ := takeDirty(t, w); len(ids) != 0 {
+		t.Errorf("TakeDirty did not clear: %v", ids)
+	}
+
+	// A relationship change dirties both of its ends, created or deleted.
+	h.Committed(&ChangeSet{Edges: []EdgeChange{
+		{ID: 1, After: &codec.EdgeRecord{Type: tKnows, Src: 20, Dst: 21}},
+		{ID: 2, Before: &codec.EdgeRecord{Type: tKnows, Src: 22, Dst: 20}},
+		{ID: 3, After: &codec.EdgeRecord{Type: tWorks, Src: 30, Dst: 31}}, // other type
+	}})
+	if ids, full := takeDirty(t, w); !reflect.DeepEqual(ids, []uint64{20, 21, 22}) || full {
+		t.Errorf("dirty after relationship changes = %v (full %v), want [20 21 22]", ids, full)
+	}
+
+	// Anything the hub cannot describe asks for a full re-evaluation.
+	for name, unknown := range map[string]func(){
+		"WakeAll":        h.WakeAll,
+		"Committed(nil)": func() { h.Committed(nil) },
+		"Invalidate":     h.Invalidate,
+	} {
+		woken(w)
+		unknown()
+		if ids, full := takeDirty(t, w); !full || len(ids) != 0 {
+			t.Errorf("%s: dirty = %v, full = %v; want a full re-evaluation", name, ids, full)
+		}
+		if _, full := takeDirty(t, w); full {
+			t.Errorf("%s: TakeDirty did not clear the full flag", name)
+		}
+	}
+
+	// So does a dirty set too large to be worth tracking.
+	var many []NodeChange
+	for i := range maxDirtyNodes + 1 {
+		many = append(many, NodeChange{ID: uint64(1000 + i), After: node(person, nil)})
+	}
+	h.Committed(&ChangeSet{Nodes: many})
+	if ids, full := takeDirty(t, w); !full || len(ids) != 0 {
+		t.Errorf("overflow: %d dirty nodes, full = %v; want a full re-evaluation", len(ids), full)
+	}
+
+	// Remark puts work back and wakes.
+	woken(w)
+	w.Remark([]uint64{7, 8}, false)
+	if !woken(w) {
+		t.Error("Remark did not wake")
+	}
+	if ids, full := takeDirty(t, w); !reflect.DeepEqual(ids, []uint64{7, 8}) || full {
+		t.Errorf("after Remark: dirty = %v (full %v)", ids, full)
+	}
+	w.Remark(nil, true)
+	if _, full := takeDirty(t, w); !full {
+		t.Error("Remark(full) lost the flag")
+	}
+
+	// A plain watcher is woken but records nothing.
+	if ids, full := takeDirty(t, plain); len(ids) != 0 || full {
+		t.Errorf("plain watcher: dirty = %v, full = %v", ids, full)
+	}
+}
+
+// TestHubAwaitReported checks the handshake that lets an evaluation know every
+// commit its snapshot may contain has been reported.
+func TestHubAwaitReported(t *testing.T) {
+	s := newStore(t)
+	h := NewHub(newDict())
+
+	if err := h.AwaitReported(context.Background(), h.Started()); err != nil {
+		t.Fatalf("nothing in flight: %v", err)
+	}
+
+	// A write in flight holds back whoever waits for its sequence number.
+	inside, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- h.Update(s, func(storage.Txn) error {
+			close(inside)
+			<-release
+			return nil
+		})
+	}()
+	<-inside
+	seq := h.Started()
+	if seq == 0 {
+		t.Fatal("Started did not count the write in flight")
+	}
+
+	waited := make(chan error, 1)
+	go func() { waited <- h.AwaitReported(context.Background(), seq) }()
+	select {
+	case err := <-waited:
+		t.Fatalf("AwaitReported returned (%v) while the write was in flight", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// Waiting for an earlier point is not held back by a later write.
+	if err := h.AwaitReported(context.Background(), seq-1); err != nil {
+		t.Fatalf("AwaitReported(seq-1): %v", err)
+	}
+	// And a waiter gives up with its context.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := h.AwaitReported(ctx, seq); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("AwaitReported with an expiring context: %v", err)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Errorf("AwaitReported: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AwaitReported never returned after the write reported")
+	}
+
+	// A failed write is no longer in flight either.
+	_ = h.Update(s, func(storage.Txn) error { return errors.New("boom") })
+	if err := h.AwaitReported(context.Background(), h.Started()); err != nil {
+		t.Fatalf("after a failed write: %v", err)
 	}
 }

@@ -48,6 +48,30 @@ func Plan(q *ast.Query, cat Catalog) (Op, error) {
 	return &Union{Parts: parts, Columns: columns, All: all}, nil
 }
 
+// PlanSeeded builds the plan for a query in which the variables in bound are
+// already bound when execution starts: the plan's leaf is an [Argument], to be
+// replaced at execution time by a row carrying their values. A pattern that
+// mentions a bound variable is matched outward from it instead of being
+// scanned, and that variable's own labels and properties are still checked.
+//
+// It is how a live query is re-evaluated around one changed node (ADR 0010).
+// UNION queries are not supported.
+func PlanSeeded(q *ast.Query, cat Catalog, bound []string) (Op, error) {
+	if len(q.Unions) > 0 {
+		return nil, fmt.Errorf("plan: a seeded plan cannot have UNION arms")
+	}
+	pl := &planner{cat: cat, bound: map[string]bool{}, plan: &Argument{}}
+	for _, name := range bound {
+		pl.bind(name)
+	}
+	for _, c := range q.Clauses {
+		if err := pl.clause(c); err != nil {
+			return nil, err
+		}
+	}
+	return pl.plan, nil
+}
+
 // planArm builds the plan for a single UNION arm (or for a query without UNION)
 // and returns the output column names captured from the arm's projection.
 func planArm(clauses []ast.Clause, cat Catalog) (Op, []string, error) {
