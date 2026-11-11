@@ -1,12 +1,13 @@
 package exec
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 
-	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // binding is one row of execution: variable/column name -> value.
@@ -41,6 +42,14 @@ func eval(e ast.Expr, b binding, ctx *Context) (any, error) {
 		return v, nil
 	case *ast.PropertyAccess:
 		return evalProperty(ex, b, ctx)
+	case *ast.ListComprehension:
+		return evalListComprehension(ex, b, ctx)
+	case *ast.Quantifier:
+		return evalQuantifier(ex, b, ctx)
+	case *ast.Subscript:
+		return evalSubscript(ex, b, ctx)
+	case *ast.Slice:
+		return evalSlice(ex, b, ctx)
 	case *ast.Unary:
 		return evalUnary(ex, b, ctx)
 	case *ast.Binary:
@@ -120,13 +129,235 @@ func evalProperty(ex *ast.PropertyAccess, b binding, ctx *Context) (any, error) 
 		return propValue(ctx, t.Props, ex.Key)
 	case graph.Edge:
 		return propValue(ctx, t.Props, ex.Key)
+	case map[string]any:
+		return t[ex.Key], nil // a missing key is null
 	default:
-		return nil, fmt.Errorf("exec: property access on a non-node/edge value (%T)", target)
+		return nil, fmt.Errorf("exec: property access on a non-node/edge/map value (%T)", target)
 	}
 }
 
+// iterList evaluates a list expression for a comprehension or quantifier and
+// calls fn with a row where variable is bound to each element in turn.
+func iterList(listExpr ast.Expr, variable string, b binding, ctx *Context, fn func(row binding, item any) (stop bool, err error)) (isNull bool, err error) {
+	v, err := eval(listExpr, b, ctx)
+	if err != nil {
+		return false, err
+	}
+	if v == nil {
+		return true, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return false, fmt.Errorf("exec: IN requires a list, got %T", v)
+	}
+	row := b.clone()
+	for _, item := range list {
+		if err := ctx.check(); err != nil {
+			return false, err
+		}
+		row[variable] = item
+		stop, err := fn(row, item)
+		if err != nil || stop {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// evalListComprehension evaluates [x IN list WHERE pred | expr]: elements
+// whose predicate is not true are skipped.
+func evalListComprehension(ex *ast.ListComprehension, b binding, ctx *Context) (any, error) {
+	out := []any{}
+	isNull, err := iterList(ex.List, ex.Variable, b, ctx, func(row binding, item any) (bool, error) {
+		if ex.Where != nil {
+			keep, err := eval(ex.Where, row, ctx)
+			if err != nil || !truthy(keep) {
+				return false, err
+			}
+		}
+		if ex.Map != nil {
+			v, err := eval(ex.Map, row, ctx)
+			if err != nil {
+				return false, err
+			}
+			item = v
+		}
+		out = append(out, item)
+		return false, nil
+	})
+	if err != nil || isNull {
+		return nil, err
+	}
+	return out, nil
+}
+
+// evalQuantifier evaluates any/all/none/single(x IN list WHERE pred) with
+// three-valued logic: elements whose predicate is null make the answer null
+// unless the other elements already decide it.
+func evalQuantifier(ex *ast.Quantifier, b binding, ctx *Context) (any, error) {
+	var trues, falses, unknowns int
+	isNull, err := iterList(ex.List, ex.Variable, b, ctx, func(row binding, _ any) (bool, error) {
+		v, err := eval(ex.Where, row, ctx)
+		if err != nil {
+			return false, err
+		}
+		switch {
+		case v == nil:
+			unknowns++
+		case truthy(v):
+			trues++
+		default:
+			falses++
+		}
+		switch ex.Kind { // stop as soon as the answer is decided
+		case "any", "none":
+			return trues > 0, nil
+		case "all":
+			return falses > 0, nil
+		default: // single
+			return trues > 1, nil
+		}
+	})
+	if err != nil || isNull {
+		return nil, err
+	}
+	switch ex.Kind {
+	case "any":
+		if trues > 0 {
+			return true, nil
+		}
+	case "none":
+		if trues > 0 {
+			return false, nil
+		}
+	case "all":
+		if falses > 0 {
+			return false, nil
+		}
+	default: // single
+		if trues > 1 {
+			return false, nil
+		}
+		if unknowns == 0 {
+			return trues == 1, nil
+		}
+		return nil, nil
+	}
+	if unknowns > 0 {
+		return nil, nil
+	}
+	return ex.Kind != "any", nil // any: false; all/none: true
+}
+
+// regexMatch evaluates `s =~ pattern`: the whole string must match (Go RE2
+// syntax). A non-string operand gives null.
+func regexMatch(ctx *Context, l, r any) (any, error) {
+	s, ok1 := l.(string)
+	pattern, ok2 := r.(string)
+	if !ok1 || !ok2 {
+		return nil, nil
+	}
+	re, err := ctx.regexp(pattern)
+	if err != nil {
+		return nil, err
+	}
+	return re.MatchString(s), nil
+}
+
+// evalSubscript evaluates target[index]: a list element by position
+// (negative counts from the end, out of range is null) or a map, node or
+// relationship property by name.
+func evalSubscript(ex *ast.Subscript, b binding, ctx *Context) (any, error) {
+	target, err := eval(ex.Target, b, ctx)
+	if err != nil {
+		return nil, err
+	}
+	index, err := eval(ex.Index, b, ctx)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil || index == nil {
+		return nil, nil
+	}
+	switch t := target.(type) {
+	case []any:
+		i, ok := normalize(index).(int64)
+		if !ok {
+			return nil, fmt.Errorf("exec: list index must be an integer, got %T", index)
+		}
+		if i < 0 {
+			i += int64(len(t))
+		}
+		if i < 0 || i >= int64(len(t)) {
+			return nil, nil
+		}
+		return t[i], nil
+	case map[string]any, graph.Node, graph.Edge:
+		key, ok := index.(string)
+		if !ok {
+			return nil, fmt.Errorf("exec: map key must be a string, got %T", index)
+		}
+		switch m := t.(type) {
+		case map[string]any:
+			return m[key], nil
+		case graph.Node:
+			return propValue(ctx, m.Props, key)
+		default:
+			return propValue(ctx, m.(graph.Edge).Props, key)
+		}
+	default:
+		return nil, fmt.Errorf("exec: cannot index a %T", target)
+	}
+}
+
+// evalSlice evaluates list[from..to]: bounds are clamped to the list,
+// negative bounds count from the end, and a null list or bound gives null.
+func evalSlice(ex *ast.Slice, b binding, ctx *Context) (any, error) {
+	target, err := eval(ex.Target, b, ctx)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil {
+		return nil, nil
+	}
+	list, ok := target.([]any)
+	if !ok {
+		return nil, fmt.Errorf("exec: cannot slice a %T", target)
+	}
+	n := int64(len(list))
+	bound := func(e ast.Expr, open int64) (int64, bool, error) {
+		if e == nil {
+			return open, true, nil
+		}
+		v, err := eval(e, b, ctx)
+		if err != nil || v == nil {
+			return 0, false, err
+		}
+		i, ok := normalize(v).(int64)
+		if !ok {
+			return 0, false, fmt.Errorf("exec: slice bound must be an integer, got %T", v)
+		}
+		if i < 0 {
+			i += n
+		}
+		return min(max(i, 0), n), true, nil
+	}
+	from, ok, err := bound(ex.From, 0)
+	if err != nil || !ok {
+		return nil, err
+	}
+	to, ok, err := bound(ex.To, n)
+	if err != nil || !ok {
+		return nil, err
+	}
+	if from >= to {
+		return []any{}, nil
+	}
+	return append([]any(nil), list[from:to]...), nil
+}
+
 func propValue(ctx *Context, props map[uint32]any, key string) (any, error) {
-	keyID, found, err := catalog.LookupKey(ctx.Txn, key)
+	keyID, found, err := ctx.lookupKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +377,7 @@ func evalLabels(ex *ast.LabelsPredicate, b binding, ctx *Context) (any, error) {
 		return false, nil
 	}
 	for _, name := range ex.Labels {
-		id, found, err := catalog.LookupLabel(ctx.Txn, name)
+		id, found, err := ctx.lookupLabel(name)
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +415,7 @@ func evalUnary(ex *ast.Unary, b binding, ctx *Context) (any, error) {
 	case "-":
 		switch n := v.(type) {
 		case int64:
-			return -n, nil
+			return negateInt(n)
 		case float64:
 			return -n, nil
 		default:
@@ -202,9 +433,9 @@ func evalUnary(ex *ast.Unary, b binding, ctx *Context) (any, error) {
 func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 	switch ex.Op {
 	case "AND":
-		return boolOp(ex, b, ctx, func(l, r bool) bool { return l && r })
+		return boolOp(ex, b, ctx, false)
 	case "OR":
-		return boolOp(ex, b, ctx, func(l, r bool) bool { return l || r })
+		return boolOp(ex, b, ctx, true)
 	}
 
 	l, err := eval(ex.Left, b, ctx)
@@ -218,13 +449,15 @@ func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 
 	switch ex.Op {
 	case "=":
-		return equals(l, r), nil
+		return equalityOp(l, r, false), nil
 	case "<>":
-		return notEquals(l, r), nil
+		return equalityOp(l, r, true), nil
 	case "<", "<=", ">", ">=":
 		return compareOp(ex.Op, l, r), nil
 	case "+", "-", "*", "/", "%":
 		return arithmetic(ex.Op, l, r)
+	case "=~":
+		return regexMatch(ctx, l, r)
 	case "STARTS WITH":
 		return stringPredicate(l, r, strings.HasPrefix)
 	case "ENDS WITH":
@@ -238,21 +471,20 @@ func evalBinary(ex *ast.Binary, b binding, ctx *Context) (any, error) {
 	}
 }
 
+// stringPredicate evaluates STARTS WITH, ENDS WITH and CONTAINS. As in
+// openCypher, the result is null unless both operands are strings.
 func stringPredicate(l, r any, fn func(string, string) bool) (any, error) {
-	if l == nil || r == nil {
+	ls, lok := l.(string)
+	rs, rok := r.(string)
+	if !lok || !rok {
 		return nil, nil
-	}
-	ls, ok := l.(string)
-	if !ok {
-		return nil, fmt.Errorf("exec: string predicate left operand must be a string, got %T", l)
-	}
-	rs, ok := r.(string)
-	if !ok {
-		return nil, fmt.Errorf("exec: string predicate right operand must be a string, got %T", r)
 	}
 	return fn(ls, rs), nil
 }
 
+// inList evaluates `needle IN haystack` with three-valued logic: true if an
+// element equals needle, otherwise null if any comparison was unknown (a null
+// needle or a null element), otherwise false.
 func inList(needle, haystack any) (any, error) {
 	if haystack == nil {
 		return nil, nil
@@ -261,15 +493,26 @@ func inList(needle, haystack any) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("exec: IN requires a list, got %T", haystack)
 	}
+	unknown := false
 	for _, item := range list {
-		if equals(needle, item) {
+		eq, known := equality(needle, item)
+		if known && eq {
 			return true, nil
 		}
+		if !known {
+			unknown = true
+		}
+	}
+	if unknown {
+		return nil, nil
 	}
 	return false, nil
 }
 
-func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (any, error) {
+// boolOp evaluates AND (or OR when isOr is set) with three-valued logic: the
+// deciding value (false for AND, true for OR) wins over null; otherwise null
+// makes the result null. Non-boolean operands count as false, as before.
+func boolOp(ex *ast.Binary, b binding, ctx *Context, isOr bool) (any, error) {
 	l, err := eval(ex.Left, b, ctx)
 	if err != nil {
 		return nil, err
@@ -278,29 +521,104 @@ func boolOp(ex *ast.Binary, b binding, ctx *Context, f func(l, r bool) bool) (an
 	if err != nil {
 		return nil, err
 	}
-	return f(truthy(l), truthy(r)), nil
+	if (l != nil && truthy(l) == isOr) || (r != nil && truthy(r) == isOr) {
+		return isOr, nil
+	}
+	if l == nil || r == nil {
+		return nil, nil
+	}
+	return !isOr, nil
 }
 
+// equals reports whether a and b are definitely equal. An unknown result
+// (null involved) counts as not equal, which is what IN, CASE and MERGE need.
 func equals(a, b any) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0
+	eq, known := equality(a, b)
+	return known && eq
 }
 
-func notEquals(a, b any) bool {
-	if a == nil || b == nil {
-		return false
+// equalityOp evaluates `=` (or `<>` when negate is set) with openCypher
+// three-valued logic: the result is null when it depends on a null.
+func equalityOp(a, b any, negate bool) any {
+	eq, known := equality(a, b)
+	if !known {
+		return nil
 	}
-	c, ok := compareValues(a, b)
-	return ok && c != 0
+	return eq != negate
 }
 
-func compareOp(op string, a, b any) bool {
+// equality compares two values. known is false when the outcome depends on a
+// null (e.g. 1 = null, or [1, null] = [1, null]). Lists compare element by
+// element, maps key by key, nodes and relationships by identity, and values of
+// different kinds are unequal.
+func equality(a, b any) (eq, known bool) {
+	a, b = normalize(a), normalize(b)
+	if a == nil || b == nil {
+		return false, false
+	}
+	switch av := a.(type) {
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false, true
+		}
+		known = true
+		for i := range av {
+			e, k := equality(av[i], bv[i])
+			if k && !e {
+				return false, true
+			}
+			known = known && k
+		}
+		return known, known
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok || len(av) != len(bv) {
+			return false, true
+		}
+		known = true
+		for key, x := range av {
+			y, present := bv[key]
+			if !present {
+				return false, true
+			}
+			e, k := equality(x, y)
+			if k && !e {
+				return false, true
+			}
+			known = known && k
+		}
+		return known, known
+	case graph.Node:
+		bv, ok := b.(graph.Node)
+		return ok && av.ID == bv.ID, true
+	case graph.Edge:
+		bv, ok := b.(graph.Edge)
+		return ok && av.ID == bv.ID, true
+	case graph.Path:
+		bv, ok := b.(graph.Path)
+		return ok && pathIDs(av) == pathIDs(bv), true
+	}
+	// Scalars: shared with the graph layer so an index lookup and a filter
+	// agree (1 = 1.0, NaN equals nothing, different kinds are unequal).
+	return graph.QueryEqual(a, b), true
+}
+
+// compareOp evaluates <, <=, > and >= with openCypher semantics: null when
+// either side is null or the values cannot be compared (e.g. 1 < 'a'), and
+// false whenever NaN is involved. ORDER BY, min and max keep using
+// compareValues, which they need as an ordering.
+func compareOp(op string, a, b any) any {
+	a, b = normalize(a), normalize(b)
+	if a == nil || b == nil {
+		return nil
+	}
+	if isNaN(a) || isNaN(b) {
+		return false
+	}
 	c, ok := compareValues(a, b)
 	if !ok {
-		return false
+		return nil
 	}
 	switch op {
 	case "<":
@@ -312,8 +630,13 @@ func compareOp(op string, a, b any) bool {
 	case ">=":
 		return c >= 0
 	default:
-		return false
+		return nil
 	}
+}
+
+func isNaN(v any) bool {
+	f, ok := v.(float64)
+	return ok && math.IsNaN(f)
 }
 
 // compareValues compares two scalar values, returning the sign of a-b and whether
@@ -372,17 +695,35 @@ func arithmetic(op string, a, b any) (any, error) {
 	return floatArithmetic(op, af, bf)
 }
 
+// ErrIntegerOverflow is returned when integer arithmetic leaves the int64
+// range. openCypher integers do not wrap around.
+var ErrIntegerOverflow = errors.New("exec: integer overflow")
+
 func intArithmetic(op string, a, b int64) (any, error) {
 	switch op {
 	case "+":
-		return a + b, nil
+		return addInt(a, b)
 	case "-":
-		return a - b, nil
+		c := a - b
+		if (a^b)&(a^c) < 0 {
+			return nil, ErrIntegerOverflow
+		}
+		return c, nil
 	case "*":
-		return a * b, nil
+		if a == 0 || b == 0 {
+			return int64(0), nil
+		}
+		c := a * b
+		if c/b != a || (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
+			return nil, ErrIntegerOverflow
+		}
+		return c, nil
 	case "/":
 		if b == 0 {
 			return nil, fmt.Errorf("exec: division by zero")
+		}
+		if a == math.MinInt64 && b == -1 {
+			return nil, ErrIntegerOverflow
 		}
 		return a / b, nil
 	case "%":
@@ -393,6 +734,23 @@ func intArithmetic(op string, a, b int64) (any, error) {
 	default:
 		return nil, fmt.Errorf("exec: unknown operator %q", op)
 	}
+}
+
+// addInt adds two int64 values, failing instead of wrapping around.
+func addInt(a, b int64) (int64, error) {
+	c := a + b
+	if (a^c)&(b^c) < 0 {
+		return 0, ErrIntegerOverflow
+	}
+	return c, nil
+}
+
+// negateInt negates an int64; -MinInt64 does not fit.
+func negateInt(n int64) (int64, error) {
+	if n == math.MinInt64 {
+		return 0, ErrIntegerOverflow
+	}
+	return -n, nil
 }
 
 func floatArithmetic(op string, a, b float64) (any, error) {

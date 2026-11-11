@@ -11,8 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime/debug"
-	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -346,67 +344,17 @@ func printResult(out io.Writer, res *intreccio.Result) {
 	_, _ = fmt.Fprintf(out, "(%d row%s)\n", len(res.Rows), plural)
 }
 
-// renderValue formats a result value for display. A top-level string is shown
-// bare; everything else uses Cypher-like literal syntax.
 func renderValue(v any) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return renderLiteral(v)
-}
-
-// renderLiteral formats a value in Cypher-like literal syntax: strings quoted,
-// lists as [a, b], maps as {k: v} with keys sorted, nodes as (:Label {k: v})
-// and relationships as [:TYPE {k: v}].
-func renderLiteral(v any) string {
 	switch x := v.(type) {
 	case nil:
 		return "null"
 	case string:
-		return strconv.Quote(x)
-	case []any:
-		parts := make([]string, len(x))
-		for i, el := range x {
-			parts[i] = renderLiteral(el)
-		}
-		return "[" + strings.Join(parts, ", ") + "]"
-	case map[string]any:
-		return renderMap(x)
-	case intreccio.Node:
-		var b strings.Builder
-		b.WriteByte('(')
-		for _, l := range x.Labels {
-			b.WriteString(":" + l)
-		}
-		if len(x.Props) > 0 {
-			if len(x.Labels) > 0 {
-				b.WriteByte(' ')
-			}
-			b.WriteString(renderMap(x.Props))
-		}
-		b.WriteByte(')')
-		return b.String()
-	case intreccio.Relationship:
-		if len(x.Props) == 0 {
-			return "[:" + x.Type + "]"
-		}
-		return "[:" + x.Type + " " + renderMap(x.Props) + "]"
+		return x
+	case bool, int64, float64:
+		return fmt.Sprintf("%v", x)
 	default:
 		return fmt.Sprintf("%v", x)
 	}
-}
-
-func renderMap(m map[string]any) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = k + ": " + renderLiteral(m[k])
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 func printHelp(out io.Writer) {

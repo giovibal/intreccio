@@ -46,6 +46,10 @@ func (c *Capture) Get(key []byte) ([]byte, error) { return c.real.Get(key) }
 
 func (c *Capture) Scan(prefix []byte) storage.Iterator { return c.real.Scan(prefix) }
 
+func (c *Capture) ScanFrom(prefix, start []byte) storage.Iterator {
+	return c.real.ScanFrom(prefix, start)
+}
+
 func (c *Capture) Set(key, val []byte) error {
 	if isRecordKey(key) {
 		im, err := c.touch(key)

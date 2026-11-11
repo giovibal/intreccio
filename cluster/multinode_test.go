@@ -11,7 +11,7 @@ import (
 
 // testCluster is an in-process cluster of voters for integration tests.
 type testCluster struct {
-	nodes   []*Node
+	nodes   []*raftNode
 	dbs     []*intreccio.DB
 	peers   []Peer
 	configs []Config
@@ -49,7 +49,7 @@ func startCluster(t *testing.T, n int, opts ...func(*Config)) *testCluster {
 			t.Fatalf("start node %s: %v", cfg.NodeID, err)
 		}
 		tc.nodes = append(tc.nodes, node)
-		tc.dbs = append(tc.dbs, intreccio.New(node))
+		tc.dbs = append(tc.dbs, wrap(node))
 		tc.configs = append(tc.configs, cfg)
 	}
 	t.Cleanup(func() {

@@ -76,9 +76,15 @@ func TestForwardedParams(t *testing.T) {
 		}
 	}
 
-	// A parameter the encoding cannot carry is refused before it is sent.
-	_, err := tc.dbs[tc.aFollower(t)].Query(context.Background(), "RETURN $p AS p",
-		map[string]any{"p": []string{"not", "supported"}}, intreccio.Linearizable())
+	// Go-typed parameters are normalised before they are sent...
+	res, err := tc.dbs[tc.aFollower(t)].Query(context.Background(), "RETURN $p AS p",
+		map[string]any{"p": []string{"a", "b"}}, intreccio.Linearizable())
+	if err != nil || !reflect.DeepEqual(res.Rows, [][]any{{[]any{"a", "b"}}}) {
+		t.Errorf("a []string parameter: rows = %v, err = %v", res, err)
+	}
+	// ...and one that is not a value at all is refused before anything is sent.
+	_, err = tc.dbs[tc.aFollower(t)].Query(context.Background(), "RETURN $p AS p",
+		map[string]any{"p": make(chan int)}, intreccio.Linearizable())
 	if err == nil {
 		t.Error("an unsupported parameter type was forwarded")
 	}
@@ -132,7 +138,10 @@ func TestCancellationReachesTheExecutingNode(t *testing.T) {
 			t.Fatalf("%s: the query did not return", name)
 		}
 		select {
-		case <-stopped:
+		case err := <-stopped:
+			if err == nil {
+				t.Errorf("%s: the execution on the leader stopped without a context error", name)
+			}
 		case <-time.After(10 * time.Second):
 			t.Fatalf("%s: the execution on the leader was never stopped", name)
 		}

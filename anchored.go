@@ -104,8 +104,8 @@ func newAnchor(q *ast.Query, columns []string) *anchor {
 	}
 	parts := make([]ast.PatternPart, len(m.Parts))
 	for i, part := range m.Parts {
-		if part.Variable != "" || part.Start == nil {
-			return nil // path variables are not supported
+		if part.Variable != "" || part.Shortest != ast.NotShortest || part.Start == nil {
+			return nil // a path depends on nodes the match does not bind
 		}
 		node := func(n *ast.NodePattern) *ast.NodePattern {
 			cp := *n
@@ -150,50 +150,58 @@ func newAnchor(q *ast.Query, columns []string) *anchor {
 	return a
 }
 
-// hasAggregate reports whether e contains an aggregate function call.
+// hasAggregate reports whether e contains an aggregate function call. It errs
+// on the side of yes: an expression kind it does not know counts as one, so a
+// query using it is simply not anchored.
 func hasAggregate(e ast.Expr) bool {
+	any := func(es ...ast.Expr) bool {
+		for _, x := range es {
+			if x != nil && hasAggregate(x) {
+				return true
+			}
+		}
+		return false
+	}
 	switch x := e.(type) {
+	case nil, *ast.Literal, *ast.Param, *ast.Variable:
+		return false
 	case *ast.FunctionCall:
-		if aggregateFuncs[strings.ToLower(x.Name)] {
-			return true
-		}
-		for _, arg := range x.Args {
-			if hasAggregate(arg) {
-				return true
-			}
-		}
+		return aggregateFuncs[strings.ToLower(x.Name)] || any(x.Args...)
 	case *ast.PropertyAccess:
-		return hasAggregate(x.Target)
+		return any(x.Target)
 	case *ast.Unary:
-		return hasAggregate(x.Expr)
+		return any(x.Expr)
 	case *ast.Binary:
-		return hasAggregate(x.Left) || hasAggregate(x.Right)
+		return any(x.Left, x.Right)
 	case *ast.LabelsPredicate:
-		return hasAggregate(x.Expr)
+		return any(x.Expr)
 	case *ast.ListLiteral:
-		for _, el := range x.Elements {
-			if hasAggregate(el) {
-				return true
-			}
-		}
+		return any(x.Elements...)
 	case *ast.MapLiteral:
 		for _, el := range x.Entries {
 			if hasAggregate(el) {
 				return true
 			}
 		}
+		return false
 	case *ast.Case:
-		if x.Operand != nil && hasAggregate(x.Operand) {
-			return true
-		}
 		for _, w := range x.Whens {
-			if hasAggregate(w.Cond) || hasAggregate(w.Result) {
+			if any(w.Cond, w.Result) {
 				return true
 			}
 		}
-		return x.Else != nil && hasAggregate(x.Else)
+		return any(x.Operand, x.Else)
+	case *ast.Subscript:
+		return any(x.Target, x.Index)
+	case *ast.Slice:
+		return any(x.Target, x.From, x.To)
+	case *ast.ListComprehension:
+		return any(x.List, x.Where, x.Map)
+	case *ast.Quantifier:
+		return any(x.List, x.Where)
+	default:
+		return true
 	}
-	return false
 }
 
 // found is a match produced by an evaluation, with its decoded row.
@@ -211,7 +219,7 @@ func (a *anchor) split(txn storage.Txn, rows [][]any) ([]found, error) {
 	for i, row := range rows {
 		own[i] = row[:a.nCols:a.nCols]
 	}
-	if err := newExporter(txn).rows(own); err != nil {
+	if err := publicRows(txn, own); err != nil {
 		return nil, err
 	}
 	out := make([]found, 0, len(rows))
@@ -282,7 +290,11 @@ func (a *anchor) rebuild(txn storage.Txn, lq *liveQuery) (*evaluation, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := exec.Run(p, a.columns, &exec.Context{Txn: txn, Params: lq.params, Ctx: lq.ctx, MaxRows: lq.maxRows})
+	params, err := engineParams(txn, lq.params)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := exec.Run(p, a.columns, &exec.Context{Txn: txn, Params: params, Ctx: lq.ctx, MaxRows: lq.maxRows})
 	if err != nil {
 		return nil, err
 	}
@@ -338,6 +350,10 @@ func (a *anchor) refresh(txn storage.Txn, lq *liveQuery, dirty []uint64) (*evalu
 
 	// The matches that hold now: the pattern matched outward from each changed
 	// node, at each position it could occupy.
+	params, err := engineParams(txn, lq.params)
+	if err != nil {
+		return nil, err
+	}
 	plans := make(map[string]plan.Op, len(a.nodeVars))
 	fresh := map[string]int{} // match key -> index into order
 	var order []found
@@ -357,7 +373,7 @@ func (a *anchor) refresh(txn storage.Txn, lq *liveQuery, dirty []uint64) (*evalu
 				}
 				plans[v] = p
 			}
-			rows, err := exec.RunSeeded(p, a.columns, &exec.Context{Txn: txn, Params: lq.params, Ctx: lq.ctx}, map[string]any{v: node})
+			rows, err := exec.RunSeeded(p, a.columns, &exec.Context{Txn: txn, Params: params, Ctx: lq.ctx}, map[string]any{v: node})
 			if err != nil {
 				return nil, err
 			}

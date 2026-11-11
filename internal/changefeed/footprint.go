@@ -20,8 +20,9 @@ import (
 //     type() or count(), or as the subject of a label predicate, none of which
 //     read a property.
 //
-// Relationship properties never contribute: relationships are immutable once
-// created, so only their creation and deletion matter, and Types covers those.
+// Relationship properties never narrow anything: every change to a
+// relationship of a type in Types — created, deleted or a property set —
+// concerns the query.
 func FootprintOf(q *ast.Query) Footprint {
 	b := &footprintBuilder{
 		fp: Footprint{
@@ -72,6 +73,11 @@ func (b *footprintBuilder) patterns(parts []ast.PatternPart) {
 	for _, part := range parts {
 		if part.Variable != "" {
 			b.patternVars[part.Variable] = struct{}{}
+		}
+		if part.Variable != "" || part.Shortest != ast.NotShortest {
+			// A path carries nodes the pattern does not constrain: any node on
+			// it may show up in the result, whatever its labels.
+			b.fp.AnyLabel = true
 		}
 		b.nodePattern(part.Start)
 		for _, step := range part.Chain {

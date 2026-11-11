@@ -8,6 +8,16 @@ import (
 // ErrNotFound is returned by Txn.Get when the key does not exist.
 var ErrNotFound = errors.New("storage: key not found")
 
+// ErrConflict is returned by Store.Update when the transaction kept
+// conflicting with concurrent writes after every retry. Nothing is committed;
+// the caller may retry.
+var ErrConflict = errors.New("storage: transaction conflict (concurrent writes to the same data)")
+
+// ErrTxnTooLarge is returned when a transaction holds more writes than the
+// engine accepts in one commit. Nothing is committed; split the work into
+// smaller transactions.
+var ErrTxnTooLarge = errors.New("storage: transaction too large (split the write into smaller batches)")
+
 // Snapshotter is an optional capability for engines that can serialize and
 // restore their full contents. It is used by the clustering layer for Raft
 // snapshot/restore. Backup writes a consistent dump as of the call; Load
@@ -35,11 +45,18 @@ type Txn interface {
 	// Get returns the value for the key, or ErrNotFound if absent.
 	// The returned buffer is owned by the caller.
 	Get(key []byte) ([]byte, error)
+	// Set writes key=val. The engine may keep both slices until the
+	// transaction ends, so the caller must not modify them afterwards.
 	Set(key, val []byte) error
+	// Delete removes key (a no-op when absent). The same rule as Set applies
+	// to the key slice.
 	Delete(key []byte) error
 	// Scan returns an iterator over the keys with the given prefix, in ascending
 	// order. The caller must close the iterator.
 	Scan(prefix []byte) Iterator
+	// ScanFrom is Scan starting at the first key >= start (start should carry
+	// the prefix). It lets range scans seek instead of walking the prefix.
+	ScanFrom(prefix, start []byte) Iterator
 }
 
 // Iterator walks a range of keys. Typical use:

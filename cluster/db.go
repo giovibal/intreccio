@@ -1,6 +1,9 @@
 package cluster
 
-import "github.com/giovibal/intreccio"
+import (
+	"github.com/giovibal/intreccio"
+	"github.com/giovibal/intreccio/internal/backend"
+)
 
 // Open starts a clustered node and returns it as a ready-to-use *intreccio.DB.
 // The returned DB has the same API as an embedded one (Query, Explain, Close).
@@ -19,11 +22,17 @@ func Open(cfg Config) (*intreccio.DB, error) {
 		if err != nil {
 			return nil, err
 		}
-		return intreccio.New(c), nil
+		return wrap(c), nil
 	}
 	node, err := newNode(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return intreccio.New(node), nil
+	return wrap(node), nil
+}
+
+// wrap turns a node or client into a DB through the root package's private
+// seam. Importing intreccio guarantees its init has set backend.NewDB.
+func wrap(be backend.Backend) *intreccio.DB {
+	return backend.NewDB(be).(*intreccio.DB)
 }

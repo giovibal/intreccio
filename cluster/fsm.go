@@ -37,6 +37,10 @@ type fsm struct {
 	// owning DB exists, which may be after Raft has started replaying the log,
 	// hence the atomic pointer; nil means nobody can be watching yet.
 	hub atomic.Pointer[changefeed.Hub]
+	// beforeApply, when set, runs before each command is applied. Tests use it
+	// to make a replica's state machine lag behind its log; it is nil in
+	// production.
+	beforeApply atomic.Pointer[func()]
 }
 
 var _ raft.FSM = (*fsm)(nil)
@@ -49,6 +53,9 @@ func newFSM(store storage.Store, snap storage.Snapshotter, tmpDir string, storeM
 func (f *fsm) Apply(l *raft.Log) any {
 	if l.Type != raft.LogCommand {
 		return nil
+	}
+	if hook := f.beforeApply.Load(); hook != nil {
+		(*hook)()
 	}
 	apply := func(txn storage.Txn) error {
 		if err := applyWriteSet(l.Data, txn); err != nil {

@@ -301,6 +301,10 @@ func (l *lexer) lexOperator(start ast.Pos) (token, error) {
 	case '%':
 		return token{typ: tPercent, pos: start}, nil
 	case '=':
+		if c, _ := l.peekRune(); c == '~' {
+			l.advance()
+			return token{typ: tRegex, pos: start}, nil
+		}
 		return token{typ: tEq, pos: start}, nil
 	case '<':
 		if c, _ := l.peekRune(); c == '>' {

@@ -16,7 +16,8 @@ Facts about the code base that shape the decision:
 - The logical state lives in two tables only: `n` (labels + properties) and `e`
   (type, src, dst, properties). `l`/`p`/`o`/`i` are derived, catalog keys are
   bookkeeping.
-- Relationships are immutable after creation (`SET` targets nodes only).
+- A relationship's type and end nodes never change; its properties can
+  (`SET` / `REMOVE`).
 
 ## Decisions
 
@@ -39,13 +40,15 @@ for slow consumers, and most consumers only want the current state.
 
 ### Deltas are derived from the write-set at the commit point
 A `storage.Txn` wrapper observes `Set`/`Delete` on `n`/`e` keys and reads the
-before-image in the same transaction, producing a logical `ChangeSet` (node
-created/updated/deleted with labels and properties before and after;
-relationship created/deleted). It is published only after the commit succeeds,
+before-image in the same transaction, producing a logical `ChangeSet` (node or
+relationship created/updated/deleted, with its record before and after). It is
+published only after the commit succeeds,
 and rebuilt on every attempt because `Store.Update` may retry on conflict.
 
-The same wrapper is hooked at the two commit points, so the feature is identical
-embedded and clustered, and **each voter serves its own watchers from its own
+The same wrapper is hooked at the two commit points — the embedded backend's
+`ApplyWrite`, which every write query, `DB.Update` transaction and `Import`
+batch goes through, and the Raft FSM — so the feature is identical embedded and
+clustered, and **each voter serves its own watchers from its own
 apply stream** — a leader change does not affect them. The cost is one extra
 `Get` per touched record, paid only while at least one watcher exists.
 
@@ -57,8 +60,11 @@ Rejected:
 ### Evaluation: footprint filter, then re-run and diff (v1)
 From the query AST each watcher extracts a **footprint**: the labels,
 relationship types and property keys it references, with a wildcard when a
-pattern has an unlabelled node or an untyped relationship. A commit whose
-`ChangeSet` does not intersect the footprint does not wake the watcher.
+pattern has an unlabelled node or an untyped relationship, and for labels when
+it binds a path (a path carries nodes the pattern does not constrain). Any
+change to a relationship of a referenced type counts, whatever property it
+touches. A commit whose `ChangeSet` does not intersect the footprint does not
+wake the watcher.
 
 A woken watcher re-runs its query in a read transaction and diffs the rows (as a
 multiset keyed by the canonical row encoding of ADR 0012) against the last result
@@ -125,6 +131,10 @@ implemented" below.
 
 `STREAM` is **not** openCypher 9. It is a deliberate, single-keyword extension
 outside the MVP slice of DESIGN §8.
+
+A live query must read the graph and nothing else: a writing query is refused,
+and so is a catalog listing (`SHOW INDEXES` / `SHOW CONSTRAINTS`), which
+changes without any node or relationship changing.
 
 ### Lifecycle and consistency
 - A subscription ends on context cancellation, on `Close`, or when the database

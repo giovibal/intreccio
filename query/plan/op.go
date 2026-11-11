@@ -32,6 +32,19 @@ type NodeByProperty struct {
 	Value ast.Expr
 }
 
+// NodeByPropertyRange: scan via the secondary index over a range of values
+// (`p`): Lower/Upper bounds (nil = open) or a STARTS WITH Prefix. It may
+// return extra candidates; the planner keeps the predicates as a filter.
+type NodeByPropertyRange struct {
+	Var            string
+	Label          string
+	Key            string
+	Lower, Upper   ast.Expr
+	LowerInclusive bool
+	UpperInclusive bool
+	Prefix         ast.Expr
+}
+
 // --- Internal operators ---
 
 // Expand: starting from the From nodes, follows the edges and produces the To nodes.
@@ -46,6 +59,11 @@ type Expand struct {
 	MinHops   int
 	MaxHops   int
 	ToBound   bool // true if To is already bound: the expand checks the equality
+	// ToUnused / RelUnused mark anonymous pattern elements that nothing reads
+	// (no label or property filter, no path variable): the executor binds
+	// them by ID only instead of loading their records.
+	ToUnused  bool
+	RelUnused bool
 }
 
 // Filter: applies a predicate to the stream.
@@ -157,6 +175,14 @@ type OuterApply struct {
 	NewVars []string
 }
 
+// Apply runs Inner once per row produced by Outer (Inner's Argument leaf
+// yields that row) and emits every row Inner produces. It is used when an index
+// seek depends on values from the incoming row.
+type Apply struct {
+	Outer Op
+	Inner Op
+}
+
 // Union concatenates the results of two or more sub-plans. If All is true
 // duplicates are kept (UNION ALL); otherwise rows are de-duplicated on the
 // projected columns.
@@ -177,28 +203,98 @@ type Delete struct {
 // CreateIndex: registers a secondary `p` index on (:Label).prop and backfills
 // the entries for any existing nodes that already have the property.
 type CreateIndex struct {
+	Name     string
+	Label    string // the relationship type when Rel
+	Property string
+	Rel      bool
+}
+
+// DropIndex removes an index (registry and entries) by name.
+type DropIndex struct {
+	Name     string
+	IfExists bool
+}
+
+// ShowIndexes lists the indexes as (name, label, property, entity) rows.
+type ShowIndexes struct{}
+
+// CreateConstraint adds a unique constraint on (:Label).prop.
+type CreateConstraint struct {
+	Name     string
 	Label    string
 	Property string
 }
 
-func (*AllNodesScan) op()     {}
-func (*NodeByLabelScan) op()  {}
-func (*NodeByProperty) op()   {}
-func (*Expand) op()           {}
-func (*Filter) op()           {}
-func (*Project) op()          {}
-func (*Aggregate) op()        {}
-func (*Sort) op()             {}
-func (*Skip) op()             {}
-func (*Limit) op()            {}
-func (*CartesianProduct) op() {}
-func (*Create) op()           {}
-func (*Merge) op()            {}
-func (*SetItems) op()         {}
-func (*Delete) op()           {}
-func (*CreateIndex) op()      {}
-func (*Remove) op()           {}
-func (*Unwind) op()           {}
-func (*Argument) op()         {}
-func (*OuterApply) op()       {}
-func (*Union) op()            {}
+// DropConstraint removes a constraint by name.
+type DropConstraint struct {
+	Name     string
+	IfExists bool
+}
+
+// ShowConstraints lists the constraints as (name, label, property, type) rows.
+type ShowConstraints struct{}
+
+// ShortestPath finds, for each input row, the shortest path(s) between the
+// already bound nodes From and To, binding PathVar to the path and RelVar to
+// its relationships (either may be "").
+type ShortestPath struct {
+	Input   Op
+	From    string
+	To      string
+	PathVar string
+	RelVar  string
+	Types   []string
+	Dir     ast.Direction
+	MinHops int // -1 = unspecified (1)
+	MaxHops int // -1 = unbounded
+	All     bool
+}
+
+func (*ShortestPath) op() {}
+
+// RelByProperty seeks, through the relationship index, the relationships of
+// Type whose Key equals Value, and binds Rel and its endpoints: From is the
+// start and To the end for DirOut, the reverse for DirIn, and both ways (two
+// rows) for DirBoth. When From and To are the same variable only self-loops
+// match.
+type RelByProperty struct {
+	Rel   string
+	From  string
+	To    string
+	Dir   ast.Direction
+	Type  string
+	Key   string
+	Value ast.Expr
+}
+
+func (*RelByProperty) op() {}
+
+func (*CreateConstraint) op() {}
+func (*DropConstraint) op()   {}
+func (*ShowConstraints) op()  {}
+
+func (*AllNodesScan) op()        {}
+func (*NodeByLabelScan) op()     {}
+func (*NodeByProperty) op()      {}
+func (*NodeByPropertyRange) op() {}
+func (*Expand) op()              {}
+func (*Filter) op()              {}
+func (*Project) op()             {}
+func (*Aggregate) op()           {}
+func (*Sort) op()                {}
+func (*Skip) op()                {}
+func (*Limit) op()               {}
+func (*CartesianProduct) op()    {}
+func (*Create) op()              {}
+func (*Merge) op()               {}
+func (*SetItems) op()            {}
+func (*Delete) op()              {}
+func (*CreateIndex) op()         {}
+func (*DropIndex) op()           {}
+func (*ShowIndexes) op()         {}
+func (*Remove) op()              {}
+func (*Unwind) op()              {}
+func (*Argument) op()            {}
+func (*OuterApply) op()          {}
+func (*Apply) op()               {}
+func (*Union) op()               {}

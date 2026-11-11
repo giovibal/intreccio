@@ -50,6 +50,10 @@ func (r *recordTxn) Get(key []byte) ([]byte, error) { return r.real.Get(key) }
 
 func (r *recordTxn) Scan(prefix []byte) storage.Iterator { return r.real.Scan(prefix) }
 
+func (r *recordTxn) ScanFrom(prefix, start []byte) storage.Iterator {
+	return r.real.ScanFrom(prefix, start)
+}
+
 func (r *recordTxn) Set(key, val []byte) error {
 	r.ops = append(r.ops, op{kind: opSet, key: clone(key), val: clone(val)})
 	return r.real.Set(key, val)

@@ -1,12 +1,16 @@
 package badger
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/storage/overlay"
 )
 
 // loadPendingWrites bounds the concurrency of a restore Load.
@@ -14,6 +18,13 @@ const loadPendingWrites = 256
 
 // maxRetries bounds the Update attempts on an SSI conflict.
 const maxRetries = 100
+
+// Backoff between conflict retries: exponential from retryBase, capped at
+// retryCap, with jitter so contending writers do not retry in lockstep.
+const (
+	retryBase = 50 * time.Microsecond
+	retryCap  = 10 * time.Millisecond
+)
 
 // Store is the storage.Store adapter over BadgerDB.
 type Store struct {
@@ -61,14 +72,39 @@ func (s *Store) View(fn func(storage.Txn) error) error {
 	return s.db.View(func(tx *badger.Txn) error { return fn(&txn{tx: tx}) })
 }
 
+// Update runs fn with its writes buffered in an overlay and hands them to
+// Badger only when fn returns nil. A Badger iterator opened in a read-write
+// transaction copies and sorts all of that transaction's pending writes, so
+// with writes passed straight through, every index seek of a statement that
+// writes k keys cost O(k log k), making bulk loads quadratic (#65). Reads
+// still go through the Badger transaction, so conflict detection is unchanged.
 func (s *Store) Update(fn func(storage.Txn) error) error {
 	for i := 0; ; i++ {
-		err := s.db.Update(func(tx *badger.Txn) error { return fn(&txn{tx: tx}) })
-		if errors.Is(err, badger.ErrConflict) && i < maxRetries {
-			continue
+		err := s.db.Update(func(tx *badger.Txn) error {
+			t := &txn{tx: tx, write: true, store: s}
+			if err := fn(t); err != nil {
+				return err
+			}
+			return t.flush()
+		})
+		if !errors.Is(err, badger.ErrConflict) {
+			return err
 		}
-		return err
+		if i >= maxRetries {
+			return storage.ErrConflict
+		}
+		time.Sleep(retryDelay(i))
 	}
+}
+
+// retryDelay is the jittered exponential backoff before conflict retry i:
+// a random duration in [d/2, d) with d = min(retryBase*2^i, retryCap).
+func retryDelay(i int) time.Duration {
+	d := retryCap
+	if i < 20 && retryBase<<i < retryCap {
+		d = retryBase << i
+	}
+	return d/2 + rand.N(d/2)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -115,11 +151,24 @@ func (s *Store) Load(r io.Reader) (err error) {
 
 type txn struct {
 	tx *badger.Txn
+	// For Update: the buffered writes and their estimated size, checked
+	// against Badger's per-transaction limits as they grow.
+	write       bool
+	store       *Store
+	ov          overlay.Tree
+	count, size int64
+	done        bool
 }
 
 var _ storage.Txn = (*txn)(nil)
 
 func (t *txn) Get(key []byte) ([]byte, error) {
+	if v, deleted, found := t.ov.Get(key); found {
+		if deleted {
+			return nil, storage.ErrNotFound
+		}
+		return bytes.Clone(v), nil
+	}
 	item, err := t.tx.Get(key)
 	if errors.Is(err, badger.ErrKeyNotFound) {
 		return nil, storage.ErrNotFound
@@ -130,17 +179,116 @@ func (t *txn) Get(key []byte) ([]byte, error) {
 	return item.ValueCopy(nil)
 }
 
-func (t *txn) Set(key, val []byte) error { return t.tx.Set(key, val) }
+func (t *txn) Set(key, val []byte) error {
+	if val == nil {
+		val = []byte{} // present and empty, unlike a deletion marker
+	}
+	if err := t.buffer(key, val); err != nil {
+		return err
+	}
+	t.ov.Put(key, val)
+	return nil
+}
 
-func (t *txn) Delete(key []byte) error { return t.tx.Delete(key) }
+func (t *txn) Delete(key []byte) error {
+	if err := t.buffer(key, nil); err != nil {
+		return err
+	}
+	t.ov.Delete(key)
+	return nil
+}
+
+// buffer checks a write before it is buffered: the transaction must be
+// writable and stay within the batch Badger will accept at commit, so an
+// oversized write fails as early as it did when Badger saw every write.
+func (t *txn) buffer(key, val []byte) error {
+	switch {
+	case !t.write || t.done:
+		return badger.ErrReadOnlyTxn
+	case len(key) == 0:
+		return badger.ErrEmptyKey
+	}
+	old, oldDeleted, found := t.ov.Get(key)
+	if found {
+		t.size -= t.entrySize(key, old, oldDeleted)
+	} else {
+		t.count++
+	}
+	t.size += t.entrySize(key, val, val == nil)
+	if t.count >= t.store.db.MaxBatchCount() || t.size >= t.store.db.MaxBatchSize() {
+		return storage.ErrTxnTooLarge
+	}
+	return nil
+}
+
+// entrySize mirrors Badger's estimate for one write: key, value or value
+// pointer, two meta bytes and the 8-byte version (rounded to 10).
+func (t *txn) entrySize(key, val []byte, deleted bool) int64 {
+	v := int64(len(val))
+	if deleted {
+		v = 0
+	}
+	if v >= t.store.db.Opts().ValueThreshold {
+		v = 12
+	}
+	return int64(len(key)) + v + 2 + 10
+}
+
+// flush hands the buffered writes to Badger, in key order.
+func (t *txn) flush() error {
+	t.done = true
+	for it := t.ov.Seek(nil); it.Valid(); it.Next() {
+		v, deleted := it.Value()
+		var err error
+		if deleted {
+			err = t.tx.Delete(it.Key())
+		} else {
+			err = t.tx.Set(it.Key(), v)
+		}
+		if err != nil {
+			return mapWriteErr(err)
+		}
+	}
+	return nil
+}
+
+// mapWriteErr turns Badger's per-transaction size limit into the
+// engine-neutral storage.ErrTxnTooLarge.
+func mapWriteErr(err error) error {
+	if errors.Is(err, badger.ErrTxnTooBig) {
+		return storage.ErrTxnTooLarge
+	}
+	return err
+}
 
 func (t *txn) Scan(prefix []byte) storage.Iterator {
+	return t.ScanFrom(prefix, prefix)
+}
+
+// ScanFrom merges the committed keys with the writes buffered so far; writes
+// made while the iterator is open stay invisible to it.
+func (t *txn) ScanFrom(prefix, start []byte) storage.Iterator {
 	opts := badger.DefaultIteratorOptions
 	opts.Prefix = prefix
+	// Value prefetching starts one goroutine per key. Most scans here read
+	// keys only (index and adjacency entries have empty values), and node
+	// records are small enough to read on demand, so it costs more than it
+	// saves.
+	opts.PrefetchValues = false
 	it := t.tx.NewIterator(opts)
-	it.Seek(prefix)
-	return &iterator{it: it, prefix: prefix}
+	it.Seek(start)
+	base := &iterator{it: it, prefix: prefix}
+	if t.ov.Len() == 0 {
+		return base
+	}
+	return overlay.NewMerged(source{base}, t.ov.Seek(start), prefix)
 }
+
+// source is the committed side of a merged scan: Key need not be copied,
+// the merge copies the keys it hands out.
+type source struct{ *iterator }
+
+func (s source) Key() []byte { return s.it.Item().Key() }
 
 type iterator struct {
 	it     *badger.Iterator

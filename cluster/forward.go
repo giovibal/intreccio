@@ -27,7 +27,7 @@ func needsLeader(req wire.Request) bool { return req.Write || req.Linearizable }
 // serve handles a request received from another member. Followers dial the
 // leader directly; dataless clients dial any voter, which serves default reads
 // locally and proxies leader-bound requests to the leader.
-func (n *Node) serve(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+func (n *raftNode) serve(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	// Leader-bound request received by a non-leader voter: proxy to the leader,
 	// bounding the wait by the apply timeout.
 	if needsLeader(req) && n.raft.State() != raft.Leader {
@@ -55,7 +55,7 @@ type localSubscriber func(ctx context.Context, req wire.SubscribeRequest, sink w
 // serveSubscription serves a live query to another member — a dataless client —
 // from this voter's own replica. Any voter can: a live query follows the local
 // apply stream, so there is nothing to proxy to the leader.
-func (n *Node) serveSubscription(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error {
+func (n *raftNode) serveSubscription(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error {
 	sub := n.localSub.Load()
 	if sub == nil {
 		return &wire.Error{Code: wire.CodeUnavailable, Msg: "cluster: no live-query server wired"}
@@ -64,7 +64,7 @@ func (n *Node) serveSubscription(ctx context.Context, req wire.SubscribeRequest,
 }
 
 // startForwardServer starts serving forwarded requests on cfg.ForwardAddr.
-func (n *Node) startForwardServer() error {
+func (n *raftNode) startForwardServer() error {
 	var (
 		l   net.Listener
 		err error
@@ -85,7 +85,7 @@ func (n *Node) startForwardServer() error {
 
 // callLeader resolves the current leader's forwarding address and sends req to
 // it (used by a voter for leader-bound requests, its own or proxied).
-func (n *Node) callLeader(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+func (n *raftNode) callLeader(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	_, leaderID := n.raft.LeaderWithID()
 	if leaderID == "" {
 		return nil, nil, errors.New("cluster: no leader available")

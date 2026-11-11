@@ -18,8 +18,8 @@ import (
 //     carries, before or after, one of Labels (or AnyLabel is set).
 //   - A node whose properties alone changed concerns it when, in addition, one
 //     of the changed keys is in Keys (or AnyKey is set).
-//   - A relationship that is created or deleted concerns it when its type is in
-//     Types (or AnyType is set).
+//   - A relationship that is created, deleted or has a property changed
+//     concerns it when its type is in Types (or AnyType is set).
 //
 // The zero Footprint depends on nothing in the graph.
 type Footprint struct {
@@ -448,7 +448,7 @@ func (n *nodeEvent) concerns(fp *Footprint) bool {
 }
 
 // edgeEvent is an EdgeChange with its type name resolved. Whether the
-// relationship was created or deleted makes no difference to a watcher.
+// relationship was created, deleted or updated makes no difference to a watcher.
 type edgeEvent struct {
 	typ      string
 	src, dst uint64

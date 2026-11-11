@@ -45,8 +45,8 @@ var ErrNotImplemented = errors.New("cluster: not implemented in this phase")
 // errNotLeader indicates a write reached a node that is not the leader.
 var errNotLeader = errors.New("cluster: not leader")
 
-// Node is a clustered intreccio node: a Raft replica wrapping a local store.
-type Node struct {
+// raftNode is a clustered intreccio node: a Raft replica wrapping a local store.
+type raftNode struct {
 	cfg   Config
 	raft  *raft.Raft
 	store *badgerstore.Store
@@ -72,6 +72,10 @@ type Node struct {
 	// writeMu serializes the stage→propose→apply sequence so each statement sees
 	// the fully-applied state of all prior writes.
 	writeMu sync.Mutex
+	// barrierTerm is the Raft term in which this node, as leader, last
+	// confirmed that its state machine applied every committed entry. Guarded
+	// by writeMu.
+	barrierTerm uint64
 
 	// storeMu guards local store access against a snapshot Restore (Badger
 	// DropAll+Load). Reads/staging take it shared; the FSM's Restore takes it
@@ -84,7 +88,7 @@ type Node struct {
 
 // newNode starts a clustered node. Phases B–C support RoleVoter. A single node
 // bootstraps and adds the other voters from Peers; the rest start and are added.
-func newNode(cfg Config) (*Node, error) {
+func newNode(cfg Config) (*raftNode, error) {
 	if cfg.Role != RoleVoter {
 		return nil, fmt.Errorf("%w: role %d", ErrNotImplemented, cfg.Role)
 	}
@@ -173,7 +177,7 @@ func newNode(cfg Config) (*Node, error) {
 		applyTimeout = defaultApplyTimeout
 	}
 
-	n := &Node{
+	n := &raftNode{
 		cfg:             cfg,
 		raft:            r,
 		store:           store,
@@ -229,11 +233,11 @@ func forwardAddrMap(cfg Config) map[string]string {
 }
 
 // IsLeader reports whether this node is the current Raft leader.
-func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
+func (n *raftNode) IsLeader() bool { return n.raft.State() == raft.Leader }
 
 // ReadBarrier blocks until this leader has applied everything committed as of
 // the call, providing linearizable reads when followed by a local read.
-func (n *Node) ReadBarrier() error {
+func (n *raftNode) ReadBarrier() error {
 	if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
 		return fmt.Errorf("cluster: read barrier: %w", err)
 	}
@@ -243,23 +247,23 @@ func (n *Node) ReadBarrier() error {
 // Forward sends a request to the leader for execution (used by followers for
 // writes and linearizable reads). ctx bounds the wait for a reply, and ending
 // it stops the execution on the leader.
-func (n *Node) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+func (n *raftNode) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	return n.callLeader(ctx, req)
 }
 
 // Local reports that a voter can serve reads from its local store.
-func (n *Node) Local() bool { return true }
+func (n *raftNode) Local() bool { return true }
 
 // SetLocalExecutor wires the root package's local query execution, used to run
 // the requests other members forward to this node.
-func (n *Node) SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error)) {
+func (n *raftNode) SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error)) {
 	exec := localExecutor(fn)
 	n.localExec.Store(&exec)
 }
 
 // SetLocalSubscriber wires the root package's live-query server, used to run
 // the live queries dataless clients subscribe to on this node.
-func (n *Node) SetLocalSubscriber(fn func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error) {
+func (n *raftNode) SetLocalSubscriber(fn func(ctx context.Context, req wire.SubscribeRequest, sink wire.BatchSink) error) {
 	sub := localSubscriber(fn)
 	n.localSub.Store(&sub)
 }
@@ -267,12 +271,12 @@ func (n *Node) SetLocalSubscriber(fn func(ctx context.Context, req wire.Subscrib
 // SetChangeHub wires the hub of the owning DB into the FSM, which reports every
 // applied write and every snapshot restore to it. This is what lets a voter
 // serve live queries.
-func (n *Node) SetChangeHub(h *changefeed.Hub) { n.fsm.hub.Store(h) }
+func (n *raftNode) SetChangeHub(h *changefeed.Hub) { n.fsm.hub.Store(h) }
 
 // View runs fn in a local read-only transaction (snapshot read; may be slightly
 // stale on a follower unless a ReadBarrier preceded it). The shared read-lock
 // keeps it from overlapping a snapshot Restore.
-func (n *Node) View(fn func(storage.Txn) error) error {
+func (n *raftNode) View(fn func(storage.Txn) error) error {
 	n.storeMu.RLock()
 	defer n.storeMu.RUnlock()
 	return n.store.View(fn)
@@ -282,12 +286,22 @@ func (n *Node) View(fn func(storage.Txn) error) error {
 // then replicates its effects through Raft. The staging transaction is rolled
 // back locally; the FSM is the only writer. Callers route non-leader writes
 // through Forward instead.
-func (n *Node) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
+func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
 	n.writeMu.Lock()
 	defer n.writeMu.Unlock()
 
 	if n.raft.State() != raft.Leader {
 		return nil, errNotLeader
+	}
+	// A newly elected leader can hold committed entries its state machine has
+	// not applied yet. Staging against that store would read stale data and
+	// replicate a write-set that overwrites newer values, so the first write of
+	// each term waits for the state machine to catch up.
+	if term := n.raft.CurrentTerm(); term != n.barrierTerm {
+		if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
+			return nil, fmt.Errorf("cluster: leader barrier: %w", err)
+		}
+		n.barrierTerm = term
 	}
 
 	var (
@@ -323,7 +337,7 @@ func (n *Node) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
 }
 
 // Close shuts down Raft and releases all resources.
-func (n *Node) Close() error {
+func (n *raftNode) Close() error {
 	if n.stop != nil {
 		n.stopOnce.Do(func() { close(n.stop) })
 	}
@@ -361,7 +375,7 @@ func (n *Node) Close() error {
 
 // addVoters adds the configured peers to the cluster, retrying until every peer
 // is a member or the node shuts down. Only the leader can add voters.
-func (n *Node) addVoters() {
+func (n *raftNode) addVoters() {
 	for {
 		select {
 		case <-n.stop:
@@ -395,7 +409,7 @@ func (n *Node) addVoters() {
 	}
 }
 
-func (n *Node) waitForLeader(timeout time.Duration) error {
+func (n *raftNode) waitForLeader(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if n.raft.Leader() != "" {

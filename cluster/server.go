@@ -229,6 +229,13 @@ func (c *serverConn) serve(ctx context.Context, _ *serverStream, stream uint32, 
 		defer stop()
 	}
 	cols, rows, err := c.srv.handler(ctx, req)
+	var coded *wire.Error
+	if err != nil && req.Timeout > 0 && !errors.As(err, &coded) && errors.Is(err, context.DeadlineExceeded) {
+		// The requester's own deadline, reached here first: keep its identity.
+		// A timeout of this member's making (a proxy wait, say) stays uncoded,
+		// so that a client may still try another voter.
+		err = &wire.Error{Code: wire.CodeDeadlineExceeded, Msg: err.Error()}
+	}
 	c.reply(ctx, stream, cols, rows, err)
 }
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/graph"
+	"github.com/giovibal/intreccio/internal/storage/codec"
 	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/plan"
 )
@@ -18,14 +19,16 @@ func buildExpandWith(x *plan.Expand, ctx *Context, arg *argumentOp) (op, error) 
 		return nil, err
 	}
 	e := &expand{
-		ctx:     ctx,
-		input:   in,
-		from:    x.From,
-		rel:     x.Rel,
-		to:      x.To,
-		dir:     x.Dir,
-		toBound: x.ToBound,
-		anyType: len(x.Types) == 0,
+		ctx:       ctx,
+		input:     in,
+		from:      x.From,
+		rel:       x.Rel,
+		to:        x.To,
+		dir:       x.Dir,
+		toBound:   x.ToBound,
+		anyType:   len(x.Types) == 0,
+		toUnused:  x.ToUnused,
+		relUnused: x.RelUnused,
 	}
 	for _, name := range x.Types {
 		id, found, err := catalog.LookupType(ctx.Txn, name)
@@ -51,6 +54,10 @@ type expand struct {
 	toBound bool
 	anyType bool
 	typeIDs []uint32
+	// toUnused / relUnused: nothing reads these anonymous elements, so they
+	// are bound by ID only, without loading their records.
+	toUnused  bool
+	relUnused bool
 
 	cur     binding
 	pending []edgeHit
@@ -90,20 +97,31 @@ func (e *expand) next() (binding, bool, error) {
 		hit := e.pending[e.pidx]
 		e.pidx++
 
-		if e.toBound {
-			existing, ok := e.cur[e.to].(graph.Node)
-			if ok && existing.ID != hit.other {
+		var toNode graph.Node
+		switch existing, bound := e.cur[e.to].(graph.Node); {
+		case e.toBound && bound:
+			if existing.ID != hit.other {
 				continue
 			}
+			toNode = existing
+		case e.toUnused:
+			toNode = graph.Node{ID: hit.other}
+		default:
+			n, err := graph.GetNode(e.ctx.Txn, hit.other)
+			if err != nil {
+				return nil, false, err
+			}
+			toNode = n
 		}
-
-		toNode, err := graph.GetNode(e.ctx.Txn, hit.other)
-		if err != nil {
-			return nil, false, err
-		}
-		edge, err := graph.GetEdge(e.ctx.Txn, hit.ref.ID)
-		if err != nil {
-			return nil, false, err
+		var edge graph.Edge
+		if e.relUnused {
+			edge = graph.Edge{ID: hit.ref.ID, EdgeRecord: codec.EdgeRecord{Type: hit.ref.Type, Src: hit.ref.Src, Dst: hit.ref.Dst}}
+		} else {
+			ed, err := graph.GetEdge(e.ctx.Txn, hit.ref.ID)
+			if err != nil {
+				return nil, false, err
+			}
+			edge = ed
 		}
 
 		out := e.cur.clone()

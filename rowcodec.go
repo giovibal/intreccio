@@ -10,7 +10,7 @@ import (
 
 // The canonical row encoding (ADR 0012) serializes one result row — the public
 // value model: null, bool, int64, float64, string, list, map, Node,
-// Relationship — into a self-delimiting byte string. It is canonical: equal
+// Relationship, Path — into a self-delimiting byte string. It is canonical: equal
 // rows always produce identical bytes (map entries are written in key order),
 // so an encoded row doubles as its identity. It is used wherever a row leaves
 // the process or must be compared: query forwarding between cluster members
@@ -27,7 +27,11 @@ import (
 //	map          = 0x07 uvarint(count) (uvarint(len) key value)*   keys ascending
 //	node         = 0x08 varint(id) uvarint(count) (uvarint(len) label)* props
 //	relationship = 0x09 varint(id) varint(start) varint(end) uvarint(len) type props
+//	path         = 0x0a uvarint(count) node-body* uvarint(count) relationship-body*
 //	props        = uvarint(count) (uvarint(len) key value)*        keys ascending
+//
+// A path holds its nodes and relationships without their tags (the bodies
+// above, from the ID on).
 //
 // This is a wire and comparison format, unrelated to the on-disk record format
 // of internal/storage/codec.
@@ -42,6 +46,7 @@ const (
 	tagMap
 	tagNode
 	tagRelationship
+	tagPath
 )
 
 // maxValueDepth bounds how deeply lists and maps may nest in an encoded value,
@@ -126,21 +131,44 @@ func appendValue(dst []byte, v any, depth int) ([]byte, error) {
 	case map[string]any:
 		return appendEntries(append(dst, tagMap), x, depth)
 	case Node:
-		dst = binary.AppendVarint(append(dst, tagNode), x.ID)
-		dst = binary.AppendUvarint(dst, uint64(len(x.Labels)))
-		for _, l := range x.Labels {
-			dst = appendString(dst, l)
-		}
-		return appendEntries(dst, x.Props, depth)
+		return appendNode(append(dst, tagNode), x, depth)
 	case Relationship:
-		dst = binary.AppendVarint(append(dst, tagRelationship), x.ID)
-		dst = binary.AppendVarint(dst, x.Start)
-		dst = binary.AppendVarint(dst, x.End)
-		dst = appendString(dst, x.Type)
-		return appendEntries(dst, x.Props, depth)
+		return appendRelationship(append(dst, tagRelationship), x, depth)
+	case Path:
+		dst = binary.AppendUvarint(append(dst, tagPath), uint64(len(x.Nodes)))
+		var err error
+		for _, n := range x.Nodes {
+			if dst, err = appendNode(dst, n, depth); err != nil {
+				return nil, err
+			}
+		}
+		dst = binary.AppendUvarint(dst, uint64(len(x.Relationships)))
+		for _, r := range x.Relationships {
+			if dst, err = appendRelationship(dst, r, depth); err != nil {
+				return nil, err
+			}
+		}
+		return dst, nil
 	default:
 		return nil, fmt.Errorf("intreccio: row encoding: unsupported value type %T", v)
 	}
+}
+
+func appendNode(dst []byte, n Node, depth int) ([]byte, error) {
+	dst = binary.AppendVarint(dst, n.ID)
+	dst = binary.AppendUvarint(dst, uint64(len(n.Labels)))
+	for _, l := range n.Labels {
+		dst = appendString(dst, l)
+	}
+	return appendEntries(dst, n.Props, depth)
+}
+
+func appendRelationship(dst []byte, r Relationship, depth int) ([]byte, error) {
+	dst = binary.AppendVarint(dst, r.ID)
+	dst = binary.AppendVarint(dst, r.StartID)
+	dst = binary.AppendVarint(dst, r.EndID)
+	dst = appendString(dst, r.Type)
+	return appendEntries(dst, r.Props, depth)
 }
 
 func appendString(dst []byte, s string) []byte {
@@ -274,49 +302,78 @@ func (r *rowReader) value(depth int) (any, error) {
 	case tagMap:
 		return r.entries(depth)
 	case tagNode:
-		id, err := r.varint()
-		if err != nil {
-			return nil, err
-		}
+		return r.node(depth)
+	case tagRelationship:
+		return r.relationship(depth)
+	case tagPath:
 		n, err := r.count()
 		if err != nil {
 			return nil, err
 		}
-		labels := make([]string, n)
-		for i := range labels {
-			if labels[i], err = r.str(); err != nil {
+		p := Path{Nodes: make([]Node, n)}
+		for i := range p.Nodes {
+			if p.Nodes[i], err = r.node(depth); err != nil {
 				return nil, err
 			}
 		}
-		props, err := r.entries(depth)
-		if err != nil {
+		if n, err = r.count(); err != nil {
 			return nil, err
 		}
-		return Node{ID: id, Labels: labels, Props: props}, nil
-	case tagRelationship:
-		var (
-			rel Relationship
-			err error
-		)
-		if rel.ID, err = r.varint(); err != nil {
-			return nil, err
+		p.Relationships = make([]Relationship, n)
+		for i := range p.Relationships {
+			if p.Relationships[i], err = r.relationship(depth); err != nil {
+				return nil, err
+			}
 		}
-		if rel.Start, err = r.varint(); err != nil {
-			return nil, err
-		}
-		if rel.End, err = r.varint(); err != nil {
-			return nil, err
-		}
-		if rel.Type, err = r.str(); err != nil {
-			return nil, err
-		}
-		if rel.Props, err = r.entries(depth); err != nil {
-			return nil, err
-		}
-		return rel, nil
+		return p, nil
 	default:
 		return nil, fmt.Errorf("intreccio: row encoding: unknown value tag 0x%02x", tag)
 	}
+}
+
+func (r *rowReader) node(depth int) (Node, error) {
+	id, err := r.varint()
+	if err != nil {
+		return Node{}, err
+	}
+	n, err := r.count()
+	if err != nil {
+		return Node{}, err
+	}
+	labels := make([]string, n)
+	for i := range labels {
+		if labels[i], err = r.str(); err != nil {
+			return Node{}, err
+		}
+	}
+	props, err := r.entries(depth)
+	if err != nil {
+		return Node{}, err
+	}
+	return Node{ID: id, Labels: labels, Props: props}, nil
+}
+
+func (r *rowReader) relationship(depth int) (Relationship, error) {
+	var (
+		rel Relationship
+		err error
+	)
+	if rel.ID, err = r.varint(); err != nil {
+		return Relationship{}, err
+	}
+	if rel.StartID, err = r.varint(); err != nil {
+		return Relationship{}, err
+	}
+	if rel.EndID, err = r.varint(); err != nil {
+		return Relationship{}, err
+	}
+	if rel.Type, err = r.str(); err != nil {
+		return Relationship{}, err
+	}
+	if rel.Props, err = r.entries(depth); err != nil {
+		return Relationship{}, err
+	}
+	return rel, nil
 }
 
 // entries reads a map, requiring strictly ascending keys: that is the only form

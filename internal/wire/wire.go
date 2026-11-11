@@ -341,6 +341,15 @@ const (
 	// CodeBehind means this member has not yet applied the index a subscriber
 	// asked it to start after; another member may have.
 	CodeBehind
+	// The remaining codes name sentinel errors of the query itself, so that
+	// errors.Is keeps working for the caller. Codes are part of the wire
+	// format: never reuse or renumber one.
+	CodeConflict
+	CodeTxnTooLarge
+	CodeIntegerOverflow
+	CodeConstraintViolation
+	CodeDeadlineExceeded
+	CodeCanceled
 )
 
 // Error is a failure reported by the member that ran a request.

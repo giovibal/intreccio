@@ -13,7 +13,7 @@ import (
 
 // client is a dataless cluster member: it stores nothing and forwards every
 // query to a voter. It lets extra service instances share the database without
-// replicating it. It satisfies intreccio.Backend and the clustered routing
+// replicating it. It satisfies backend.Backend and the clustered routing
 // interface (IsLeader/Local/ReadBarrier/Forward).
 type client struct {
 	peers []Peer // voters to contact (each with a ForwardAddr)
@@ -74,8 +74,8 @@ func (c *client) Forward(ctx context.Context, req wire.Request) ([]string, [][]b
 			return nil, nil, err // the caller gave up: no point trying elsewhere
 		}
 		var remote *wire.Error
-		if errors.As(err, &remote) && remote.Code != wire.CodeGeneric {
-			return nil, nil, err // a definite answer about the query itself
+		if errors.As(err, &remote) && remote.Code != wire.CodeGeneric && !retryable(remote) {
+			return nil, nil, err // a definite answer (limit, conflict, timeout...)
 		}
 		// Voter unreachable, or e.g. no leader momentarily: try the next one.
 		lastErr = err

@@ -180,7 +180,12 @@ func (f *graphFuzzer) mutate() {
 			map[string]any{"a": pick(), "b": pick()})
 	case 10:
 		if rels := f.ids("MATCH ()-[r]->() RETURN id(r)"); len(rels) > 0 {
-			f.exec("MATCH ()-[r]->() WHERE id(r) = $id DELETE r", map[string]any{"id": rels[r.Intn(len(rels))]})
+			id := rels[r.Intn(len(rels))]
+			if r.Intn(2) == 0 {
+				f.exec("MATCH ()-[r]->() WHERE id(r) = $id DELETE r", map[string]any{"id": id})
+			} else {
+				f.exec("MATCH ()-[r]->() WHERE id(r) = $id SET r.w = $v", map[string]any{"id": id, "v": val()})
+			}
 		}
 	default:
 		f.exec("MATCH (n) WHERE id(n) = $id DETACH DELETE n", map[string]any{"id": pick()})
@@ -203,6 +208,7 @@ func TestAnchoredEvaluationMatchesTheQuery(t *testing.T) {
 		"MATCH (a:A {k1: 1})-[r]->(b:B) WHERE b.k2 > 0 RETURN *",
 		"MATCH (a)-[:T1]->(b)<-[:T1]-(c) RETURN a.k1 AS a, c.k1 AS c",
 		"MATCH (a:A), (b:B) WHERE a.k1 = b.k1 RETURN a.k2 AS a, b.k2 AS b",
+		"MATCH (a)-[r:T1]->(b) WHERE r.w > 0 RETURN id(a) AS a, r.w AS w, r AS r, id(b) AS b",
 		"MATCH (a:C)-[:T2]->(b:C) RETURN toString(a.k1) AS a, [b.k1, b.k2] AS b",
 	}
 	for seed := int64(1); seed <= 3; seed++ {

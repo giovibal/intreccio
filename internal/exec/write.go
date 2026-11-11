@@ -2,11 +2,11 @@ package exec
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/giovibal/intreccio/internal/catalog"
-	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/internal/graph"
-	"github.com/giovibal/intreccio/internal/storage/codec"
+	"github.com/giovibal/intreccio/query/ast"
 )
 
 // --- CREATE ---
@@ -158,13 +158,18 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 			if !ok {
 				return fmt.Errorf("exec: SET target must be a variable's property")
 			}
-			node, ok := b[varRef.Name].(graph.Node)
-			if !ok {
-				return fmt.Errorf("exec: SET target %s is not a node", varRef.Name)
-			}
 			val, err := eval(it.Value, b, ctx)
 			if err != nil {
 				return err
+			}
+			if done, err := setEdgeProps(ctx, b, varRef.Name, map[string]any{it.Target.Key: val}, false); err != nil {
+				return err
+			} else if done {
+				continue
+			}
+			node, ok := b[varRef.Name].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET target %s is not a node or relationship", varRef.Name)
 			}
 			if err := graph.SetProperty(ctx.Txn, node.ID, it.Target.Key, val); err != nil {
 				return err
@@ -175,9 +180,12 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 			}
 			b[varRef.Name] = refreshed
 		case *ast.SetLabels:
+			if b[it.Variable] == nil {
+				continue // SET on null does nothing
+			}
 			node, ok := b[it.Variable].(graph.Node)
 			if !ok {
-				return fmt.Errorf("exec: SET %s:... is not a node", it.Variable)
+				return fmt.Errorf("exec: SET %s:... is not a node (only nodes have labels)", it.Variable)
 			}
 			if err := graph.AddLabels(ctx.Txn, node.ID, it.Labels); err != nil {
 				return err
@@ -188,26 +196,31 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 			}
 			b[it.Variable] = refreshed
 		case *ast.SetMap:
-			node, ok := b[it.Variable].(graph.Node)
-			if !ok {
-				return fmt.Errorf("exec: SET %s = ... is not a node", it.Variable)
-			}
 			val, err := eval(it.Value, b, ctx)
 			if err != nil {
 				return err
 			}
-			if val == nil {
-				if it.Replace {
-					// SET n = null clears all properties.
-					if err := graph.SetNodeProperties(ctx.Txn, node.ID, nil, true); err != nil {
-						return err
-					}
-				}
-			} else {
-				m, ok := val.(map[string]any)
-				if !ok {
+			var m map[string]any
+			if val != nil {
+				var ok bool
+				if m, ok = val.(map[string]any); !ok {
 					return fmt.Errorf("exec: SET %s requires a map value, got %T", it.Variable, val)
 				}
+			}
+			if _, isEdge := b[it.Variable].(graph.Edge); isEdge && val == nil && !it.Replace {
+				continue // SET r += null changes nothing
+			}
+			if done, err := setEdgeProps(ctx, b, it.Variable, m, it.Replace); err != nil {
+				return err
+			} else if done {
+				continue
+			}
+			node, ok := b[it.Variable].(graph.Node)
+			if !ok {
+				return fmt.Errorf("exec: SET %s = ... is not a node or relationship", it.Variable)
+			}
+			// SET n = null clears all properties; SET n += null changes nothing.
+			if val != nil || it.Replace {
 				if err := graph.SetNodeProperties(ctx.Txn, node.ID, m, it.Replace); err != nil {
 					return err
 				}
@@ -222,6 +235,28 @@ func applySetClauses(ctx *Context, b binding, items []ast.SetClause) error {
 		}
 	}
 	return nil
+}
+
+// setEdgeProps applies a property change to variable when it holds a
+// relationship, or does nothing when it holds null (openCypher: SET and
+// REMOVE on null are no-ops). done is false when the variable holds
+// something else, which the caller then handles (a node) or rejects.
+func setEdgeProps(ctx *Context, b binding, variable string, props map[string]any, replace bool) (done bool, err error) {
+	switch e := b[variable].(type) {
+	case nil:
+		return true, nil
+	case graph.Edge:
+		if err := graph.SetEdgeProperties(ctx.Txn, e.ID, props, replace); err != nil {
+			return true, err
+		}
+		refreshed, err := graph.GetEdge(ctx.Txn, e.ID)
+		if err != nil {
+			return true, err
+		}
+		b[variable] = refreshed
+		return true, nil
+	}
+	return false, nil
 }
 
 // --- REMOVE ---
@@ -247,9 +282,14 @@ func (r *removeOp) next() (binding, bool, error) {
 			if !ok {
 				return nil, false, fmt.Errorf("exec: REMOVE target must be a variable's property")
 			}
+			if done, err := setEdgeProps(r.ctx, b, varRef.Name, map[string]any{it.Target.Key: nil}, false); err != nil {
+				return nil, false, err
+			} else if done {
+				continue
+			}
 			node, ok := b[varRef.Name].(graph.Node)
 			if !ok {
-				return nil, false, fmt.Errorf("exec: REMOVE %s.%s: not a node", varRef.Name, it.Target.Key)
+				return nil, false, fmt.Errorf("exec: REMOVE %s.%s: not a node or relationship", varRef.Name, it.Target.Key)
 			}
 			if err := graph.RemoveProperty(r.ctx.Txn, node.ID, it.Target.Key); err != nil {
 				return nil, false, err
@@ -260,9 +300,12 @@ func (r *removeOp) next() (binding, bool, error) {
 			}
 			b[varRef.Name] = refreshed
 		case *ast.RemoveLabels:
+			if b[it.Variable] == nil {
+				continue // REMOVE on null does nothing
+			}
 			node, ok := b[it.Variable].(graph.Node)
 			if !ok {
-				return nil, false, fmt.Errorf("exec: REMOVE %s:... not a node", it.Variable)
+				return nil, false, fmt.Errorf("exec: REMOVE %s:... is not a node (only nodes have labels)", it.Variable)
 			}
 			if err := graph.RemoveLabels(r.ctx.Txn, node.ID, it.Labels); err != nil {
 				return nil, false, err
@@ -326,8 +369,10 @@ func (d *deleteOp) next() (binding, bool, error) {
 
 type createIndexOp struct {
 	ctx   *Context
-	label string
+	name  string
+	label string // the relationship type when rel
 	prop  string
+	rel   bool
 	done  bool
 }
 
@@ -336,6 +381,9 @@ func (c *createIndexOp) next() (binding, bool, error) {
 		return nil, false, nil
 	}
 	c.done = true
+	if c.rel {
+		return c.createRelIndex()
+	}
 
 	labelID, err := catalog.InternLabel(c.ctx.Txn, c.label)
 	if err != nil {
@@ -352,38 +400,198 @@ func (c *createIndexOp) next() (binding, bool, error) {
 	}
 	if has {
 		// Idempotent: registry entry already present and any prior backfill is
-		// kept consistent by the graph layer on every subsequent mutation.
+		// kept consistent by the graph layer on every subsequent mutation. A
+		// different explicit name for the same index is a conflict.
+		if c.name != "" {
+			def, _, err := catalog.GetIndex(c.ctx.Txn, labelID, keyID)
+			if err != nil {
+				return nil, false, err
+			}
+			_, _, existing, err := catalog.IndexName(c.ctx.Txn, def)
+			if err != nil {
+				return nil, false, err
+			}
+			if existing != c.name {
+				return nil, false, fmt.Errorf("exec: an index on :%s(%s) already exists as %q", c.label, c.prop, existing)
+			}
+		}
 		return binding{}, true, nil
 	}
 
-	if err := catalog.AddIndex(c.ctx.Txn, labelID, keyID); err != nil {
+	if c.name != "" {
+		if _, found, err := findAnyIndex(c.ctx, c.name); err != nil {
+			return nil, false, err
+		} else if found {
+			return nil, false, fmt.Errorf("exec: an index named %q already exists", c.name)
+		}
+	}
+	if err := graph.BuildIndex(c.ctx.Txn, labelID, keyID, c.name); err != nil {
 		return nil, false, err
 	}
+	return binding{}, true, nil
+}
 
-	// Backfill: scan every node carrying the label and write a `p` entry for
-	// each whose property value is a scalar.
-	nodeIDs, err := graph.NodesByLabel(c.ctx.Txn, labelID)
+// createRelIndex is CREATE INDEX for a relationship type.
+func (c *createIndexOp) createRelIndex() (binding, bool, error) {
+	txn := c.ctx.Txn
+	typeID, err := catalog.InternType(txn, c.label)
 	if err != nil {
 		return nil, false, err
 	}
-	for _, id := range nodeIDs {
-		node, err := graph.GetNode(c.ctx.Txn, id)
+	keyID, err := catalog.InternKey(txn, c.prop)
+	if err != nil {
+		return nil, false, err
+	}
+	if def, found, err := catalog.GetRelIndex(txn, typeID, keyID); err != nil {
+		return nil, false, err
+	} else if found {
+		_, _, existing, err := catalog.RelIndexName(txn, def)
 		if err != nil {
 			return nil, false, err
 		}
-		v, ok := node.Props[keyID]
-		if !ok || !graph.IsIndexable(v) {
-			continue
+		if c.name != "" && c.name != existing {
+			return nil, false, fmt.Errorf("exec: an index on ()-[:%s]-()(%s) already exists as %q", c.label, c.prop, existing)
 		}
-		pk, err := codec.PropKey(labelID, keyID, v, id)
-		if err != nil {
+		return binding{}, true, nil
+	}
+	if c.name != "" {
+		if _, found, err := findAnyIndex(c.ctx, c.name); err != nil {
 			return nil, false, err
-		}
-		if err := c.ctx.Txn.Set(pk, nil); err != nil {
-			return nil, false, err
+		} else if found {
+			return nil, false, fmt.Errorf("exec: an index named %q already exists", c.name)
 		}
 	}
+	if err := graph.BuildRelIndex(txn, typeID, keyID, c.name); err != nil {
+		return nil, false, err
+	}
 	return binding{}, true, nil
+}
+
+// --- DROP INDEX / SHOW INDEXES ---
+
+// indexInfo describes a node or relationship index for DROP and SHOW.
+type indexInfo struct {
+	name, label, prop string // label holds the type of a relationship index
+	rel               bool
+	labelID, keyID    uint32
+}
+
+// listAllIndexes returns every node and relationship index.
+func listAllIndexes(ctx *Context) ([]indexInfo, error) {
+	var out []indexInfo
+	defs, err := catalog.ListIndexes(ctx.Txn)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range defs {
+		label, prop, name, err := catalog.IndexName(ctx.Txn, d)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, indexInfo{name: name, label: label, prop: prop, labelID: d.Label, keyID: d.PropKey})
+	}
+	rdefs, err := catalog.ListRelIndexes(ctx.Txn)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range rdefs {
+		typ, prop, name, err := catalog.RelIndexName(ctx.Txn, d)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, indexInfo{name: name, label: typ, prop: prop, rel: true, labelID: d.Type, keyID: d.PropKey})
+	}
+	return out, nil
+}
+
+// findAnyIndex returns the node or relationship index known by name.
+func findAnyIndex(ctx *Context, name string) (indexInfo, bool, error) {
+	all, err := listAllIndexes(ctx)
+	if err != nil {
+		return indexInfo{}, false, err
+	}
+	for _, ix := range all {
+		if ix.name == name {
+			return ix, true, nil
+		}
+	}
+	return indexInfo{}, false, nil
+}
+
+type dropIndexOp struct {
+	ctx      *Context
+	name     string
+	ifExists bool
+	done     bool
+}
+
+func (d *dropIndexOp) next() (binding, bool, error) {
+	if d.done {
+		return nil, false, nil
+	}
+	d.done = true
+	ix, found, err := findAnyIndex(d.ctx, d.name)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		if d.ifExists {
+			return binding{}, true, nil
+		}
+		return nil, false, fmt.Errorf("exec: no index named %q", d.name)
+	}
+	if ix.rel {
+		if err := graph.DropRelIndexEntries(d.ctx.Txn, ix.labelID, ix.keyID); err != nil {
+			return nil, false, err
+		}
+		return binding{}, true, nil
+	}
+	if c, found, err := catalog.GetConstraint(d.ctx.Txn, ix.labelID, ix.keyID); err != nil {
+		return nil, false, err
+	} else if found {
+		_, _, cname, err := catalog.ConstraintName(d.ctx.Txn, c)
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, fmt.Errorf("exec: index %q backs constraint %q; drop the constraint instead", d.name, cname)
+	}
+	if err := graph.DropIndexEntries(d.ctx.Txn, ix.labelID, ix.keyID); err != nil {
+		return nil, false, err
+	}
+	return binding{}, true, nil
+}
+
+// showIndexesOp emits one (name, label, property, entity) row per index, by
+// name; label holds the type of a relationship index.
+type showIndexesOp struct {
+	ctx  *Context
+	rows []binding
+	pos  int
+	done bool
+}
+
+func (s *showIndexesOp) next() (binding, bool, error) {
+	if !s.done {
+		s.done = true
+		all, err := listAllIndexes(s.ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, ix := range all {
+			entity := "NODE"
+			if ix.rel {
+				entity = "RELATIONSHIP"
+			}
+			s.rows = append(s.rows, binding{"name": ix.name, "label": ix.label, "property": ix.prop, "entity": entity})
+		}
+		sort.Slice(s.rows, func(i, j int) bool { return s.rows[i]["name"].(string) < s.rows[j]["name"].(string) })
+	}
+	if s.pos >= len(s.rows) {
+		return nil, false, nil
+	}
+	r := s.rows[s.pos]
+	s.pos++
+	return r, true, nil
 }
 
 // --- MERGE ---
@@ -420,6 +628,9 @@ func (m *mergeOp) next() (binding, bool, error) {
 }
 
 func (m *mergeOp) run(b binding) ([]binding, error) {
+	if err := rejectNullMergeProps(m.ctx, b, m.part); err != nil {
+		return nil, err
+	}
 	var (
 		rows     []binding
 		wasMatch bool
@@ -448,6 +659,36 @@ func (m *mergeOp) run(b binding) ([]binding, error) {
 		}
 	}
 	return rows, nil
+}
+
+// rejectNullMergeProps fails when an inline property of the MERGE pattern
+// evaluates to null: a null value can neither be matched nor stored, so MERGE
+// has no defined outcome (openCypher raises an error).
+func rejectNullMergeProps(ctx *Context, b binding, part ast.PatternPart) error {
+	check := func(kind string, props map[string]ast.Expr) error {
+		for k, expr := range props {
+			v, err := eval(expr, b, ctx)
+			if err != nil {
+				return err
+			}
+			if v == nil {
+				return fmt.Errorf("exec: cannot MERGE %s with a null value for property %q", kind, k)
+			}
+		}
+		return nil
+	}
+	if err := check("node", part.Start.Props); err != nil {
+		return err
+	}
+	for _, ch := range part.Chain {
+		if err := check("relationship", ch.Rel.Props); err != nil {
+			return err
+		}
+		if err := check("node", ch.Node.Props); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // mergeNode: match nodes with all labels and inline props; create one if none match.
@@ -673,12 +914,12 @@ func propsMatch(ctx *Context, have map[uint32]any, want map[string]ast.Expr, b b
 	return true, nil
 }
 
-// scalarEqualNorm compares two scalar values for equality after normalization.
+// scalarEqualNorm compares two scalar values for equality after normalization,
+// using the query-level equality (so NaN matches nothing).
 func scalarEqualNorm(a, b any) bool {
 	a, b = normalize(a), normalize(b)
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	c, ok := compareValues(a, b)
-	return ok && c == 0
+	return equals(a, b)
 }

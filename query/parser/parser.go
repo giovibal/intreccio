@@ -194,6 +194,22 @@ func (p *parser) parseClause() (ast.Clause, error) {
 			return nil, err
 		}
 		return p.deleteBody(pos, true)
+	case p.atKw("DROP"):
+		if p.peekKw(1, "CONSTRAINT") {
+			return p.parseDropConstraint()
+		}
+		return p.parseDropIndex()
+	case p.atKw("SHOW"):
+		pos := p.advance().pos
+		switch {
+		case p.atKw("INDEX") || p.atKw("INDEXES"):
+			p.advance()
+			return &ast.ShowIndexes{Pos: pos}, nil
+		case p.atKw("CONSTRAINT") || p.atKw("CONSTRAINTS"):
+			p.advance()
+			return &ast.ShowConstraints{Pos: pos}, nil
+		}
+		return nil, p.errf(p.cur().pos, "expected INDEXES or CONSTRAINTS after SHOW")
 	case p.atKw("DELETE"):
 		pos := p.advance().pos
 		return p.deleteBody(pos, false)
@@ -366,6 +382,9 @@ func (p *parser) parseCreate() (ast.Clause, error) {
 	if p.atKw("INDEX") {
 		return p.createIndexBody(pos)
 	}
+	if p.atKw("CONSTRAINT") {
+		return p.createConstraintBody(pos)
+	}
 	parts, err := p.parsePattern()
 	if err != nil {
 		return nil, err
@@ -376,8 +395,105 @@ func (p *parser) parseCreate() (ast.Clause, error) {
 func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	p.advance() // INDEX
 	// Optional index name before FOR.
+	var name string
 	if !p.atKw("FOR") && p.at(tIdent) {
+		name = p.advance().text
+	}
+	if err := p.expectKw("FOR"); err != nil {
+		return nil, err
+	}
+	var variable, label string
+	rel := p.at(tLParen) && p.peek(1).typ == tRParen
+	if rel {
+		v, typ, err := p.relIndexPattern()
+		if err != nil {
+			return nil, err
+		}
+		variable, label = v, typ
+	} else {
+		if _, err := p.expect(tLParen); err != nil {
+			return nil, err
+		}
+		v, err := p.identName()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tColon); err != nil {
+			return nil, err
+		}
+		if label, err = p.identName(); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tRParen); err != nil {
+			return nil, err
+		}
+		variable = v
+	}
+	if err := p.expectKw("ON"); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tLParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.identName(); err != nil { // variable reference (ignored)
+		return nil, err
+	}
+	if _, err := p.expect(tDot); err != nil {
+		return nil, err
+	}
+	prop, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tRParen); err != nil {
+		return nil, err
+	}
+	return &ast.CreateIndex{Name: name, Variable: variable, Label: label, Property: prop, Rel: rel, Pos: pos}, nil
+}
+
+// relIndexPattern parses the ()-[v:TYPE]-() of a relationship index (any
+// direction) and returns the variable and the type.
+func (p *parser) relIndexPattern() (variable, typ string, err error) {
+	start, err := p.parseNodePattern()
+	if err != nil {
+		return "", "", err
+	}
+	r, err := p.parseRelPattern()
+	if err != nil {
+		return "", "", err
+	}
+	end, err := p.parseNodePattern()
+	if err != nil {
+		return "", "", err
+	}
+	if start.Variable != "" || len(start.Labels) > 0 || end.Variable != "" || len(end.Labels) > 0 ||
+		len(start.Props) > 0 || len(end.Props) > 0 {
+		return "", "", p.errf(start.Pos, "a relationship index pattern has empty nodes: ()-[r:TYPE]-()")
+	}
+	if r.Variable == "" || len(r.Types) != 1 || r.VarLength || len(r.Props) > 0 {
+		return "", "", p.errf(r.Pos, "a relationship index needs a variable and one type: ()-[r:TYPE]-()")
+	}
+	return r.Variable, r.Types[0], nil
+}
+
+// createConstraintBody parses the rest of
+// CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (v:Label) REQUIRE v.prop IS UNIQUE.
+// IF NOT EXISTS is accepted for compatibility: creating an existing constraint
+// is a no-op anyway.
+func (p *parser) createConstraintBody(pos ast.Pos) (*ast.CreateConstraint, error) {
+	p.advance() // CONSTRAINT
+	var name string
+	if !p.atKw("FOR") && !p.atKw("IF") && p.at(tIdent) {
+		name = p.advance().text
+	}
+	if p.atKw("IF") {
 		p.advance()
+		if err := p.expectKw("NOT"); err != nil {
+			return nil, err
+		}
+		if err := p.expectKw("EXISTS"); err != nil {
+			return nil, err
+		}
 	}
 	if err := p.expectKw("FOR"); err != nil {
 		return nil, err
@@ -399,14 +515,16 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	if _, err := p.expect(tRParen); err != nil {
 		return nil, err
 	}
-	if err := p.expectKw("ON"); err != nil {
+	if err := p.expectKw("REQUIRE"); err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(tLParen); err != nil {
+	refPos := p.cur().pos
+	ref, err := p.identName()
+	if err != nil {
 		return nil, err
 	}
-	if _, err := p.identName(); err != nil { // variable reference (ignored)
-		return nil, err
+	if ref != variable {
+		return nil, p.errf(refPos, "REQUIRE must refer to %s, found %s", variable, ref)
 	}
 	if _, err := p.expect(tDot); err != nil {
 		return nil, err
@@ -415,10 +533,54 @@ func (p *parser) createIndexBody(pos ast.Pos) (*ast.CreateIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(tRParen); err != nil {
+	if err := p.expectKw("IS"); err != nil {
 		return nil, err
 	}
-	return &ast.CreateIndex{Variable: variable, Label: label, Property: prop, Pos: pos}, nil
+	if !p.atKw("UNIQUE") {
+		return nil, p.errf(p.cur().pos, "only IS UNIQUE constraints are supported, found %s", p.describe(p.cur()))
+	}
+	p.advance()
+	return &ast.CreateConstraint{Name: name, Label: label, Property: prop, Pos: pos}, nil
+}
+
+// parseDropConstraint parses DROP CONSTRAINT name [IF EXISTS].
+func (p *parser) parseDropConstraint() (ast.Clause, error) {
+	pos := p.advance().pos // DROP
+	p.advance()            // CONSTRAINT
+	name, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	d := &ast.DropConstraint{Name: name, Pos: pos}
+	if p.atKw("IF") {
+		p.advance()
+		if err := p.expectKw("EXISTS"); err != nil {
+			return nil, err
+		}
+		d.IfExists = true
+	}
+	return d, nil
+}
+
+// parseDropIndex parses DROP INDEX name [IF EXISTS].
+func (p *parser) parseDropIndex() (ast.Clause, error) {
+	pos := p.advance().pos // DROP
+	if err := p.expectKw("INDEX"); err != nil {
+		return nil, err
+	}
+	name, err := p.identName()
+	if err != nil {
+		return nil, err
+	}
+	d := &ast.DropIndex{Name: name, Pos: pos}
+	if p.atKw("IF") {
+		p.advance()
+		if err := p.expectKw("EXISTS"); err != nil {
+			return nil, err
+		}
+		d.IfExists = true
+	}
+	return d, nil
 }
 
 func (p *parser) parseMerge() (ast.Clause, error) {
@@ -662,6 +824,26 @@ func (p *parser) parsePatternPart() (ast.PatternPart, error) {
 		p.advance() // var
 		p.advance() // =
 	}
+	if (p.atKw("shortestPath") || p.atKw("allShortestPaths")) && p.peek(1).typ == tLParen {
+		kind := ast.ShortestOne
+		if p.atKw("allShortestPaths") {
+			kind = ast.ShortestAll
+		}
+		p.advance() // shortestPath / allShortestPaths
+		p.advance() // (
+		inner, err := p.parsePatternPart()
+		if err != nil {
+			return part, err
+		}
+		if inner.Variable != "" || inner.Shortest != ast.NotShortest {
+			return part, p.errf(inner.Start.Pos, "expected a pattern inside shortestPath")
+		}
+		if _, err := p.expect(tRParen); err != nil {
+			return part, err
+		}
+		inner.Variable, inner.Shortest = part.Variable, kind
+		return inner, nil
+	}
 	start, err := p.parseNodePattern()
 	if err != nil {
 		return part, err
@@ -869,6 +1051,8 @@ func (p *parser) infixBP() (int, string) {
 		return 4, ">"
 	case tGe:
 		return 4, ">="
+	case tRegex:
+		return 4, "=~"
 	case tIdent:
 		if p.atKw("AND") {
 			return 2, "AND"
@@ -981,10 +1165,16 @@ func (p *parser) parsePrefix() (ast.Expr, error) {
 	return p.parsePostfix(prim)
 }
 
-// parsePostfix applies property access (.key) and the label predicate (:Label).
+// parsePostfix applies property access (.key), subscripts and slices
+// ([i], [a..b]) and the label predicate (:Label).
 func (p *parser) parsePostfix(left ast.Expr) (ast.Expr, error) {
 	for {
 		switch {
+		case p.at(tLBracket):
+			var err error
+			if left, err = p.parseSubscript(left); err != nil {
+				return nil, err
+			}
 		case p.at(tDot):
 			pos := p.advance().pos
 			key, err := p.identName()
@@ -1003,6 +1193,38 @@ func (p *parser) parsePostfix(left ast.Expr) (ast.Expr, error) {
 			return left, nil
 		}
 	}
+}
+
+// parseSubscript parses [index], [from..to], [from..] and [..to].
+func (p *parser) parseSubscript(target ast.Expr) (ast.Expr, error) {
+	pos := p.advance().pos // [
+	var from ast.Expr
+	if !p.at(tDotDot) {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if !p.at(tDotDot) {
+			if _, err := p.expect(tRBracket); err != nil {
+				return nil, err
+			}
+			return &ast.Subscript{Target: target, Index: e, Pos: pos}, nil
+		}
+		from = e
+	}
+	p.advance() // ..
+	var to ast.Expr
+	if !p.at(tRBracket) {
+		e, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		to = e
+	}
+	if _, err := p.expect(tRBracket); err != nil {
+		return nil, err
+	}
+	return &ast.Slice{Target: target, From: from, To: to, Pos: pos}, nil
 }
 
 func (p *parser) parsePrimary() (ast.Expr, error) {
@@ -1077,6 +1299,9 @@ func (p *parser) paramName() (string, error) {
 }
 
 func (p *parser) parseListLiteral() (ast.Expr, error) {
+	if p.peek(1).typ == tIdent && p.peekKw(2, "IN") {
+		return p.parseListComprehension()
+	}
 	pos := p.advance().pos // [
 	list := &ast.ListLiteral{Pos: pos}
 	if !p.at(tRBracket) {
@@ -1096,6 +1321,48 @@ func (p *parser) parseListLiteral() (ast.Expr, error) {
 		return nil, err
 	}
 	return list, nil
+}
+
+// parseListComprehension parses [x IN list WHERE pred | expr].
+func (p *parser) parseListComprehension() (ast.Expr, error) {
+	pos := p.advance().pos // [
+	variable, list, err := p.parseInClause()
+	if err != nil {
+		return nil, err
+	}
+	lc := &ast.ListComprehension{Variable: variable, List: list, Pos: pos}
+	if p.atKw("WHERE") {
+		p.advance()
+		if lc.Where, err = p.parseExpr(0); err != nil {
+			return nil, err
+		}
+	}
+	if p.at(tPipe) {
+		p.advance()
+		if lc.Map, err = p.parseExpr(0); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(tRBracket); err != nil {
+		return nil, err
+	}
+	return lc, nil
+}
+
+// parseInClause parses `variable IN expr`.
+func (p *parser) parseInClause() (string, ast.Expr, error) {
+	variable, err := p.identName()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := p.expectKw("IN"); err != nil {
+		return "", nil, err
+	}
+	list, err := p.parseExpr(0)
+	if err != nil {
+		return "", nil, err
+	}
+	return variable, list, nil
 }
 
 func (p *parser) parseMapLiteralExpr() (ast.Expr, error) {
@@ -1155,6 +1422,26 @@ func (p *parser) parseFunctionCall() (ast.Expr, error) {
 	nameTok := p.advance() // ident
 	if _, err := p.expect(tLParen); err != nil {
 		return nil, err
+	}
+	switch kind := strings.ToLower(nameTok.text); kind {
+	case "any", "all", "none", "single":
+		if p.at(tIdent) && p.peekKw(1, "IN") {
+			variable, list, err := p.parseInClause()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectKw("WHERE"); err != nil {
+				return nil, err
+			}
+			where, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(tRParen); err != nil {
+				return nil, err
+			}
+			return &ast.Quantifier{Kind: kind, Variable: variable, List: list, Where: where, Pos: nameTok.pos}, nil
+		}
 	}
 	fn := &ast.FunctionCall{Name: nameTok.text, Pos: nameTok.pos}
 	if p.atKw("DISTINCT") {

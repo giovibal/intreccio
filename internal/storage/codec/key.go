@@ -13,6 +13,14 @@ const (
 	KeyIn    byte = 'i' // i + dst(8) + type(4) + src(8) + edge(8)
 	KeyLabel byte = 'l' // l + label(4) + node(8)
 	KeyProp  byte = 'p' // p + label(4) + propKey(4) + valEnc + node(8)
+	// KeyUnique maps a value of a unique-constrained (label, propKey) to the
+	// one node holding it: u + label(4) + propKey(4) + valEnc -> node(8).
+	// One key per value (not per node) so that two transactions claiming the
+	// same value conflict instead of both succeeding.
+	KeyUnique byte = 'u'
+	// KeyRelProp is the relationship property index:
+	// r + type(4) + propKey(4) + valEnc + edge(8).
+	KeyRelProp byte = 'r'
 )
 
 func appendU32(dst []byte, v uint32) []byte {
@@ -95,6 +103,75 @@ func PropKey(label, propKey uint32, value any, node uint64) ([]byte, error) {
 	return appendU64(k, node), nil
 }
 
+// EdgePrefix: scan of all edge records.
+func EdgePrefix() []byte { return []byte{KeyEdge} }
+
+// RelPropKey: relationship property index entry.
+func RelPropKey(typeID, propKey uint32, value any, edge uint64) ([]byte, error) {
+	k, err := RelPropPrefix(typeID, propKey, value)
+	if err != nil {
+		return nil, err
+	}
+	return appendU64(k, edge), nil
+}
+
+// RelPropPrefix: scan of the relationship index entries equal to a value.
+func RelPropPrefix(typeID, propKey uint32, value any) ([]byte, error) {
+	k := make([]byte, 0, 1+4+4+16+8)
+	k = append(k, KeyRelProp)
+	k = appendU32(k, typeID)
+	k = appendU32(k, propKey)
+	return AppendIndexValue(k, value)
+}
+
+// RelPropIndexPrefix: scan of every entry of a relationship index.
+func RelPropIndexPrefix(typeID, propKey uint32) []byte {
+	k := make([]byte, 0, 1+4+4)
+	k = append(k, KeyRelProp)
+	k = appendU32(k, typeID)
+	return appendU32(k, propKey)
+}
+
+// ParseRelPropKey extracts the indexed value and the edge ID from an `r` key.
+func ParseRelPropKey(key []byte) (value any, edge uint64, err error) {
+	if len(key) < 1+4+4+1+8 || key[0] != KeyRelProp {
+		return nil, 0, fmt.Errorf("codec: malformed `r` key (len=%d)", len(key))
+	}
+	v, n, err := DecodeIndexValue(key[9:])
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(key) != 9+n+8 {
+		return nil, 0, fmt.Errorf("codec: malformed `r` key (len=%d)", len(key))
+	}
+	return v, binary.BigEndian.Uint64(key[len(key)-8:]), nil
+}
+
+// EdgeIDFromKey extracts the ID from an `e` key.
+func EdgeIDFromKey(key []byte) (uint64, error) {
+	if len(key) != 1+8 || key[0] != KeyEdge {
+		return 0, fmt.Errorf("codec: malformed `e` key (len=%d)", len(key))
+	}
+	return binary.BigEndian.Uint64(key[1:9]), nil
+}
+
+// UniqueKey: the owner entry of a value under a unique constraint.
+func UniqueKey(label, propKey uint32, value any) ([]byte, error) {
+	k := make([]byte, 0, 1+4+4+16)
+	k = append(k, KeyUnique)
+	k = appendU32(k, label)
+	k = appendU32(k, propKey)
+	return AppendIndexValue(k, value)
+}
+
+// UniquePrefix: scan of every owner entry of a unique constraint.
+func UniquePrefix(label, propKey uint32) []byte {
+	k := make([]byte, 0, 1+4+4)
+	k = append(k, KeyUnique)
+	k = appendU32(k, label)
+	return appendU32(k, propKey)
+}
+
 // PropPrefix: scan of the index entries with equality on a value.
 func PropPrefix(label, propKey uint32, value any) ([]byte, error) {
 	k := make([]byte, 0, 1+4+4+16)
@@ -152,4 +229,37 @@ func NodeIDFromKey(key []byte) (uint64, error) {
 		return 0, fmt.Errorf("codec: malformed `n` key (len=%d)", len(key))
 	}
 	return binary.BigEndian.Uint64(key[1:9]), nil
+}
+
+// PropBandPrefix: scan of the index entries of (label, propKey) whose value
+// is of one kind (band is one of the Band* constants).
+func PropBandPrefix(label, propKey uint32, band byte) []byte {
+	k := make([]byte, 0, 1+4+4+1)
+	k = append(k, KeyProp)
+	k = appendU32(k, label)
+	k = appendU32(k, propKey)
+	return append(k, band)
+}
+
+// ParsePropKey extracts the indexed value and the nodeID from a `p` key.
+func ParsePropKey(key []byte) (value any, node uint64, err error) {
+	if len(key) < 1+4+4+1+8 || key[0] != KeyProp {
+		return nil, 0, fmt.Errorf("codec: malformed `p` key (len=%d)", len(key))
+	}
+	v, n, err := DecodeIndexValue(key[9:])
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(key) != 9+n+8 {
+		return nil, 0, fmt.Errorf("codec: malformed `p` key (len=%d)", len(key))
+	}
+	return v, binary.BigEndian.Uint64(key[len(key)-8:]), nil
+}
+
+// PropIndexPrefix: scan of every entry of the (label, propKey) index.
+func PropIndexPrefix(label, propKey uint32) []byte {
+	k := make([]byte, 0, 1+4+4)
+	k = append(k, KeyProp)
+	k = appendU32(k, label)
+	return appendU32(k, propKey)
 }

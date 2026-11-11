@@ -38,7 +38,7 @@ func TestEnsureFormatRejectsWrongVersion(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(tx storage.Txn) error {
 		var b [4]byte
-		binary.BigEndian.PutUint32(b[:], formatVersion+1)
+		binary.BigEndian.PutUint32(b[:], maxFormat+1)
 		return tx.Set(formatKey, b[:])
 	}); err != nil {
 		t.Fatal(err)
@@ -58,4 +58,48 @@ func TestEnsureFormatRejectsMalformedMarker(t *testing.T) {
 	if err := s.Update(EnsureFormat); err == nil {
 		t.Fatal("expected an error for a malformed format marker")
 	}
+}
+
+func TestRequireUniqueFormat(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(EnsureFormat); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(RequireUniqueFormat); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(EnsureFormat); err != nil {
+		t.Fatalf("EnsureFormat on a version %d database: %v", formatUnique, err)
+	}
+	if err := s.View(func(tx storage.Txn) error {
+		v, err := tx.Get(formatKey)
+		if err != nil {
+			return err
+		}
+		if got := binary.BigEndian.Uint32(v); got != formatUnique {
+			t.Errorf("marker = %d, want %d", got, formatUnique)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRequireFormatNeverLowers(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(EnsureFormat); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []func(storage.Txn) error{RequireRelIndexFormat, RequireUniqueFormat, EnsureFormat} {
+		if err := s.Update(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = s.View(func(tx storage.Txn) error {
+		v, _ := tx.Get(formatKey)
+		if got := binary.BigEndian.Uint32(v); got != formatRelIndex {
+			t.Errorf("marker = %d, want %d", got, formatRelIndex)
+		}
+		return nil
+	})
 }

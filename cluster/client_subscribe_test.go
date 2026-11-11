@@ -54,18 +54,6 @@ func (tc *testCluster) noneServing(t *testing.T) {
 	}
 }
 
-// survivor returns a voter other than i that is still up.
-func (tc *testCluster) survivor(t *testing.T, i int) int {
-	t.Helper()
-	for j, nd := range tc.nodes {
-		if j != i && nd != nil {
-			return j
-		}
-	}
-	t.Fatal("no surviving voter")
-	return -1
-}
-
 func (tc *testCluster) kill(t *testing.T, i int) {
 	t.Helper()
 	if err := tc.nodes[i].Close(); err != nil {
@@ -269,7 +257,7 @@ func TestClientSubscriptionEndsWhenNoVoterIsLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.failoverTimeout = 500 * time.Millisecond
-	clientDB := intreccio.New(c)
+	clientDB := wrap(c)
 	defer func() { _ = clientDB.Close() }()
 
 	sub := subscribeTo(t, clientDB, liveNames)

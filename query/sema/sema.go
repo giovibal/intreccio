@@ -6,6 +6,7 @@ package sema
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/giovibal/intreccio/query/ast"
@@ -25,6 +26,9 @@ func (e *SemaError) Error() string {
 // (empty for write-only queries without RETURN).
 type Result struct {
 	Columns []string
+	// Params lists the parameters the query reads ($name), sorted, without
+	// duplicates.
+	Params []string
 }
 
 // Analyze validates the query and computes its output columns.
@@ -47,14 +51,21 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 		return nil, err
 	}
 	if len(q.Unions) > 0 && hasCreateIndex(q) {
-		return nil, a.errf(clausePos(q.Clauses[0]), "CREATE INDEX must be the only clause")
+		return nil, a.errf(clausePos(q.Clauses[0]), "schema commands must be the only clause")
 	}
 	for _, u := range q.Unions {
 		// Each UNION arm is analysed in isolation; columns must match by name.
-		armCols, err := (&analyzer{}).analyzeArm(u.Clauses)
+		arm := &analyzer{}
+		armCols, err := arm.analyzeArm(u.Clauses)
 		if err != nil {
 			return nil, err
 		}
+		for _, p := range arm.result.Params {
+			if !slices.Contains(a.result.Params, p) {
+				a.result.Params = append(a.result.Params, p)
+			}
+		}
+		slices.Sort(a.result.Params)
 		if !sameColumns(cols, armCols) {
 			return nil, a.errf(u.Pos, "UNION arms must produce the same columns (got %v vs %v)", cols, armCols)
 		}
@@ -81,7 +92,8 @@ func (a *analyzer) run(q *ast.Query) (*Result, error) {
 // IsWriteClause reports whether c modifies the database.
 func IsWriteClause(c ast.Clause) bool {
 	switch c.(type) {
-	case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex:
+	case *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex, *ast.DropIndex,
+		*ast.CreateConstraint, *ast.DropConstraint:
 		return true
 	default:
 		return false
@@ -94,8 +106,10 @@ func (a *analyzer) analyzeArm(clauses []ast.Clause) ([]string, error) {
 	if len(clauses) == 0 {
 		return nil, &SemaError{Msg: "empty query"}
 	}
-	if hasClauseOfType[*ast.CreateIndex](clauses) && len(clauses) != 1 {
-		return nil, a.errf(clausePos(clauses[0]), "CREATE INDEX must be the only clause")
+	for _, c := range clauses {
+		if isSchemaCommand(c) && len(clauses) != 1 {
+			return nil, a.errf(clausePos(clauses[0]), "schema commands must be the only clause")
+		}
 	}
 
 	sc := newScope()
@@ -113,15 +127,6 @@ func (a *analyzer) analyzeArm(clauses []ast.Clause) ([]string, error) {
 			"incomplete query: a RETURN or a writing clause is required")
 	}
 	return a.result.Columns, nil
-}
-
-func hasClauseOfType[T ast.Clause](clauses []ast.Clause) bool {
-	for _, c := range clauses {
-		if _, ok := c.(T); ok {
-			return true
-		}
-	}
-	return false
 }
 
 func sameColumns(a, b []string) bool {
@@ -156,14 +161,25 @@ func (a *analyzer) clause(sc *scope, c ast.Clause) error {
 		return a.with(sc, cl)
 	case *ast.Return:
 		return a.ret(sc, cl)
-	case *ast.CreateIndex:
+	case *ast.CreateIndex, *ast.DropIndex, *ast.CreateConstraint, *ast.DropConstraint:
 		return nil // no variables involved
+	case *ast.ShowIndexes:
+		a.result.Columns = []string{"name", "label", "property", "entity"}
+		return nil
+	case *ast.ShowConstraints:
+		a.result.Columns = []string{"name", "label", "property", "type"}
+		return nil
 	default:
 		return a.errf(clausePos(c), "unsupported clause")
 	}
 }
 
 func (a *analyzer) match(sc *scope, m *ast.Match) error {
+	for _, part := range m.Parts {
+		if err := a.checkShortest(part); err != nil {
+			return err
+		}
+	}
 	if err := a.introducePattern(sc, m.Parts); err != nil {
 		return err
 	}
@@ -174,7 +190,40 @@ func (a *analyzer) match(sc *scope, m *ast.Match) error {
 }
 
 func (a *analyzer) create(sc *scope, c *ast.Create) error {
+	for _, part := range c.Parts {
+		if part.Shortest != ast.NotShortest {
+			return a.errf(part.Start.Pos, "shortestPath can only be used in MATCH")
+		}
+	}
 	return a.introducePattern(sc, c.Parts)
+}
+
+// checkShortest validates the supported form of a shortest-path part:
+// shortestPath((a)-[r:T*min..max]-(b)) with a single variable-length
+// relationship between two plain node variables, which the planner requires
+// to be bound by an earlier pattern.
+func (a *analyzer) checkShortest(part ast.PatternPart) error {
+	if part.Shortest == ast.NotShortest {
+		return nil
+	}
+	if len(part.Chain) != 1 {
+		return a.errf(part.Start.Pos, "shortestPath needs exactly one relationship pattern")
+	}
+	rel, end := part.Chain[0].Rel, part.Chain[0].Node
+	switch {
+	case !rel.VarLength:
+		return a.errf(rel.Pos, "shortestPath needs a variable-length relationship, e.g. [*] or [:T*..5]")
+	case rel.MinHops > 1:
+		return a.errf(rel.Pos, "shortestPath supports a minimum length of 0 or 1 only")
+	case len(rel.Props) > 0:
+		return a.errf(rel.Pos, "relationship properties are not supported in shortestPath")
+	}
+	for _, n := range []*ast.NodePattern{part.Start, end} {
+		if n.Variable == "" || len(n.Labels) > 0 || len(n.Props) > 0 {
+			return a.errf(n.Pos, "shortestPath endpoints must be plain variables bound by an earlier pattern, e.g. MATCH (a {..}), (b {..}), p = shortestPath((a)-[*]-(b))")
+		}
+	}
+	return nil
 }
 
 func (a *analyzer) set(sc *scope, s *ast.Set) error {
@@ -235,6 +284,9 @@ func (a *analyzer) unwind(sc *scope, u *ast.Unwind) error {
 }
 
 func (a *analyzer) merge(sc *scope, m *ast.Merge) error {
+	if m.Part.Shortest != ast.NotShortest {
+		return a.errf(m.Part.Start.Pos, "shortestPath can only be used in MATCH")
+	}
 	if err := a.introducePattern(sc, []ast.PatternPart{m.Part}); err != nil {
 		return err
 	}
@@ -407,7 +459,13 @@ func (a *analyzer) checkProjectionTail(sc *scope, orderBy []ast.SortItem, skip, 
 // checkExpr validates variable references and the use of aggregations.
 func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 	switch ex := e.(type) {
-	case *ast.Literal, *ast.Param:
+	case *ast.Literal:
+		return nil
+	case *ast.Param:
+		if !slices.Contains(a.result.Params, ex.Name) {
+			a.result.Params = append(a.result.Params, ex.Name)
+			slices.Sort(a.result.Params)
+		}
 		return nil
 	case *ast.Variable:
 		if !sc.has(ex.Name) {
@@ -416,6 +474,40 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 		return nil
 	case *ast.PropertyAccess:
 		return a.checkExpr(sc, ex.Target, inAgg)
+	case *ast.ListComprehension:
+		if err := a.checkExpr(sc, ex.List, inAgg); err != nil {
+			return err
+		}
+		inner := sc.with(ex.Variable, ex.Pos)
+		for _, part := range []ast.Expr{ex.Where, ex.Map} {
+			if part == nil {
+				continue
+			}
+			if err := a.checkExpr(inner, part, inAgg); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.Quantifier:
+		if err := a.checkExpr(sc, ex.List, inAgg); err != nil {
+			return err
+		}
+		return a.checkExpr(sc.with(ex.Variable, ex.Pos), ex.Where, inAgg)
+	case *ast.Subscript:
+		if err := a.checkExpr(sc, ex.Target, inAgg); err != nil {
+			return err
+		}
+		return a.checkExpr(sc, ex.Index, inAgg)
+	case *ast.Slice:
+		for _, part := range []ast.Expr{ex.Target, ex.From, ex.To} {
+			if part == nil {
+				continue
+			}
+			if err := a.checkExpr(sc, part, inAgg); err != nil {
+				return err
+			}
+		}
+		return nil
 	case *ast.Unary:
 		return a.checkExpr(sc, ex.Expr, inAgg)
 	case *ast.Binary:
@@ -484,9 +576,20 @@ func isAggregate(name string) bool { return aggregates[strings.ToLower(name)] }
 
 func hasCreateIndex(q *ast.Query) bool {
 	for _, c := range q.Clauses {
-		if _, ok := c.(*ast.CreateIndex); ok {
+		if isSchemaCommand(c) {
 			return true
 		}
+	}
+	return false
+}
+
+// isSchemaCommand reports index and constraint commands, which must be the
+// only clause of their query.
+func isSchemaCommand(c ast.Clause) bool {
+	switch c.(type) {
+	case *ast.CreateIndex, *ast.DropIndex, *ast.ShowIndexes,
+		*ast.CreateConstraint, *ast.DropConstraint, *ast.ShowConstraints:
+		return true
 	}
 	return false
 }
@@ -494,7 +597,9 @@ func hasCreateIndex(q *ast.Query) bool {
 // endsQuery reports whether the clause can terminate a query.
 func endsQuery(c ast.Clause) bool {
 	switch c.(type) {
-	case *ast.Return, *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete, *ast.CreateIndex:
+	case *ast.Return, *ast.Create, *ast.Merge, *ast.Set, *ast.Remove, *ast.Delete,
+		*ast.CreateIndex, *ast.DropIndex, *ast.ShowIndexes,
+		*ast.CreateConstraint, *ast.DropConstraint, *ast.ShowConstraints:
 		return true
 	default:
 		return false

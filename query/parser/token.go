@@ -31,12 +31,13 @@ const (
 	tSlash
 	tPercent
 
-	tEq  // =
-	tNeq // <>
-	tLt  // <
-	tLe  // <=
-	tGt  // >
-	tGe  // >=
+	tEq    // =
+	tNeq   // <>
+	tLt    // <
+	tLe    // <=
+	tGt    // >
+	tGe    // >=
+	tRegex // =~
 )
 
 type token struct {
@@ -106,6 +107,8 @@ func (t tokenType) String() string {
 		return ">"
 	case tGe:
 		return ">="
+	case tRegex:
+		return "=~"
 	default:
 		return "unknown token"
 	}

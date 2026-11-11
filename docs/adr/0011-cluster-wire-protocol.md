@@ -76,8 +76,12 @@ connection per member address).
   that executes the query stops at it even if no `Cancel` arrives. Cancelling
   the caller's context sends `Cancel`, which cancels the execution's context;
   a proxying voter passes both on to the leader.
-- **Errors** carry a code next to the message, so a sentinel such as
-  `ErrResultLimit` survives forwarding.
+- **Errors** carry a code next to the message, so the sentinels
+  (`ErrResultLimit`, `ErrConflict`, `ErrTxnTooLarge`, `ErrIntegerOverflow`,
+  `ErrConstraintViolation`, `context.DeadlineExceeded`, `context.Canceled`)
+  still match with `errors.Is` after forwarding. A deadline is coded only when
+  it is the requester's own: a timeout of the serving member's making stays
+  uncoded, so a client may still try another voter.
 - **Limits**: 32 MiB per frame (so per row and per request); a result is split
   into `Rows` frames of about 256 KiB. A row over the limit is an error reply,
   not a broken connection. A frame is never trusted to deliver the length it

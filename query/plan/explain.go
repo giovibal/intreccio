@@ -36,8 +36,42 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("NodeByLabelScan(%s:%s)", x.Var, x.Label), nil
 	case *NodeByProperty:
 		return fmt.Sprintf("NodeByProperty(%s:%s {%s = %s})", x.Var, x.Label, x.Key, exprString(x.Value)), nil
+	case *NodeByPropertyRange:
+		var parts []string
+		if x.Prefix != nil {
+			parts = append(parts, x.Key+" STARTS WITH "+exprString(x.Prefix))
+		}
+		if x.Lower != nil {
+			op := " > "
+			if x.LowerInclusive {
+				op = " >= "
+			}
+			parts = append(parts, x.Key+op+exprString(x.Lower))
+		}
+		if x.Upper != nil {
+			op := " < "
+			if x.UpperInclusive {
+				op = " <= "
+			}
+			parts = append(parts, x.Key+op+exprString(x.Upper))
+		}
+		return fmt.Sprintf("NodeByPropertyRange(%s:%s {%s})", x.Var, x.Label, strings.Join(parts, ", ")), nil
 	case *Expand:
 		return fmt.Sprintf("Expand(%s)%s(%s)", x.From, relArrow(x), x.To), []Op{x.Input}
+	case *RelByProperty:
+		arrow := relArrow(&Expand{Rel: x.Rel, Types: []string{x.Type}, Dir: x.Dir})
+		return fmt.Sprintf("RelByProperty((%s)%s(%s) {%s = %s})", x.From, arrow, x.To, x.Key, exprString(x.Value)), nil
+	case *ShortestPath:
+		name := "ShortestPath"
+		if x.All {
+			name = "AllShortestPaths"
+		}
+		arrow := relArrow(&Expand{Rel: x.RelVar, Types: x.Types, Dir: x.Dir, VarLength: true, MinHops: x.MinHops, MaxHops: x.MaxHops})
+		s := fmt.Sprintf("%s(%s)%s(%s)", name, x.From, arrow, x.To)
+		if x.PathVar != "" {
+			s += " AS " + x.PathVar
+		}
+		return s, []Op{x.Input}
 	case *Filter:
 		return fmt.Sprintf("Filter(%s)", exprString(x.Pred)), []Op{x.Input}
 	case *Project:
@@ -64,6 +98,8 @@ func describe(o Op) (string, []Op) {
 		return fmt.Sprintf("Unwind(%s AS %s)", exprString(x.Expr), x.Alias), []Op{x.Input}
 	case *Argument:
 		return "Argument", nil
+	case *Apply:
+		return "Apply", []Op{x.Outer, x.Inner}
 	case *OuterApply:
 		return fmt.Sprintf("OuterApply(new=[%s])", strings.Join(x.NewVars, ", ")), []Op{x.Outer, x.Inner}
 	case *Union:
@@ -83,7 +119,20 @@ func describe(o Op) (string, []Op) {
 		}
 		return fmt.Sprintf("%s(%s)", op, strings.Join(parts, ", ")), []Op{x.Input}
 	case *CreateIndex:
+		if x.Rel {
+			return fmt.Sprintf("CreateIndex(()-[:%s]-().%s)", x.Label, x.Property), nil
+		}
 		return fmt.Sprintf("CreateIndex(:%s.%s)", x.Label, x.Property), nil
+	case *DropIndex:
+		return fmt.Sprintf("DropIndex(%s)", x.Name), nil
+	case *ShowIndexes:
+		return "ShowIndexes", nil
+	case *CreateConstraint:
+		return fmt.Sprintf("CreateConstraint(:%s.%s UNIQUE)", x.Label, x.Property), nil
+	case *DropConstraint:
+		return fmt.Sprintf("DropConstraint(%s)", x.Name), nil
+	case *ShowConstraints:
+		return "ShowConstraints", nil
 	default:
 		return "?", nil
 	}
@@ -285,93 +334,4 @@ func sortList(keys []SortKey) string {
 }
 
 // exprString renders an AST expression as readable text.
-func exprString(e ast.Expr) string {
-	switch ex := e.(type) {
-	case nil:
-		return ""
-	case *ast.Variable:
-		return ex.Name
-	case *ast.PropertyAccess:
-		return exprString(ex.Target) + "." + ex.Key
-	case *ast.Param:
-		return "$" + ex.Name
-	case *ast.Literal:
-		return literalString(ex.Value)
-	case *ast.Unary:
-		if ex.Op == "NOT" {
-			return "NOT " + exprString(ex.Expr)
-		}
-		return ex.Op + exprString(ex.Expr)
-	case *ast.Binary:
-		return exprString(ex.Left) + " " + ex.Op + " " + exprString(ex.Right)
-	case *ast.LabelsPredicate:
-		return exprString(ex.Expr) + ":" + strings.Join(ex.Labels, ":")
-	case *ast.ListLiteral:
-		parts := make([]string, len(ex.Elements))
-		for i, el := range ex.Elements {
-			parts[i] = exprString(el)
-		}
-		return "[" + strings.Join(parts, ", ") + "]"
-	case *ast.MapLiteral:
-		keys := make([]string, 0, len(ex.Entries))
-		for k := range ex.Entries {
-			keys = append(keys, k)
-		}
-		sortStrings(keys)
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = k + ": " + exprString(ex.Entries[k])
-		}
-		return "{" + strings.Join(parts, ", ") + "}"
-	case *ast.Case:
-		var sb strings.Builder
-		sb.WriteString("CASE")
-		if ex.Operand != nil {
-			sb.WriteByte(' ')
-			sb.WriteString(exprString(ex.Operand))
-		}
-		for _, w := range ex.Whens {
-			sb.WriteString(" WHEN ")
-			sb.WriteString(exprString(w.Cond))
-			sb.WriteString(" THEN ")
-			sb.WriteString(exprString(w.Result))
-		}
-		if ex.Else != nil {
-			sb.WriteString(" ELSE ")
-			sb.WriteString(exprString(ex.Else))
-		}
-		sb.WriteString(" END")
-		return sb.String()
-	case *ast.FunctionCall:
-		var sb strings.Builder
-		sb.WriteString(ex.Name)
-		sb.WriteByte('(')
-		if ex.Distinct {
-			sb.WriteString("DISTINCT ")
-		}
-		if ex.Star {
-			sb.WriteByte('*')
-		}
-		for i, a := range ex.Args {
-			if i > 0 {
-				sb.WriteString(", ")
-			}
-			sb.WriteString(exprString(a))
-		}
-		sb.WriteByte(')')
-		return sb.String()
-	default:
-		return "?"
-	}
-}
-
-func literalString(v any) string {
-	switch x := v.(type) {
-	case nil:
-		return "null"
-	case string:
-		return "'" + x + "'"
-	default:
-		return fmt.Sprintf("%v", x)
-	}
-}
+func exprString(e ast.Expr) string { return ast.Format(e) }

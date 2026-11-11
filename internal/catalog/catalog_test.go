@@ -198,3 +198,35 @@ func TestMalformedValuesRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNamedIndexes(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(tx storage.Txn) error {
+		l, _ := InternLabel(tx, "P")
+		k, _ := InternKey(tx, "uid")
+		k2, _ := InternKey(tx, "name")
+		if err := AddNamedIndex(tx, l, k, "by_uid"); err != nil {
+			return err
+		}
+		if err := AddIndex(tx, l, k2); err != nil {
+			return err
+		}
+		d, ok, err := GetIndex(tx, l, k)
+		if err != nil || !ok || d.Name != "by_uid" {
+			t.Errorf("GetIndex = %+v %v %v", d, ok, err)
+		}
+		d2, _, _ := GetIndex(tx, l, k2)
+		if _, _, name, _ := IndexName(tx, d2); name != "index_P_name" {
+			t.Errorf("default name = %q", name)
+		}
+		if err := RemoveIndex(tx, l, k); err != nil {
+			return err
+		}
+		if _, ok, _ := GetIndex(tx, l, k); ok {
+			t.Error("index still registered after RemoveIndex")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -3,7 +3,9 @@ package exec
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
+	"time"
 
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/graph"
@@ -28,6 +30,101 @@ type Context struct {
 	// MaxRows, when > 0, bounds the number of rows a query may produce. Exceeding
 	// it aborts with ErrResultLimit.
 	MaxRows int64
+
+	// cursors are the streaming scans opened by this execution. Run closes
+	// them all when it returns, because the storage engine requires every
+	// iterator to be closed before its transaction ends.
+	cursors []*graph.NodeCursor
+
+	// keyIDs and labelIDs cache dictionary lookups for this execution.
+	// Dictionary entries are never removed, so a found ID stays valid for
+	// the whole transaction; misses are not cached because the query itself
+	// may intern the name later.
+	keyIDs   map[string]uint32
+	labelIDs map[string]uint32
+
+	regexps map[string]*regexp.Regexp // compiled =~ patterns
+	now     int64                     // timestamp(), fixed for the execution
+}
+
+// regexp compiles a =~ pattern once per execution. The pattern must match
+// the whole string, as in openCypher.
+func (c *Context) regexp(pattern string) (*regexp.Regexp, error) {
+	if re, ok := c.regexps[pattern]; ok {
+		return re, nil
+	}
+	re, err := regexp.Compile("^(?:" + pattern + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("exec: invalid regular expression %q: %w", pattern, err)
+	}
+	if c.regexps == nil {
+		c.regexps = map[string]*regexp.Regexp{}
+	}
+	c.regexps[pattern] = re
+	return re, nil
+}
+
+// timestamp returns the execution's timestamp in milliseconds since the
+// epoch: every call within one query sees the same value.
+func (c *Context) timestamp() int64 {
+	if c.now == 0 {
+		c.now = time.Now().UnixMilli()
+	}
+	return c.now
+}
+
+// lookupKey resolves a property-key name, caching the result.
+func (c *Context) lookupKey(name string) (uint32, bool, error) {
+	if id, ok := c.keyIDs[name]; ok {
+		return id, true, nil
+	}
+	id, found, err := catalog.LookupKey(c.Txn, name)
+	if err == nil && found {
+		if c.keyIDs == nil {
+			c.keyIDs = map[string]uint32{}
+		}
+		c.keyIDs[name] = id
+	}
+	return id, found, err
+}
+
+// lookupLabel resolves a label name, caching the result.
+func (c *Context) lookupLabel(name string) (uint32, bool, error) {
+	if id, ok := c.labelIDs[name]; ok {
+		return id, true, nil
+	}
+	id, found, err := catalog.LookupLabel(c.Txn, name)
+	if err == nil && found {
+		if c.labelIDs == nil {
+			c.labelIDs = map[string]uint32{}
+		}
+		c.labelIDs[name] = id
+	}
+	return id, found, err
+}
+
+// track registers an open cursor so Run can close it. Exhausted cursors close
+// themselves; the list is compacted so per-row inner scans (Apply) do not grow
+// it without bound.
+func (c *Context) track(cur *graph.NodeCursor) {
+	if len(c.cursors) >= 64 {
+		live := c.cursors[:0]
+		for _, open := range c.cursors {
+			if !open.Closed() {
+				live = append(live, open)
+			}
+		}
+		c.cursors = live
+	}
+	c.cursors = append(c.cursors, cur)
+}
+
+// closeCursors closes every cursor opened by this execution.
+func (c *Context) closeCursors() {
+	for _, cur := range c.cursors {
+		_ = cur.Close()
+	}
+	c.cursors = nil
 }
 
 // check reports whether execution should stop because Ctx is done.
@@ -61,6 +158,7 @@ func RunSeeded(root plan.Op, columns []string, ctx *Context, seed map[string]any
 }
 
 func run(root plan.Op, columns []string, ctx *Context, arg *argumentOp) ([][]any, error) {
+	defer ctx.closeCursors()
 	o, err := buildWith(root, ctx, arg)
 	if err != nil {
 		return nil, err
@@ -118,25 +216,42 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 	case nil:
 		return &unit{}, nil
 	case *plan.AllNodesScan:
-		ids, err := graph.AllNodes(ctx.Txn)
-		if err != nil {
-			return nil, err
-		}
-		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
+		cur := graph.ScanAllNodes(ctx.Txn)
+		ctx.track(cur)
+		return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
 	case *plan.NodeByLabelScan:
-		ids, err := labelScanIDs(ctx, x.Label)
+		id, found, err := catalog.LookupLabel(ctx.Txn, x.Label)
 		if err != nil {
 			return nil, err
 		}
-		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
+		if !found {
+			return &nodeScan{ctx: ctx, variable: x.Var}, nil // unknown label: no rows
+		}
+		cur := graph.ScanLabel(ctx.Txn, id)
+		ctx.track(cur)
+		return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
+	case *plan.NodeByPropertyRange:
+		var row binding
+		if arg != nil {
+			row = arg.row // inside an Apply: the bounds may use the outer row
+		}
+		return propertyRangeScan(ctx, x, row)
 	case *plan.NodeByProperty:
-		ids, err := propertyScanIDs(ctx, x)
+		var row binding
+		if arg != nil {
+			row = arg.row // inside an Apply: the seek value may use the outer row
+		}
+		ids, err := propertyScanIDs(ctx, x, row)
 		if err != nil {
 			return nil, err
 		}
 		return &nodeScan{ctx: ctx, variable: x.Var, ids: ids}, nil
 	case *plan.Expand:
 		return buildExpandWith(x, ctx, arg)
+	case *plan.RelByProperty:
+		return buildRelSeek(x, ctx, arg)
+	case *plan.ShortestPath:
+		return buildShortestPath(x, ctx, arg)
 	case *plan.Filter:
 		in, err := buildWith(x.Input, ctx, arg)
 		if err != nil {
@@ -232,7 +347,23 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 		}
 		return &deleteOp{ctx: ctx, input: in, exprs: x.Exprs, detach: x.Detach}, nil
 	case *plan.CreateIndex:
-		return &createIndexOp{ctx: ctx, label: x.Label, prop: x.Property}, nil
+		return &createIndexOp{ctx: ctx, name: x.Name, label: x.Label, prop: x.Property, rel: x.Rel}, nil
+	case *plan.DropIndex:
+		return &dropIndexOp{ctx: ctx, name: x.Name, ifExists: x.IfExists}, nil
+	case *plan.ShowIndexes:
+		return &showIndexesOp{ctx: ctx}, nil
+	case *plan.CreateConstraint:
+		return &createConstraintOp{ctx: ctx, name: x.Name, label: x.Label, prop: x.Property}, nil
+	case *plan.DropConstraint:
+		return &dropConstraintOp{ctx: ctx, name: x.Name, ifExists: x.IfExists}, nil
+	case *plan.ShowConstraints:
+		return &showConstraintsOp{ctx: ctx}, nil
+	case *plan.Apply:
+		outer, err := buildWith(x.Outer, ctx, arg)
+		if err != nil {
+			return nil, err
+		}
+		return &outerApplyOp{ctx: ctx, outer: outer, innerPlan: x.Inner, inner: true}, nil
 	case *plan.OuterApply:
 		outer, err := buildWith(x.Outer, ctx, arg)
 		if err != nil {
@@ -263,15 +394,55 @@ func buildChildren(p plan.Op, ctx *Context, arg *argumentOp) (op, error) {
 	}
 }
 
-func labelScanIDs(ctx *Context, label string) ([]uint64, error) {
-	id, found, err := catalog.LookupLabel(ctx.Txn, label)
+// propertyRangeScan streams the candidates of an index range scan. The
+// predicates it came from stay in the plan as a filter, so the scan only has
+// to return a superset of the matching nodes.
+func propertyRangeScan(ctx *Context, x *plan.NodeByPropertyRange, row binding) (op, error) {
+	empty := &nodeScan{ctx: ctx, variable: x.Var}
+	labelID, found, err := catalog.LookupLabel(ctx.Txn, x.Label)
 	if err != nil || !found {
-		return nil, err
+		return empty, err
 	}
-	return graph.NodesByLabel(ctx.Txn, id)
+	keyID, found, err := catalog.LookupKey(ctx.Txn, x.Key)
+	if err != nil || !found {
+		return empty, err
+	}
+	if row == nil {
+		row = binding{}
+	}
+	var r graph.PropRange
+	if x.Prefix != nil {
+		v, err := eval(x.Prefix, row, ctx)
+		if err != nil {
+			return nil, err
+		}
+		p, ok := v.(string)
+		if !ok {
+			return empty, nil // STARTS WITH a non-string (or null) is never true
+		}
+		r.Prefix, r.HasPrefix = p, true
+	}
+	if x.Lower != nil {
+		if r.Lower, err = eval(x.Lower, row, ctx); err != nil {
+			return nil, err
+		}
+		r.HasLower, r.LowerInclusive = true, x.LowerInclusive
+	}
+	if x.Upper != nil {
+		if r.Upper, err = eval(x.Upper, row, ctx); err != nil {
+			return nil, err
+		}
+		r.HasUpper, r.UpperInclusive = true, x.UpperInclusive
+	}
+	cur, err := graph.ScanPropertyRange(ctx.Txn, labelID, keyID, r)
+	if err != nil || cur == nil {
+		return empty, err
+	}
+	ctx.track(cur)
+	return &nodeScan{ctx: ctx, variable: x.Var, cursor: cur}, nil
 }
 
-func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
+func propertyScanIDs(ctx *Context, np *plan.NodeByProperty, row binding) ([]uint64, error) {
 	labelID, found, err := catalog.LookupLabel(ctx.Txn, np.Label)
 	if err != nil || !found {
 		return nil, err
@@ -280,11 +451,41 @@ func propertyScanIDs(ctx *Context, np *plan.NodeByProperty) ([]uint64, error) {
 	if err != nil || !found {
 		return nil, err
 	}
-	value, err := eval(np.Value, binding{}, ctx)
+	if row == nil {
+		row = binding{}
+	}
+	value, err := eval(np.Value, row, ctx)
 	if err != nil {
 		return nil, err
 	}
+	value = normalize(value) // a Go int is an indexable integer
+	if value == nil {
+		return nil, nil // x = null is never true
+	}
+	if !graph.IsIndexable(value) {
+		// Lists and maps have no index keys: scan the label and compare with
+		// the query equality, so the result matches the non-indexed path.
+		return nodesWithEqualProperty(ctx, labelID, keyID, value)
+	}
 	return graph.NodesByProperty(ctx.Txn, labelID, keyID, value)
+}
+
+func nodesWithEqualProperty(ctx *Context, labelID, keyID uint32, value any) ([]uint64, error) {
+	ids, err := graph.NodesByLabel(ctx.Txn, labelID)
+	if err != nil {
+		return nil, err
+	}
+	var out []uint64
+	for _, id := range ids {
+		node, err := graph.GetNode(ctx.Txn, id)
+		if err != nil {
+			return nil, err
+		}
+		if v, ok := node.Props[keyID]; ok && equals(v, value) {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func evalCount(e ast.Expr, ctx *Context) (int64, error) {
@@ -311,9 +512,12 @@ func (u *unit) next() (binding, bool, error) {
 }
 
 // nodeScan binds variable to each node in ids, fetching the record.
+// nodeScan binds variable to each node of a scan. A streaming scan reads from
+// cursor; an index lookup (a short, already-known ID list) reads from ids.
 type nodeScan struct {
 	ctx      *Context
 	variable string
+	cursor   *graph.NodeCursor
 	ids      []uint64
 	pos      int
 }
@@ -321,6 +525,13 @@ type nodeScan struct {
 func (s *nodeScan) next() (binding, bool, error) {
 	if err := s.ctx.check(); err != nil {
 		return nil, false, err
+	}
+	if s.cursor != nil {
+		node, ok, err := s.cursor.Next()
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		return binding{s.variable: node}, true, nil
 	}
 	if s.pos >= len(s.ids) {
 		return nil, false, nil
@@ -547,6 +758,17 @@ type cartesian struct {
 }
 
 func (c *cartesian) next() (binding, bool, error) {
+	// Read the right side only once a left row exists: with no left rows the
+	// product is empty and the right scan is never needed.
+	if !c.loaded && !c.haveLeft {
+		b, ok, err := c.left.next()
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		c.curLeft = b
+		c.haveLeft = true
+		c.ri = 0
+	}
 	if !c.loaded {
 		for {
 			if err := c.ctx.check(); err != nil {

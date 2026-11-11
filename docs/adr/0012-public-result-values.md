@@ -1,41 +1,29 @@
-# ADR 0012 — Public result values and a canonical row encoding
+# ADR 0012 — A canonical row encoding for result values
 
-Status: accepted — 2026-11-10
+Status: accepted — 2026-11-10 (revised after #71 defined the public value model)
 
 ## Context
-`RETURN n` used to put the executor's internal `graph.Node` straight into
-`Result.Rows`: a type callers cannot name, with labels and property keys as
-dictionary IDs. The same value could not cross the cluster either — gob refused
-it (`type not registered for interface`), so a forwarded query returning a whole
-node or relationship failed.
+Live queries (ADR 0010) and the framed transport (ADR 0011) both need result
+rows that can be **compared** and **shipped**: the live-query diff needs an
+identity for a row, and the wire needs a format that carries every result
+value, nulls nested in lists and maps included.
 
-Live queries (ADR 0010) and the framed transport (ADR 0011) both need rows that
-can be **compared** and **shipped**, so the row format has to be public, stable
-and self-contained first.
+The public value model is the one of `values.go`: a result value is `nil`,
+`bool`, `int64`, `float64`, `string`, `[]any`, `map[string]any`,
+`intreccio.Node`, `intreccio.Relationship` or `intreccio.Path`. Before the
+transport of ADR 0011, rows crossed the cluster through gob, which needs every
+type registered, cannot encode a nil inside a container without a stand-in,
+and gives a row no stable identity.
 
 ## Decisions
 
-### A public value model
-A result value is one of: `nil`, `bool`, `int64`, `float64`, `string`, `[]any`,
-`map[string]any`, `intreccio.Node`, `intreccio.Relationship`.
-
-    type Node struct { ID int64; Labels []string; Props map[string]any }
-    type Relationship struct { ID int64; Type string; Start, End int64; Props map[string]any }
-
-IDs are the ones `id()` returns. Labels are **sorted**, so the same node state
-always exports identically whatever order its labels were added in. `Props` is
-never nil. The relationships of a variable-length match export as a list.
-
-The conversion happens at the single execution path (`runQuery`), while the
-transaction is still open because it resolves names through the dictionaries.
-The executor keeps working on internal records.
-
 ### A canonical row encoding
 One row encodes to one self-delimiting byte string: a tag per value, varints for
-integers and lengths, map entries in ascending key order (layout in
-`rowcodec.go`). It is **canonical** — equal rows give identical bytes, and the
-decoder rejects any other form — so an encoded row is also the row's identity.
-That is what the live-query diff keys on and what the wire carries.
+integers and lengths, map entries in ascending key order, nodes, relationships
+and paths as their fields (layout in `rowcodec.go`). It is **canonical** — equal
+rows give identical bytes, and the decoder rejects any other form — so an
+encoded row is also the row's identity. That is what the live-query diff keys
+on and what the wire carries, for rows and for query parameters alike.
 
 The decoder treats its input as untrusted: bounded nesting, counts checked
 against the remaining bytes, no panics (fuzzed).
@@ -46,19 +34,15 @@ store; this one stores names and is meant to leave the process.
 
 ### The cluster layer carries rows as opaque bytes
 The seam between the root package and a clustered backend (`Forward`,
-`SetLocalExecutor`) now exchanges encoded rows. The types and the codec live in
-the root package; `cluster` neither knows the value model nor registers result
-types with gob.
+`SetLocalExecutor`, and their live-query counterparts) exchanges encoded rows
+and parameters. The value types and the codec live in the root package;
+`cluster` neither knows the value model nor registers types with anything.
 
-Rejected: registering `Node`/`Relationship` with gob. It fixes forwarding but
-keeps the nil-in-container limitation and gives no row identity.
+Rejected: keeping gob with the value types registered. It works for plain
+forwarding but keeps the nil stand-in and gives no row identity.
 
 ## Consequences
-- `RETURN n` / `RETURN r` now yield usable public values, embedded and
-  forwarded.
-- The forwarding reply format changes (`ForwardReply.Rows` is `[][]byte`): the
-  members of a cluster must run the same version across this change. Parameters
-  travelled through gob until the transport of ADR 0011 replaced it; they now
-  use this encoding as well.
-- A parameter of an unsupported Go type returned as-is (`RETURN $p`) still works
-  embedded and still fails when forwarded, now with an explicit encoding error.
+- The forwarding wire format changed with ADR 0011: the members of a cluster
+  must run the same version across that change.
+- A node's labels are encoded in the order the store returns them (by label
+  ID), which is deterministic for a given node state.

@@ -12,7 +12,7 @@ import (
 // genValue builds a random result value. Lists and maps are always non-nil and
 // floats never NaN, so reflect.DeepEqual is a valid round-trip oracle.
 func genValue(r *rand.Rand, depth int) any {
-	max := 10
+	max := 11
 	if depth <= 0 {
 		max = 6 // scalars only
 	}
@@ -36,14 +36,32 @@ func genValue(r *rand.Rand, depth int) any {
 	case 7:
 		return genMap(r, depth-1)
 	case 8:
-		labels := make([]string, r.Intn(3))
-		for i := range labels {
-			labels[i] = genString(r)
-		}
-		return Node{ID: r.Int63(), Labels: labels, Props: genMap(r, depth-1)}
+		return genNode(r, depth)
+	case 9:
+		return genRel(r, depth)
 	default:
-		return Relationship{ID: r.Int63(), Type: genString(r), Start: r.Int63(), End: r.Int63(), Props: genMap(r, depth-1)}
+		p := Path{Nodes: make([]Node, 1+r.Intn(3))}
+		p.Relationships = make([]Relationship, len(p.Nodes)-1)
+		for i := range p.Nodes {
+			p.Nodes[i] = genNode(r, depth)
+		}
+		for i := range p.Relationships {
+			p.Relationships[i] = genRel(r, depth)
+		}
+		return p
 	}
+}
+
+func genNode(r *rand.Rand, depth int) Node {
+	labels := make([]string, r.Intn(3))
+	for i := range labels {
+		labels[i] = genString(r)
+	}
+	return Node{ID: r.Int63(), Labels: labels, Props: genMap(r, depth-1)}
+}
+
+func genRel(r *rand.Rand, depth int) Relationship {
+	return Relationship{ID: r.Int63(), Type: genString(r), StartID: r.Int63(), EndID: r.Int63(), Props: genMap(r, depth-1)}
 }
 
 func genString(r *rand.Rand) string {
@@ -135,6 +153,7 @@ func TestRowCodecDistinguishesTypes(t *testing.T) {
 		{[]any{int64(1)}}, {int64(1), nil}, {},
 		{Node{ID: 1, Props: map[string]any{}}},
 		{Relationship{ID: 1, Props: map[string]any{}}},
+		{Path{Nodes: []Node{{ID: 1, Labels: []string{}, Props: map[string]any{}}}, Relationships: []Relationship{}}},
 	}
 	seen := map[string]int{}
 	for i, row := range rows {

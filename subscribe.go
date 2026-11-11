@@ -171,6 +171,10 @@ func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]an
 		opt(&o)
 	}
 
+	params, err := normalizeParams(params)
+	if err != nil {
+		return nil, err
+	}
 	q, err := parser.Parse(cypher)
 	if err != nil {
 		return nil, err
@@ -179,8 +183,8 @@ func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]an
 	if err != nil {
 		return nil, err
 	}
-	if isWriteQuery(q) {
-		return nil, errors.New("subscribe: a live query must be read-only")
+	if err := checkLiveQuery(q); err != nil {
+		return nil, err
 	}
 	remote, isRemote := db.be.(remoteSubscriber)
 	if !db.watchable && !isRemote {
@@ -240,6 +244,29 @@ func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]an
 		close(sub.done)
 	}()
 	return sub, nil
+}
+
+// checkLiveQuery reports whether q can be a live query: it must read the graph
+// and nothing else. A writing query has no result to keep up to date, and a
+// catalog listing (SHOW INDEXES / CONSTRAINTS) changes without any node or
+// relationship changing, so nothing would ever wake it.
+func checkLiveQuery(q *ast.Query) error {
+	arms := [][]ast.Clause{q.Clauses}
+	for _, u := range q.Unions {
+		arms = append(arms, u.Clauses)
+	}
+	for _, arm := range arms {
+		for _, c := range arm {
+			if sema.IsWriteClause(c) {
+				return errors.New("subscribe: a live query must be read-only")
+			}
+			switch c.(type) {
+			case *ast.ShowIndexes, *ast.ShowConstraints:
+				return errors.New("subscribe: a live query must read the graph: SHOW cannot be followed live")
+			}
+		}
+	}
+	return nil
 }
 
 // deliver sends c to the subscriber, or reports false if the subscription
@@ -345,8 +372,8 @@ func (db *DB) serveSubscription(ctx context.Context, req wire.SubscribeRequest, 
 	if err != nil {
 		return err
 	}
-	if isWriteQuery(q) {
-		return errors.New("subscribe: a live query must be read-only")
+	if err := checkLiveQuery(q); err != nil {
+		return err
 	}
 
 	lq := db.newLiveQuery(ctx, q, semaRes.Columns, params, req.MaxRows)

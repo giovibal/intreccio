@@ -1,7 +1,7 @@
 // Package graph is the model + transactional CRUD + traversal primitives.
 //
 // It is the single point through which writes pass: every mutation updates the
-// base record and all of its index keys (`l`, `p`, `o`, `i`) within the same
+// base record and all of its index keys (`l`, `p`, `u`, `o`, `i`, `r`) within the same
 // transaction (Invariant #1). The functions operate on a storage.Txn provided by
 // the caller, so multiple mutations can compose atomically in a single Update.
 package graph
@@ -19,11 +19,16 @@ import (
 // interning their identifiers, and updates its indexes. Returns the new nodeID.
 func CreateNode(txn storage.Txn, labels []string, props map[string]any) (uint64, error) {
 	labelIDs := make([]uint32, 0, len(labels))
+	seen := make(map[uint32]bool, len(labels))
 	for _, name := range labels {
 		id, err := catalog.InternLabel(txn, name)
 		if err != nil {
 			return 0, err
 		}
+		if seen[id] {
+			continue // (:A:A) has the label once
+		}
+		seen[id] = true
 		labelIDs = append(labelIDs, id)
 	}
 	p, err := internProps(txn, props)
@@ -79,6 +84,11 @@ func CreateEdge(txn storage.Txn, typ string, src, dst uint64, props map[string]a
 	if err := txn.Set(codec.InKey(dst, typeID, src, id), nil); err != nil {
 		return 0, err
 	}
+	for k, v := range p {
+		if err := putRelPropEntry(txn, typeID, k, v, id); err != nil {
+			return 0, err
+		}
+	}
 	return id, nil
 }
 
@@ -97,30 +107,13 @@ func SetProperty(txn storage.Txn, nodeID uint64, key string, value any) error {
 	old, had := node.Props[keyID]
 
 	for _, l := range node.Labels {
-		has, err := catalog.HasIndex(txn, l, keyID)
-		if err != nil {
+		if had {
+			if err := delPropEntry(txn, l, keyID, old, nodeID); err != nil {
+				return err
+			}
+		}
+		if err := putPropEntry(txn, l, keyID, value, nodeID); err != nil {
 			return err
-		}
-		if !has {
-			continue
-		}
-		if had && isIndexable(old) {
-			ok, err := codec.PropKey(l, keyID, old, nodeID)
-			if err != nil {
-				return err
-			}
-			if err := txn.Delete(ok); err != nil {
-				return err
-			}
-		}
-		if isIndexable(value) {
-			nk, err := codec.PropKey(l, keyID, value, nodeID)
-			if err != nil {
-				return err
-			}
-			if err := txn.Set(nk, nil); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -164,7 +157,8 @@ func GetEdge(txn storage.Txn, id uint64) (Edge, error) {
 	return Edge{ID: id, EdgeRecord: rec}, nil
 }
 
-// DeleteEdge removes an edge: the `e` record plus the two adjacency entries `o`/`i`.
+// DeleteEdge removes an edge: the `e` record, the two adjacency entries `o`/`i`
+// and its relationship index entries `r`.
 func DeleteEdge(txn storage.Txn, id uint64) error {
 	e, err := GetEdge(txn, id)
 	if err != nil {
@@ -175,6 +169,11 @@ func DeleteEdge(txn storage.Txn, id uint64) error {
 	}
 	if err := txn.Delete(codec.InKey(e.Dst, e.Type, e.Src, id)); err != nil {
 		return err
+	}
+	for k, v := range e.Props {
+		if err := delRelPropEntry(txn, e.Type, k, v, id); err != nil {
+			return err
+		}
 	}
 	return txn.Delete(codec.EdgeKey(id))
 }
@@ -200,18 +199,7 @@ func RemoveProperty(txn storage.Txn, nodeID uint64, key string) error {
 	}
 	delete(node.Props, keyID)
 	for _, l := range node.Labels {
-		has, err := catalog.HasIndex(txn, l, keyID)
-		if err != nil {
-			return err
-		}
-		if !has || !isIndexable(old) {
-			continue
-		}
-		pk, err := codec.PropKey(l, keyID, old, nodeID)
-		if err != nil {
-			return err
-		}
-		if err := txn.Delete(pk); err != nil {
+		if err := delPropEntry(txn, l, keyID, old, nodeID); err != nil {
 			return err
 		}
 	}
@@ -254,21 +242,7 @@ func AddLabels(txn storage.Txn, nodeID uint64, labels []string) error {
 			return err
 		}
 		for k, v := range node.Props {
-			if !isIndexable(v) {
-				continue
-			}
-			has, err := catalog.HasIndex(txn, id, k)
-			if err != nil {
-				return err
-			}
-			if !has {
-				continue
-			}
-			pk, err := codec.PropKey(id, k, v, nodeID)
-			if err != nil {
-				return err
-			}
-			if err := txn.Set(pk, nil); err != nil {
+			if err := putPropEntry(txn, id, k, v, nodeID); err != nil {
 				return err
 			}
 		}
@@ -306,21 +280,7 @@ func RemoveLabels(txn storage.Txn, nodeID uint64, labels []string) error {
 				return err
 			}
 			for k, v := range node.Props {
-				if !isIndexable(v) {
-					continue
-				}
-				has, err := catalog.HasIndex(txn, id, k)
-				if err != nil {
-					return err
-				}
-				if !has {
-					continue
-				}
-				pk, err := codec.PropKey(id, k, v, nodeID)
-				if err != nil {
-					return err
-				}
-				if err := txn.Delete(pk); err != nil {
+				if err := delPropEntry(txn, id, k, v, nodeID); err != nil {
 					return err
 				}
 			}
@@ -354,22 +314,11 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 		// Delete `p` entries for properties that will be removed or changed.
 		for keyID, old := range node.Props {
 			newVal, kept := desired[keyID]
-			if kept && scalarEqual(newVal, old) {
+			if kept && sameValue(newVal, old) {
 				continue
 			}
 			for _, l := range node.Labels {
-				has, err := catalog.HasIndex(txn, l, keyID)
-				if err != nil {
-					return err
-				}
-				if !has || !isIndexable(old) {
-					continue
-				}
-				pk, err := codec.PropKey(l, keyID, old, nodeID)
-				if err != nil {
-					return err
-				}
-				if err := txn.Delete(pk); err != nil {
+				if err := delPropEntry(txn, l, keyID, old, nodeID); err != nil {
 					return err
 				}
 			}
@@ -383,20 +332,9 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 		}
 	} else {
 		for keyID, newVal := range desired {
-			if old, had := node.Props[keyID]; had && !scalarEqual(old, newVal) {
+			if old, had := node.Props[keyID]; had && !sameValue(old, newVal) {
 				for _, l := range node.Labels {
-					has, err := catalog.HasIndex(txn, l, keyID)
-					if err != nil {
-						return err
-					}
-					if !has || !isIndexable(old) {
-						continue
-					}
-					pk, err := codec.PropKey(l, keyID, old, nodeID)
-					if err != nil {
-						return err
-					}
-					if err := txn.Delete(pk); err != nil {
+					if err := delPropEntry(txn, l, keyID, old, nodeID); err != nil {
 						return err
 					}
 				}
@@ -411,22 +349,8 @@ func SetNodeProperties(txn storage.Txn, nodeID uint64, props map[string]any, rep
 
 	// Write `p` entries for current properties (idempotent on existing keys).
 	for keyID, v := range node.Props {
-		if !isIndexable(v) {
-			continue
-		}
 		for _, l := range node.Labels {
-			has, err := catalog.HasIndex(txn, l, keyID)
-			if err != nil {
-				return err
-			}
-			if !has {
-				continue
-			}
-			pk, err := codec.PropKey(l, keyID, v, nodeID)
-			if err != nil {
-				return err
-			}
-			if err := txn.Set(pk, nil); err != nil {
+			if err := putPropEntry(txn, l, keyID, v, nodeID); err != nil {
 				return err
 			}
 		}
@@ -487,6 +411,9 @@ func DeleteNode(txn storage.Txn, id uint64) error {
 func internProps(txn storage.Txn, props map[string]any) (map[uint32]any, error) {
 	out := make(map[uint32]any, len(props))
 	for k, v := range props {
+		if v == nil {
+			continue // a null property is an absent property
+		}
 		id, err := catalog.InternKey(txn, k)
 		if err != nil {
 			return nil, err
@@ -504,44 +431,30 @@ func putNodeRecord(txn storage.Txn, id uint64, rec codec.NodeRecord) error {
 	return txn.Set(codec.NodeKey(id), b)
 }
 
-// putNodeIndexes writes the `l` entries (one per label) and `p` entries (for each
-// indexed label×propKey pair whose scalar value is present).
+// putNodeIndexes writes the `l` entries (one per label) and the `p` (and
+// unique-owner `u`) entries for each indexed label×propKey pair.
 func putNodeIndexes(txn storage.Txn, nodeID uint64, rec codec.NodeRecord) error {
-	return forEachNodeIndex(txn, rec, func(key []byte) error { return txn.Set(key, nil) },
-		func(label uint32) error { return txn.Set(codec.LabelKey(label, nodeID), nil) },
-		nodeID)
+	for _, l := range rec.Labels {
+		if err := txn.Set(codec.LabelKey(l, nodeID), nil); err != nil {
+			return err
+		}
+		for k, v := range rec.Props {
+			if err := putPropEntry(txn, l, k, v, nodeID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // delNodeIndexes removes the same entries written by putNodeIndexes.
 func delNodeIndexes(txn storage.Txn, nodeID uint64, rec codec.NodeRecord) error {
-	return forEachNodeIndex(txn, rec, func(key []byte) error { return txn.Delete(key) },
-		func(label uint32) error { return txn.Delete(codec.LabelKey(label, nodeID)) },
-		nodeID)
-}
-
-// forEachNodeIndex applies onLabel for every label and onProp for every `p` entry
-// to maintain, so put/del share the enumeration (single source of truth).
-func forEachNodeIndex(txn storage.Txn, rec codec.NodeRecord, onProp func(key []byte) error, onLabel func(label uint32) error, nodeID uint64) error {
 	for _, l := range rec.Labels {
-		if err := onLabel(l); err != nil {
+		if err := txn.Delete(codec.LabelKey(l, nodeID)); err != nil {
 			return err
 		}
 		for k, v := range rec.Props {
-			if !isIndexable(v) {
-				continue
-			}
-			has, err := catalog.HasIndex(txn, l, k)
-			if err != nil {
-				return err
-			}
-			if !has {
-				continue
-			}
-			pk, err := codec.PropKey(l, k, v, nodeID)
-			if err != nil {
-				return err
-			}
-			if err := onProp(pk); err != nil {
+			if err := delPropEntry(txn, l, k, v, nodeID); err != nil {
 				return err
 			}
 		}
@@ -561,4 +474,14 @@ func hasIncidentEdges(txn storage.Txn, nodeID uint64) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// DropIndexEntries removes every `p` entry of the (label, propKey) index and
+// unregisters it, in the caller's transaction. Node records are untouched.
+// The caller makes sure no unique constraint relies on the index.
+func DropIndexEntries(txn storage.Txn, labelID, keyID uint32) error {
+	if err := deletePrefix(txn, codec.PropIndexPrefix(labelID, keyID)); err != nil {
+		return err
+	}
+	return catalog.RemoveIndex(txn, labelID, keyID)
 }

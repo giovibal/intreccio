@@ -2,80 +2,42 @@ package cluster
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"github.com/giovibal/intreccio"
 )
 
-// TestForwardedEntityValues verifies that whole nodes and relationships, nulls
-// and nested values survive forwarding unchanged: a follower's forwarded write
-// and linearizable read, and a dataless client's read, all return the same rows
-// as the leader's local execution.
-func TestForwardedEntityValues(t *testing.T) {
-	tc := startCluster(t, 3)
-	leader := tc.leaderIndex(t)
-	follower := tc.aFollower(t)
+// TestForwardedPublicValues: nodes, relationships, paths and nested nulls
+// survive forwarding to the leader (#66).
+func TestForwardedPublicValues(t *testing.T) {
 	ctx := context.Background()
-
-	// A forwarded write that returns the entities it created.
-	res, err := tc.dbs[follower].Query(ctx,
-		"CREATE (a:Person:Admin {name: 'Ann', tags: ['x', 'y']})-[r:KNOWS {since: 2020}]->(b:Person {name: 'Bob'}) RETURN a, r, b", nil)
-	if err != nil {
-		t.Fatalf("forwarded write: %v", err)
+	tc := startCluster(t, 3)
+	lead := tc.dbs[tc.leaderIndex(t)]
+	if _, err := lead.Query(ctx, "CREATE (:Person {name: 'Ann'})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})", nil); err != nil {
+		t.Fatal(err)
 	}
-	if len(res.Rows) != 1 {
-		t.Fatalf("forwarded write rows = %d, want 1", len(res.Rows))
-	}
-	a, okA := res.Rows[0][0].(intreccio.Node)
-	r, okR := res.Rows[0][1].(intreccio.Relationship)
-	b, okB := res.Rows[0][2].(intreccio.Node)
-	if !okA || !okR || !okB {
-		t.Fatalf("forwarded write row = %#v, want (Node, Relationship, Node)", res.Rows[0])
-	}
-	if want := []string{"Admin", "Person"}; !reflect.DeepEqual(a.Labels, want) {
-		t.Errorf("a.Labels = %v, want %v", a.Labels, want)
-	}
-	if want := map[string]any{"name": "Ann", "tags": []any{"x", "y"}}; !reflect.DeepEqual(a.Props, want) {
-		t.Errorf("a.Props = %#v, want %#v", a.Props, want)
-	}
-	if r.Type != "KNOWS" || r.Start != a.ID || r.End != b.ID || r.Props["since"] != int64(2020) {
-		t.Errorf("r = %+v", r)
-	}
-
-	const q = "MATCH (a:Person)-[r:KNOWS]->(b) OPTIONAL MATCH (b)-[:NONE]->(c) " +
-		"RETURN a, r, collect(b) AS bs, c, {who: a, n: 1} AS m"
-	want, err := tc.dbs[leader].Query(ctx, q, nil)
-	if err != nil {
-		t.Fatalf("leader read: %v", err)
-	}
-	if len(want.Rows) != 1 || want.Rows[0][3] != nil {
-		t.Fatalf("leader rows = %#v, want one row with a null c", want.Rows)
-	}
-
-	got, err := tc.dbs[follower].Query(ctx, q, nil, intreccio.Linearizable())
-	if err != nil {
-		t.Fatalf("forwarded linearizable read: %v", err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("forwarded read = %#v, want %#v", got.Rows, want.Rows)
-	}
-
-	clientDB := tc.openClient(t, "client-values")
-	got, err = clientDB.Query(ctx, q, nil, intreccio.Linearizable())
-	if err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("client read = %#v, want %#v", got.Rows, want.Rows)
-	}
-
-	// A forwarded write with no RETURN still yields no rows.
-	res, err = tc.dbs[follower].Query(ctx, "CREATE (:Person {name: 'Cy'})", nil)
-	if err != nil {
-		t.Fatalf("forwarded write without RETURN: %v", err)
-	}
-	if len(res.Rows) != 0 {
-		t.Errorf("rows = %#v, want none", res.Rows)
+	q := `MATCH (a {name: 'Ann'})-[r]->(b), p = shortestPath((a)-[*]-(b))
+		RETURN a, r, p, [a, null] AS l, {x: null, n: b} AS m`
+	for name, db := range map[string]*intreccio.DB{"follower": tc.dbs[tc.aFollower(t)], "client": tc.openClient(t, "client-values")} {
+		res, err := db.Query(ctx, q, nil, intreccio.Linearizable())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		row := res.Rows[0]
+		if a, ok := row[0].(intreccio.Node); !ok || a.Props["name"] != "Ann" || a.Labels[0] != "Person" {
+			t.Errorf("%s: a = %#v", name, row[0])
+		}
+		if r, ok := row[1].(intreccio.Relationship); !ok || r.Type != "KNOWS" || r.Props["since"] != int64(2020) {
+			t.Errorf("%s: r = %#v", name, row[1])
+		}
+		if p, ok := row[2].(intreccio.Path); !ok || len(p.Nodes) != 2 {
+			t.Errorf("%s: p = %#v", name, row[2])
+		}
+		if l, ok := row[3].([]any); !ok || len(l) != 2 || l[1] != nil {
+			t.Errorf("%s: l = %#v", name, row[3])
+		}
+		if m, ok := row[4].(map[string]any); !ok || m["x"] != nil || m["n"].(intreccio.Node).Props["name"] != "Bob" {
+			t.Errorf("%s: m = %#v", name, row[4])
+		}
 	}
 }

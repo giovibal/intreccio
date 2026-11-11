@@ -150,34 +150,6 @@ func TestReplPropagatesErrors(t *testing.T) {
 	}
 }
 
-func TestRenderValue(t *testing.T) {
-	node := intreccio.Node{ID: 1, Labels: []string{"Admin", "Person"}, Props: map[string]any{"name": "Ann", "age": int64(30)}}
-	rel := intreccio.Relationship{ID: 2, Type: "KNOWS", Start: 1, End: 3, Props: map[string]any{"since": int64(2020)}}
-	cases := []struct {
-		in   any
-		want string
-	}{
-		{nil, "null"},
-		{"plain", "plain"},
-		{int64(7), "7"},
-		{1.5, "1.5"},
-		{true, "true"},
-		{[]any{int64(1), "a", nil}, `[1, "a", null]`},
-		{map[string]any{"b": int64(2), "a": "x"}, `{a: "x", b: 2}`},
-		{node, `(:Admin:Person {age: 30, name: "Ann"})`},
-		{intreccio.Node{ID: 4, Props: map[string]any{}}, "()"},
-		{intreccio.Node{ID: 5, Props: map[string]any{"k": true}}, "({k: true})"},
-		{rel, "[:KNOWS {since: 2020}]"},
-		{intreccio.Relationship{ID: 6, Type: "T", Props: map[string]any{}}, "[:T]"},
-		{[]any{node, rel}, `[(:Admin:Person {age: 30, name: "Ann"}), [:KNOWS {since: 2020}]]`},
-	}
-	for _, c := range cases {
-		if got := renderValue(c.in); got != c.want {
-			t.Errorf("renderValue(%#v) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 func TestExecuteReturnsWholeNode(t *testing.T) {
 	db := newDB(t)
 	var out bytes.Buffer
@@ -246,7 +218,7 @@ func TestStreamPrintsInitialResultThenChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForOutput(t, out, "+ Anna")
-	if got := out.String(); strings.Index(got, "- Ann\n") < 0 || strings.Index(got, "- Ann\n") > strings.Index(got, "+ Anna") {
+	if got := out.String(); !strings.Contains(got, "- Ann\n") || strings.Index(got, "- Ann\n") > strings.Index(got, "+ Anna") {
 		t.Errorf("an update must print the old row before the new one:\n%s", got)
 	}
 

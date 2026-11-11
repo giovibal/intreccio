@@ -22,7 +22,8 @@ medium-sized graphs. It is *not* an analytical (OLAP) engine.
 - **Property graph** — nodes with labels and properties, typed relationships
   with properties.
 - **Pluggable storage** behind a minimal `Store` interface; **BadgerDB** is the
-  default engine (bbolt is a planned alternative adapter).
+  default engine; a **bbolt** adapter passes the same storage conformance suite
+  and the full query test suite (`INTRECCIO_TEST_ENGINE=bolt go test .`).
 - **Order-preserving key encoding** so hot queries become a single ordered range
   scan, and secondary property indexes support range queries.
 - **ACID transactions** with always-consistent indexes (every mutation updates
@@ -99,14 +100,18 @@ func main() {
 }
 ```
 
-A result value is one of `nil`, `bool`, `int64`, `float64`, `string`, `[]any`,
-`map[string]any`, or — when a query returns a whole entity — `intreccio.Node` /
-`intreccio.Relationship`:
+Values in `res.Rows` are `nil`, `bool`, `int64`, `float64`, `string`, `[]any`,
+`map[string]any`, or `intreccio.Node`, `intreccio.Relationship` and
+`intreccio.Path` for graph elements (`RETURN p`), with labels, types and
+property names resolved. Their `String()` prints them in Cypher syntax, and a
+node or relationship from a result can be passed back as a parameter
+(`MATCH (n) WHERE n = $node`): it names the stored element.
 
 ```go
-res, _ := db.Query(ctx, "MATCH (p:Person)-[r:KNOWS]->(f) RETURN p, r", nil)
-p := res.Rows[0][0].(intreccio.Node)         // p.ID, p.Labels, p.Props
-r := res.Rows[0][1].(intreccio.Relationship) // r.ID, r.Type, r.Start, r.End, r.Props
+res, _ := db.Query(ctx, "MATCH (p:Person {name: 'Alice'}) RETURN p", nil)
+p := res.Rows[0][0].(intreccio.Node)
+fmt.Println(p.ID, p.Labels, p.Props["email"]) // 1 [Person] a@b.com
+fmt.Println(p)                                 // (:Person {email: "a@b.com", name: "Alice"})
 ```
 
 By default every committed write is made durable (fsynced) before `Query`
@@ -129,6 +134,73 @@ res, err := db.Query(ctx,
     intreccio.WithMaxRows(1000)) // optional cap, ErrResultLimit if exceeded
 ```
 
+### Transactions across several queries
+
+Each `Query` is its own transaction. To run several queries atomically, with
+Go code between them, use `Update` (read-write) or `View` (read-only, one
+consistent snapshot). Later queries see the writes of earlier ones; returning
+an error from the function discards everything:
+
+```go
+err := db.Update(ctx, func(tx *intreccio.Tx) error {
+    res, err := tx.Query(ctx, "MATCH (a:Account {id: 1}) RETURN a.bal", nil)
+    if err != nil {
+        return err
+    }
+    if res.Rows[0][0].(int64) < 100 {
+        return errors.New("insufficient funds") // nothing is written
+    }
+    if _, err := tx.Query(ctx, "MATCH (a:Account {id: 1}) SET a.bal = a.bal - 100", nil); err != nil {
+        return err
+    }
+    _, err = tx.Query(ctx, "MATCH (b:Account {id: 2}) SET b.bal = b.bal + 100", nil)
+    return err
+})
+```
+
+On a write conflict the function is retried from the start on fresh data, so
+it must not have side effects outside the transaction. A write query inside
+`View` fails with `ErrReadOnlyTx`. In cluster mode `Update` must run on the
+leader (`ErrTxNotOnLeader` elsewhere) and replicates as one entry; `View` reads
+the local replica.
+
+### Loading data in bulk
+
+Each `Query` call is one transaction, and the default engine caps how many
+writes a transaction can hold: roughly **50 000 new nodes** per
+statement, fewer when nodes carry many properties or labels. A statement over
+the limit fails with `intreccio.ErrTxnTooLarge` and commits nothing.
+
+Load large datasets with `Import`: it runs one write query over many rows,
+passing them as `$rows` in batches of separate transactions (10 000 rows by
+default, `intreccio.WithBatchSize(n)` to change it), and halves a batch that
+turns out too large for one transaction:
+
+```go
+// people: []map[string]any{{"uid": 1, "name": "Ann"}, ...}, any length
+res, err := db.Import(ctx,
+    "UNWIND $rows AS r CREATE (p:Person) SET p = r", people, nil)
+```
+
+Relationships load the same way, finding their endpoints through an index
+(create it before the load). Each row costs about the same however large the
+batch is:
+
+```go
+db.Query(ctx, "CREATE INDEX FOR (p:Person) ON (p.uid)", nil)
+// links: []map[string]any{{"a": 1, "b": 2}, ...}
+res, err = db.Import(ctx, `UNWIND $rows AS r
+    MATCH (a:Person {uid: r.a}), (b:Person {uid: r.b})
+    CREATE (a)-[:KNOWS]->(b)`, links, nil)
+```
+
+Each batch is atomic, the import as a whole is not: if a batch fails, the
+earlier ones stay committed, the error names the failed rows and `res.Rows`
+says how many rows were written, so the import can resume from there.
+
+`CREATE INDEX` indexes the existing nodes of its label in the same
+transaction, so on a label with more nodes than the limit, create the index
+before loading the data.
 ### Live queries
 
 `Subscribe` runs a read query once, delivers the result, and then keeps
@@ -275,6 +347,11 @@ Notes for operators:
 - **Writes** are serialized through the leader and committed by a quorum; losing
   a minority of voters keeps the cluster available, losing a majority halts writes
   (safety over availability — no split brain).
+- A **forwarded** query (a write on a follower, a linearizable read, anything on
+  a client) runs under the caller's context deadline and `WithMaxRows`, and its
+  errors still match `ErrResultLimit`, `ErrConflict`, `ErrTxnTooLarge`,
+  `ErrIntegerOverflow` and `context.DeadlineExceeded` with `errors.Is`. Canceling
+  the context stops the work on the leader too, with or without a deadline.
 - Set `Config.LogOutput` (e.g. `os.Stderr`) for Raft logs and `Config.ApplyTimeout`
   to tune write/read-barrier deadlines.
 - It uses **full replication** to the quorum (each voter holds the whole graph);
@@ -282,11 +359,9 @@ Notes for operators:
 - **TLS is opt-in**: set `Config.TLS` to encrypt the Raft transport and the
   forwarding endpoint and (with a CA) require mutually authenticated peers.
 
-Queries forwarded between members honour the caller's `context` and
-`WithMaxRows` end to end: cancelling a query on a follower or a client stops its
-execution on the leader. Members speak a versioned binary protocol on the
-forwarding address, so **every member of a cluster must run the same version**;
-a mismatch is reported at connection time.
+Members speak a versioned binary protocol on the forwarding address, so **every
+member of a cluster must run the same version**; a mismatch is reported at
+connection time.
 
 ### Securing the cluster with TLS
 
@@ -432,31 +507,70 @@ Read side:
 - `MATCH` / `OPTIONAL MATCH` with node/relationship patterns, directions, labels
   and types; `OPTIONAL MATCH` produces null bindings on no-match.
 - `WHERE` with comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`), boolean ops
-  (`AND`/`OR`/`NOT`), property access and label predicates,
-  `IS NULL`/`IS NOT NULL`, `STARTS WITH`/`ENDS WITH`/`CONTAINS`, `IN` with list
-  literals, `CASE WHEN ... THEN ... ELSE ... END` (simple and searched).
+  (`AND`/`OR`/`NOT`, with openCypher null semantics), property access and label
+  predicates, `IS NULL`/`IS NOT NULL`, `STARTS WITH`/`ENDS WITH`/`CONTAINS`,
+  regular expressions (`s =~ 're'`, Go RE2 syntax, whole-string match), `IN`
+  with lists, `CASE WHEN ... THEN ... ELSE ... END` (simple and searched).
+- Lists and maps: literals, `.key` on maps, subscripts (`l[0]`, `l[-1]`,
+  `m['k']`), slices (`l[1..3]`), list comprehensions
+  (`[x IN l WHERE x > 0 | x * 2]`) and `any`/`all`/`none`/`single(x IN l WHERE ...)`.
 - `RETURN` with projection, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`.
 - `WITH` chaining and scope reset; `UNWIND list AS x`.
 - `UNION` / `UNION ALL`.
 - Variable-length paths `-[:T*1..3]->` (trail semantics: no repeated
   relationships).
+- Shortest paths between two already bound nodes:
+  `MATCH (a {..}), (b {..}), p = shortestPath((a)-[:T*..5]-(b))` and
+  `allShortestPaths(...)` (bidirectional breadth-first search), with
+  `length(p)`, `nodes(p)` and `relationships(p)`. One variable-length
+  relationship, minimum length 0 or 1, any direction and types. A condition on
+  the path itself goes in a following `WITH ... WHERE` (a `WHERE` on it in the
+  same `MATCH` is rejected rather than applied after the search). With a
+  minimum length of 1, a node has no shortest path to itself.
 - Aggregations: `count`, `collect`, `sum`, `avg`, `min`, `max` (with `DISTINCT`).
 - Scalar functions: `id`, `labels`, `type`, `keys`, `properties`, `size`,
-  `length`, `head`, `last`, `tail`, `toInteger`, `toFloat`, `toString`,
-  `toUpper`, `toLower`, `trim`, `substring`, `replace`, `split`, `abs`.
+  `length`, `nodes`, `relationships`, `head`, `last`, `tail`, `range`,
+  `coalesce`, `startNode`, `endNode`,
+  `toInteger`, `toFloat`, `toString`, `toUpper`, `toLower`, `trim`,
+  `substring`, `replace`, `split`, `abs`, `round`, `floor`, `ceil`, `sqrt`,
+  `sign`, `rand`, `timestamp`.
 
 Write side:
 - `CREATE`, `MERGE` (with `ON CREATE SET` / `ON MATCH SET`).
 - `SET`: property assignment (`n.p = v`), label addition (`n:Foo`), map replace
-  (`n = {...}`) or merge (`n += {...}`).
-- `REMOVE`: property (`n.p`) or labels (`n:Foo`).
+  (`n = {...}`) or merge (`n += {...}`), on nodes and (except labels) on
+  relationships; on `null` it does nothing.
+- `REMOVE`: property (`n.p`, `r.p`) or labels (`n:Foo`).
 - `DELETE` / `DETACH DELETE`.
-- `CREATE INDEX FOR (v:Label) ON (v.prop)` with on-demand backfill.
+- `CREATE INDEX [name] FOR (v:Label) ON (v.prop)` with on-demand backfill,
+  `SHOW INDEXES` (name, label, property, entity; unnamed indexes are listed as
+  `index_<Label>_<prop>`) and `DROP INDEX name [IF EXISTS]`. Indexes
+  serve equality (`=`, inline `{prop: v}`), ranges (`<`, `<=`, `>`, `>=`) and
+  `STARTS WITH`, including values bound earlier in the query (`UNWIND`/`WITH`).
+- Relationship property indexes: `CREATE INDEX [name] FOR ()-[r:TYPE]-() ON
+  (r.prop)` (listed by `SHOW INDEXES` with entity `RELATIONSHIP`, default name
+  `rel_index_<TYPE>_<prop>`). An equality on an indexed relationship property
+  (`-[r:TYPE {prop: v}]->` or `WHERE r.prop = v`) starts the pattern from the
+  matching relationships when no node can be found through an index. The first
+  one marks the database as format version 3, which older builds refuse to
+  open.
+- Unique constraints: `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (v:Label)
+  REQUIRE v.prop IS UNIQUE`, `SHOW CONSTRAINTS` (name, label, property, type;
+  unnamed ones are `constraint_<Label>_<prop>`) and `DROP CONSTRAINT name [IF
+  EXISTS]`. A write that would give two nodes the same value fails with
+  `ErrConstraintViolation` (so does creating a constraint over existing
+  duplicates). The check runs as each value is written, so swapping two values
+  in one statement needs a temporary value. Only scalar values (numbers,
+  strings, booleans) are checked; `1` and `1.0` count as equal. The constraint
+  uses an existing index on the property or creates one (dropped with it).
+  Creating the first constraint marks the database as format version 2, which
+  older builds refuse to open.
 - Parameters (`$name`).
 
-**Out of scope:** OLAP/vectorized execution, `shortestPath`/`allShortestPaths`,
-subqueries (`EXISTS { }`, `CALL { }`), user-defined procedures, path variables
-(`p = (...)`) and full TCK conformance.
+**Out of scope:** OLAP/vectorized execution, subqueries (`EXISTS { }`,
+`CALL { }`), user-defined procedures, path variables on ordinary patterns
+(`p = (a)-->(b)`; they are supported with `shortestPath`) and full TCK
+conformance.
 
 ## Versioning
 
@@ -485,6 +599,7 @@ Building from source and running the test suite require Go 1.26+:
 go build ./...          # build everything
 go test ./...           # run the tests
 make race               # tests with the race detector
+INTRECCIO_TEST_ENGINE=bolt go test .  # query tests on the bbolt engine
 make lint               # golangci-lint (v2)
 go run ./cmd/intreccio  # run the REPL from source
 ```

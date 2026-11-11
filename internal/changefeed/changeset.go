@@ -27,8 +27,8 @@ type NodeChange struct {
 }
 
 // EdgeChange is one relationship's state before and after the transaction, with
-// the same nil convention as NodeChange. Relationships are immutable once
-// created, so in practice exactly one of the two is set.
+// the same nil convention as NodeChange. Both are set when a property of the
+// relationship changed; its type and end nodes never change.
 type EdgeChange struct {
 	ID     uint64
 	Before *codec.EdgeRecord

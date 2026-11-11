@@ -105,15 +105,57 @@ type Delete struct {
 	Pos    Pos
 }
 
-// CreateIndex is CREATE INDEX FOR (v:Label) ON (v.prop).
+// CreateIndex is CREATE INDEX FOR (v:Label) ON (v.prop), or with Rel set
+// CREATE INDEX FOR ()-[v:TYPE]-() ON (v.prop) (Label then holds the type).
 type CreateIndex struct {
+	Name     string // optional
 	Variable string
+	Label    string
+	Property string
+	Rel      bool
+	Pos      Pos
+}
+
+// DropIndex is DROP INDEX name [IF EXISTS].
+type DropIndex struct {
+	Name     string
+	IfExists bool
+	Pos      Pos
+}
+
+// ShowIndexes is SHOW INDEX(ES): one row per index (name, label, property, entity).
+type ShowIndexes struct {
+	Pos Pos
+}
+
+// CreateConstraint is CREATE CONSTRAINT [name] [IF NOT EXISTS]
+// FOR (v:Label) REQUIRE v.prop IS UNIQUE.
+type CreateConstraint struct {
+	Name     string // optional
 	Label    string
 	Property string
 	Pos      Pos
 }
 
+// DropConstraint is DROP CONSTRAINT name [IF EXISTS].
+type DropConstraint struct {
+	Name     string
+	IfExists bool
+	Pos      Pos
+}
+
+// ShowConstraints is SHOW CONSTRAINT(S): one row per constraint.
+type ShowConstraints struct {
+	Pos Pos
+}
+
+func (*CreateConstraint) clause() {}
+func (*DropConstraint) clause()   {}
+func (*ShowConstraints) clause()  {}
+
 func (*Match) clause()       {}
+func (*DropIndex) clause()   {}
+func (*ShowIndexes) clause() {}
 func (*With) clause()        {}
 func (*Return) clause()      {}
 func (*Create) clause()      {}
@@ -202,7 +244,18 @@ type PatternPart struct {
 	Variable string
 	Start    *NodePattern
 	Chain    []PatternChain
+	// Shortest marks shortestPath(...) / allShortestPaths(...).
+	Shortest ShortestKind
 }
+
+// ShortestKind tells a plain pattern part from a shortest-path one.
+type ShortestKind int
+
+const (
+	NotShortest ShortestKind = iota
+	ShortestOne              // shortestPath(...)
+	ShortestAll              // allShortestPaths(...)
+)
 
 // PatternChain is a step (relationship → node) in the chain.
 type PatternChain struct {
@@ -307,6 +360,39 @@ type MapLiteral struct {
 // Case is the CASE expression. When Operand is non-nil the form is "simple"
 // (CASE x WHEN v THEN r ...); when nil the form is "searched"
 // (CASE WHEN cond THEN r ...). Else is optional.
+// Subscript is target[index]: a list element (negative indexes count from
+// the end) or a map/node/relationship property by name.
+type Subscript struct {
+	Target Expr
+	Index  Expr
+	Pos    Pos
+}
+
+// ListComprehension is [Variable IN List WHERE Where | Map]; Where and Map
+// are optional.
+type ListComprehension struct {
+	Variable   string
+	List       Expr
+	Where, Map Expr
+	Pos        Pos
+}
+
+// Quantifier is any/all/none/single(Variable IN List WHERE Where).
+type Quantifier struct {
+	Kind     string // "any", "all", "none" or "single"
+	Variable string
+	List     Expr
+	Where    Expr
+	Pos      Pos
+}
+
+// Slice is target[from..to] on a list; a nil bound is open.
+type Slice struct {
+	Target   Expr
+	From, To Expr
+	Pos      Pos
+}
+
 type Case struct {
 	Operand Expr
 	Whens   []CaseAlternative
@@ -320,14 +406,18 @@ type CaseAlternative struct {
 	Result Expr
 }
 
-func (*Literal) expr()         {}
-func (*Param) expr()           {}
-func (*Variable) expr()        {}
-func (*PropertyAccess) expr()  {}
-func (*Unary) expr()           {}
-func (*Binary) expr()          {}
-func (*FunctionCall) expr()    {}
-func (*LabelsPredicate) expr() {}
-func (*ListLiteral) expr()     {}
-func (*MapLiteral) expr()      {}
-func (*Case) expr()            {}
+func (*Literal) expr()           {}
+func (*Param) expr()             {}
+func (*Variable) expr()          {}
+func (*PropertyAccess) expr()    {}
+func (*Unary) expr()             {}
+func (*Binary) expr()            {}
+func (*FunctionCall) expr()      {}
+func (*LabelsPredicate) expr()   {}
+func (*ListLiteral) expr()       {}
+func (*MapLiteral) expr()        {}
+func (*Case) expr()              {}
+func (*Subscript) expr()         {}
+func (*Slice) expr()             {}
+func (*ListComprehension) expr() {}
+func (*Quantifier) expr()        {}

@@ -8,9 +8,11 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/giovibal/intreccio/internal/backend"
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/exec"
+	"github.com/giovibal/intreccio/internal/graph"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
 	"github.com/giovibal/intreccio/internal/wire"
@@ -20,29 +22,14 @@ import (
 	"github.com/giovibal/intreccio/query/sema"
 )
 
-// Backend is the storage/execution backend behind a DB. It is implemented by
-// the default local engine and by the optional clustering package; end users do
-// not implement it directly (use Open or cluster.Open). It exists so the
-// clustering code can route writes through Raft without the core package
-// depending on it.
-type Backend interface {
-	// View runs fn in a read-only transaction.
-	View(fn func(storage.Txn) error) error
-	// ApplyWrite executes a write via stage and durably commits/replicates its
-	// effects, returning whatever stage produced.
-	ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error)
-	// Close releases the backend.
-	Close() error
-}
-
 // DB is the database handle.
 type DB struct {
-	be Backend
+	be backend.Backend
 	// hub is the registry of live-query watchers. Commit points report to it;
-	// it costs nothing while no watcher is registered.
+	// it costs next to nothing while no watcher is registered.
 	hub *changefeed.Hub
 	// watchable is set when the backend reports its commits to hub, i.e. when
-	// Subscribe can work.
+	// this database can evaluate live queries itself.
 	watchable bool
 
 	mu     sync.Mutex
@@ -56,10 +43,14 @@ type DB struct {
 	}
 }
 
-// New wraps a Backend in a DB. It is the seam used by the clustering package;
-// most callers use Open/OpenInMemory instead. If the backend supports forwarding
-// of leader-bound queries, New wires this DB's local executor into it.
-func New(be Backend) *DB {
+func init() {
+	backend.NewDB = func(be backend.Backend) any { return wrapBackend(be) }
+}
+
+// wrapBackend wraps a backend in a DB. Open and OpenInMemory use the local engine;
+// the cluster package reaches it through backend.NewDB. If the backend
+// forwards leader-bound queries, its local executor is wired here.
+func wrapBackend(be backend.Backend) *DB {
 	db := &DB{be: be}
 	db.hub = changefeed.NewHub(dictionary{view: be.View})
 	if r, ok := be.(changeReporter); ok {
@@ -105,8 +96,11 @@ type clusterBackend interface {
 	Local() bool
 	ReadBarrier() error
 	// Forward runs the request on another member and returns its rows in the
-	// canonical row encoding (see rowcodec.go). The backend carries parameters
-	// and rows as opaque bytes. Ending ctx stops the remote execution too.
+	// canonical row encoding (see rowcodec.go); the backend carries parameters
+	// and rows as opaque bytes. ctx's deadline and cancellation and the
+	// request's MaxRows apply there too, and known sentinel errors
+	// (ErrResultLimit, ErrConflict, context.DeadlineExceeded, ...) survive the
+	// trip as *wire.Error codes.
 	Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error)
 }
 
@@ -146,6 +140,29 @@ func WithMaxRows(limit int) QueryOption {
 // ErrResultLimit is returned by Query when a result exceeds WithMaxRows.
 var ErrResultLimit = exec.ErrResultLimit
 
+// ErrConflict is returned by Query when a write kept conflicting with
+// concurrent writes to the same data, even after automatic retries with
+// backoff. Nothing is committed and the write can be retried. It is rare: it
+// takes many writers updating the same node at once.
+var ErrConflict = storage.ErrConflict
+
+// ErrTxnTooLarge is returned by Query when a single write statement holds more
+// changes than one transaction can commit (roughly 50 000 new nodes
+// with the default engine). Nothing is committed. Load large datasets in
+// batches, e.g. `UNWIND $rows ...` with about 10 000 rows per call.
+var ErrTxnTooLarge = storage.ErrTxnTooLarge
+
+// ErrConstraintViolation is returned by Query when a write would give two
+// nodes the same value for a property under a unique constraint
+// (CREATE CONSTRAINT ... REQUIRE n.p IS UNIQUE), or when such a constraint
+// cannot be created because existing nodes already share a value. Nothing
+// is committed.
+var ErrConstraintViolation = graph.ErrConstraintViolation
+
+// ErrIntegerOverflow is returned by Query when integer arithmetic (including
+// sum()) leaves the 64-bit range. Integers never wrap around silently.
+var ErrIntegerOverflow = exec.ErrIntegerOverflow
+
 // OpenOption configures how Open opens a database.
 type OpenOption func(*openOptions)
 
@@ -175,12 +192,16 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return New(&localBackend{store: store}), nil
+	return wrapBackend(&localBackend{store: store}), nil
 }
+
+// openMemStore opens the store behind OpenInMemory. It is a variable only so
+// the test suite can run on another engine (see engine_test.go).
+var openMemStore = func() (storage.Store, error) { return badgerstore.OpenInMemory() }
 
 // OpenInMemory opens a fully in-RAM database (useful in tests).
 func OpenInMemory() (*DB, error) {
-	store, err := badgerstore.OpenInMemory()
+	store, err := openMemStore()
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +209,7 @@ func OpenInMemory() (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return New(&localBackend{store: store}), nil
+	return wrapBackend(&localBackend{store: store}), nil
 }
 
 // ensureFormat initialises the on-disk format marker on a fresh database and
@@ -206,9 +227,9 @@ func (db *DB) Close() error {
 	return db.be.Close()
 }
 
-// Result is the outcome of a query. Rows holds one slice per row, in column
-// order. Each value is one of: nil, bool, int64, float64, string, []any,
-// map[string]any, Node or Relationship (lists and maps may nest any of these).
+// Result is the outcome of a query. Each value in Rows is nil, bool, int64,
+// float64, string, []any, map[string]any, Node, Relationship or Path (a
+// variable-length relationship is a []any of Relationship).
 type Result struct {
 	Columns []string
 	Rows    [][]any
@@ -228,6 +249,10 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 	var o queryOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+	params, err := normalizeParams(params)
+	if err != nil {
+		return nil, err
 	}
 
 	q, err := parser.Parse(cypher)
@@ -255,16 +280,13 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
 			}
-			req := wire.Request{
+			cols, enc, err := cb.Forward(ctx, wire.Request{
 				Cypher:       cypher,
 				Params:       encParams,
 				Write:        write,
 				Linearizable: o.linearizable && !write,
-			}
-			if !write {
-				req.MaxRows = o.maxRows // writes are never capped, as locally
-			}
-			cols, enc, err := cb.Forward(ctx, req)
+				MaxRows:      o.maxRows,
+			})
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", fromRemote(err))
 			}
@@ -319,7 +341,8 @@ func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, para
 // executeLocal parses and runs a forwarded request entirely on the local node,
 // returning the columns and the rows in the canonical row encoding. It is wired
 // into a clustered backend so a member can execute the queries others forward
-// to it; it never forwards. ctx bounds the execution.
+// to it; it never forwards. ctx carries the requester's deadline and
+// cancellation, and the request its WithMaxRows.
 func (db *DB) executeLocal(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	params, err := decodeParams(req.Params)
 	if err != nil {
@@ -336,12 +359,7 @@ func (db *DB) executeLocal(ctx context.Context, req wire.Request) ([]string, [][
 	if err != nil {
 		return nil, nil, err
 	}
-	write := isWriteQuery(q)
-	maxRows := req.MaxRows
-	if write {
-		maxRows = 0
-	}
-	res, err := db.runLocal(ctx, q, semaRes.Columns, params, write, maxRows)
+	res, err := db.runLocal(ctx, q, semaRes.Columns, params, isWriteQuery(q), req.MaxRows)
 	if err != nil {
 		return nil, nil, toRemote(err)
 	}
@@ -352,23 +370,60 @@ func (db *DB) executeLocal(ctx context.Context, req wire.Request) ([]string, [][
 	return res.Columns, enc, nil
 }
 
+// remoteSentinels are the sentinel errors that keep their identity across a
+// forward, each with its wire code. The codes are part of the wire format.
+var remoteSentinels = []struct {
+	code wire.Code
+	err  error
+}{
+	{wire.CodeResultLimit, ErrResultLimit},
+	{wire.CodeConflict, ErrConflict},
+	{wire.CodeTxnTooLarge, ErrTxnTooLarge},
+	{wire.CodeIntegerOverflow, ErrIntegerOverflow},
+	{wire.CodeConstraintViolation, ErrConstraintViolation},
+	{wire.CodeDeadlineExceeded, context.DeadlineExceeded},
+	{wire.CodeCanceled, context.Canceled},
+}
+
 // toRemote tags an error that the requesting member must be able to recognise
 // with its wire code; any other error travels as its message.
 func toRemote(err error) error {
-	if errors.Is(err, ErrResultLimit) {
-		return &wire.Error{Code: wire.CodeResultLimit, Msg: err.Error()}
+	var already *wire.Error
+	if errors.As(err, &already) {
+		return err
+	}
+	for _, s := range remoteSentinels {
+		if errors.Is(err, s.err) {
+			return &wire.Error{Code: s.code, Msg: err.Error()}
+		}
 	}
 	return err
 }
 
-// fromRemote is the inverse of toRemote on the requesting member.
+// fromRemote is the inverse of toRemote on the requesting member: the original
+// message, unwrapping to the sentinel its code names (an unknown code from a
+// newer member is left as it is).
 func fromRemote(err error) error {
 	var remote *wire.Error
-	if errors.As(err, &remote) && remote.Code == wire.CodeResultLimit {
-		return ErrResultLimit
+	if !errors.As(err, &remote) {
+		return err
+	}
+	for _, s := range remoteSentinels {
+		if s.code == remote.Code {
+			return &remoteError{msg: remote.Msg, sentinel: s.err}
+		}
 	}
 	return err
 }
+
+// remoteError is an error that happened on another member.
+type remoteError struct {
+	msg      string
+	sentinel error
+}
+
+func (e *remoteError) Error() string { return e.msg }
+func (e *remoteError) Unwrap() error { return e.sentinel }
 
 // encodeParams serializes a query's parameter map for forwarding, as a
 // one-value row. A nil map stays empty bytes.
@@ -400,10 +455,13 @@ func decodeParams(b []byte) (map[string]any, error) {
 
 // runQuery plans and executes an already-parsed, already-analyzed query against
 // txn. It is the single execution path shared by the local and clustered
-// backends. The rows are exported to the public value model (Node,
-// Relationship) while txn is still open, since that needs the dictionaries.
+// backends.
 func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any, ctx context.Context, maxRows int64) (*Result, error) {
 	p, err := plan.Plan(q, planCatalog{txn: txn})
+	if err != nil {
+		return nil, err
+	}
+	params, err = engineParams(txn, params)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +469,7 @@ func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string
 	if err != nil {
 		return nil, err
 	}
-	if err := newExporter(txn).rows(rows); err != nil {
+	if err := publicRows(txn, rows); err != nil {
 		return nil, err
 	}
 	return &Result{Columns: columns, Rows: rows}, nil
@@ -454,15 +512,16 @@ func isWriteQuery(q *ast.Query) bool {
 
 // localBackend is the default, non-clustered backend: a local store where writes
 // commit directly. It is the embedded commit point for live queries: every
-// committed write is reported to the hub.
+// committed write — a write query, a DB.Update transaction, each batch of an
+// Import — is reported to the hub.
 type localBackend struct {
 	store storage.Store
 	hub   *changefeed.Hub
 }
 
 var (
-	_ Backend        = (*localBackend)(nil)
-	_ changeReporter = (*localBackend)(nil)
+	_ backend.Backend = (*localBackend)(nil)
+	_ changeReporter  = (*localBackend)(nil)
 )
 
 // SetChangeHub wires the hub this backend reports its commits to.
@@ -488,6 +547,20 @@ func (b *localBackend) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any
 }
 
 func (b *localBackend) Close() error { return b.store.Close() }
+
+// HasRelIndex implements plan.RelCatalog.
+func (c planCatalog) HasRelIndex(relType, propKey string) bool {
+	typeID, found, err := catalog.LookupType(c.txn, relType)
+	if err != nil || !found {
+		return false
+	}
+	keyID, found, err := catalog.LookupKey(c.txn, propKey)
+	if err != nil || !found {
+		return false
+	}
+	has, err := catalog.HasRelIndex(c.txn, typeID, keyID)
+	return err == nil && has
+}
 
 // planCatalog adapts the catalog to plan.Catalog, resolving names within the
 // transaction. A missing label/key means no index, which is correct.

@@ -79,7 +79,7 @@ func mustExec(t *testing.T, db *DB, cypher string, params ...map[string]any) {
 	}
 }
 
-func rowsOf(vals ...any) [][]any {
+func oneCol(vals ...any) [][]any {
 	out := make([][]any, len(vals))
 	for i, v := range vals {
 		out[i] = []any{v}
@@ -121,18 +121,18 @@ func TestSubscribeInitialThenChanges(t *testing.T) {
 	}
 
 	mustExec(t, db, "CREATE (:Person {name: 'Cy'})")
-	wantChange(t, nextChange(t, sub), rowsOf("Cy"), nil)
+	wantChange(t, nextChange(t, sub), oneCol("Cy"), nil)
 
 	// An update is the old row removed and the new row added, in one batch.
 	mustExec(t, db, "MATCH (p:Person {name: 'Bob'}) SET p.name = 'Rob'")
-	wantChange(t, nextChange(t, sub), rowsOf("Rob"), rowsOf("Bob"))
+	wantChange(t, nextChange(t, sub), oneCol("Rob"), oneCol("Bob"))
 
 	mustExec(t, db, "MATCH (p:Person {name: 'Ann'}) DELETE p")
-	wantChange(t, nextChange(t, sub), nil, rowsOf("Ann"))
+	wantChange(t, nextChange(t, sub), nil, oneCol("Ann"))
 
 	// A row leaves the result when it stops matching, not only when deleted.
 	mustExec(t, db, "MATCH (p:Person {name: 'Cy'}) REMOVE p:Person")
-	wantChange(t, nextChange(t, sub), nil, rowsOf("Cy"))
+	wantChange(t, nextChange(t, sub), nil, oneCol("Cy"))
 }
 
 func TestSubscribeIgnoresIrrelevantWrites(t *testing.T) {
@@ -149,7 +149,7 @@ func TestSubscribeIgnoresIrrelevantWrites(t *testing.T) {
 
 	// A relevant write whose net effect on the result is nil emits nothing.
 	mustExec(t, db, "CREATE (:Person {name: 'Tmp'})")
-	wantChange(t, nextChange(t, sub), rowsOf("Tmp"), nil)
+	wantChange(t, nextChange(t, sub), oneCol("Tmp"), nil)
 }
 
 func TestSubscribeEmptyInitial(t *testing.T) {
@@ -160,7 +160,7 @@ func TestSubscribeEmptyInitial(t *testing.T) {
 		t.Fatalf("initial = %+v, want an empty initial batch", first)
 	}
 	mustExec(t, db, "CREATE (:Person {name: 'Ann'})")
-	wantChange(t, nextChange(t, sub), rowsOf("Ann"), nil)
+	wantChange(t, nextChange(t, sub), oneCol("Ann"), nil)
 }
 
 func TestSubscribeWholeEntitiesAndRelationships(t *testing.T) {
@@ -203,23 +203,23 @@ func TestSubscribeAggregationAndTopN(t *testing.T) {
 	db := newDB(t)
 	count := subscribe(t, db, "MATCH (p:Person) RETURN count(p) AS c", nil)
 	top := subscribe(t, db, "MATCH (p:Person) RETURN p.name AS name, p.score AS score ORDER BY score DESC LIMIT 2", nil)
-	if first := nextChange(t, count); !reflect.DeepEqual(first.Added, rowsOf(int64(0))) {
+	if first := nextChange(t, count); !reflect.DeepEqual(first.Added, oneCol(int64(0))) {
 		t.Fatalf("count initial = %+v", first)
 	}
 	nextChange(t, top)
 
 	mustExec(t, db, "CREATE (:Person {name: 'a', score: 1}), (:Person {name: 'b', score: 2})")
-	wantChange(t, nextChange(t, count), rowsOf(int64(2)), rowsOf(int64(0)))
+	wantChange(t, nextChange(t, count), oneCol(int64(2)), oneCol(int64(0)))
 	wantChange(t, nextChange(t, top), [][]any{{"b", int64(2)}, {"a", int64(1)}}, nil)
 
 	// A new leader pushes the lowest of the top two out.
 	mustExec(t, db, "CREATE (:Person {name: 'c', score: 3})")
-	wantChange(t, nextChange(t, count), rowsOf(int64(3)), rowsOf(int64(2)))
+	wantChange(t, nextChange(t, count), oneCol(int64(3)), oneCol(int64(2)))
 	wantChange(t, nextChange(t, top), [][]any{{"c", int64(3)}}, [][]any{{"a", int64(1)}})
 
 	// Below the cut: the count moves, the top two do not.
 	mustExec(t, db, "CREATE (:Person {name: 'd', score: 0})")
-	wantChange(t, nextChange(t, count), rowsOf(int64(4)), rowsOf(int64(3)))
+	wantChange(t, nextChange(t, count), oneCol(int64(4)), oneCol(int64(3)))
 	expectQuiet(t, top)
 }
 
@@ -228,11 +228,11 @@ func TestSubscribeParamsAndStreamPrefix(t *testing.T) {
 	mustExec(t, db, "CREATE (:Person {name: 'Ann', city: 'Rome'}), (:Person {name: 'Bob', city: 'Oslo'})")
 	sub := subscribe(t, db, "STREAM MATCH (p:Person) WHERE p.city = $city RETURN p.name AS name",
 		map[string]any{"city": "Rome"})
-	if first := nextChange(t, sub); !reflect.DeepEqual(first.Added, rowsOf("Ann")) {
+	if first := nextChange(t, sub); !reflect.DeepEqual(first.Added, oneCol("Ann")) {
 		t.Fatalf("initial = %+v", first)
 	}
 	mustExec(t, db, "MATCH (p:Person {name: 'Bob'}) SET p.city = 'Rome'")
-	wantChange(t, nextChange(t, sub), rowsOf("Bob"), nil)
+	wantChange(t, nextChange(t, sub), oneCol("Bob"), nil)
 }
 
 func TestStreamQueryNeedsSubscribe(t *testing.T) {
@@ -584,5 +584,5 @@ func TestSubscribeOnPersistentDatabase(t *testing.T) {
 	sub := subscribe(t, db, "MATCH (p:Person) RETURN p.name AS name", nil)
 	nextChange(t, sub)
 	mustExec(t, db, "CREATE (:Person {name: 'Ann'})")
-	wantChange(t, nextChange(t, sub), rowsOf("Ann"), nil)
+	wantChange(t, nextChange(t, sub), oneCol("Ann"), nil)
 }
