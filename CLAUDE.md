@@ -34,6 +34,10 @@ analytical OLAP engine.
    semantics): track the **relationship IDs** traversed, not the nodes.
 4. **Double adjacency**: every edge is written both in `o` (outgoing) and in `i`
    (incoming). The two views must stay in sync.
+5. **Live-query commit reporting** (ADR 0010): every commit point reports to the
+   `changefeed.Hub` **only after** a successful commit, and reports a commit it
+   cannot describe as unknown (wake all). A watcher may be woken needlessly,
+   never missed. Reporting must never fail or block a write.
 
 ## Layout
 ```
@@ -41,6 +45,7 @@ cmd/intreccio/         CLI/REPL entrypoint
 internal/storage/     Store interface + codec + adapters (badger, bolt)
 internal/catalog/     dictionaries, ID counters, index registry
 internal/graph/       model + transactional CRUD + traversal primitives
+internal/changefeed/  live queries: delta capture at commit + watcher registry
 internal/exec/        executor operators (Volcano) — the engine
 query/                public openCypher front-end: ast, parser, sema, plan
 intreccio.go           public embeddable API (package intreccio)

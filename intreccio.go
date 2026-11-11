@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/exec"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
@@ -33,6 +34,9 @@ type Backend interface {
 // DB is the database handle.
 type DB struct {
 	be Backend
+	// hub is the registry of live-query watchers. Commit points report to it;
+	// it costs nothing while no watcher is registered.
+	hub *changefeed.Hub
 }
 
 // New wraps a Backend in a DB. It is the seam used by the clustering package;
@@ -40,11 +44,40 @@ type DB struct {
 // of leader-bound queries, New wires this DB's local executor into it.
 func New(be Backend) *DB {
 	db := &DB{be: be}
+	db.hub = changefeed.NewHub(dictionary{view: be.View})
 	if s, ok := be.(localExecutorSetter); ok {
 		s.SetLocalExecutor(db.executeLocalText)
 	}
 	return db
 }
+
+// newLocal builds the DB of an embedded store, whose commits report to the hub.
+func newLocal(store storage.Store) *DB {
+	be := &localBackend{store: store}
+	db := New(be)
+	be.hub = db.hub
+	return db
+}
+
+// dictionary resolves dictionary IDs to names through short read transactions.
+// It is the hub's changefeed.Resolver; the hub caches what it returns.
+type dictionary struct {
+	view func(fn func(storage.Txn) error) error
+}
+
+func (d dictionary) name(resolve func(storage.Txn, uint32) (string, error), id uint32) (string, error) {
+	var name string
+	err := d.view(func(txn storage.Txn) error {
+		var err error
+		name, err = resolve(txn, id)
+		return err
+	})
+	return name, err
+}
+
+func (d dictionary) LabelName(id uint32) (string, error) { return d.name(catalog.LabelName, id) }
+func (d dictionary) TypeName(id uint32) (string, error)  { return d.name(catalog.TypeName, id) }
+func (d dictionary) KeyName(id uint32) (string, error)   { return d.name(catalog.KeyName, id) }
 
 // clusterBackend is the optional capability set of a clustered backend. The core
 // package never imports the clustering package; it discovers these methods via
@@ -125,7 +158,7 @@ func Open(path string, opts ...OpenOption) (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return &DB{be: &localBackend{store: store}}, nil
+	return newLocal(store), nil
 }
 
 // OpenInMemory opens a fully in-RAM database (useful in tests).
@@ -138,7 +171,7 @@ func OpenInMemory() (*DB, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return &DB{be: &localBackend{store: store}}, nil
+	return newLocal(store), nil
 }
 
 // ensureFormat initialises the on-disk format marker on a fresh database and
@@ -328,9 +361,11 @@ func isWriteQuery(q *ast.Query) bool {
 }
 
 // localBackend is the default, non-clustered backend: a local store where writes
-// commit directly.
+// commit directly. It is the embedded commit point for live queries: every
+// committed write is reported to the hub.
 type localBackend struct {
 	store storage.Store
+	hub   *changefeed.Hub
 }
 
 var _ Backend = (*localBackend)(nil)
@@ -338,18 +373,40 @@ var _ Backend = (*localBackend)(nil)
 func (b *localBackend) View(fn func(storage.Txn) error) error { return b.store.View(fn) }
 
 func (b *localBackend) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
-	var result any
+	var (
+		result any
+		// changes stays nil when the transaction ran without a capture or its
+		// ChangeSet could not be built; the hub then treats the commit as an
+		// unknown change. That also covers a watcher registering while a write
+		// that started without a capture is still in flight.
+		changes *changefeed.ChangeSet
+	)
 	err := b.store.Update(func(txn storage.Txn) error {
+		// Update may run this function again on a conflict: every attempt
+		// starts from a fresh capture.
+		changes = nil
+		var capture *changefeed.Capture
+		if b.hub.Active() {
+			capture = changefeed.NewCapture(txn)
+			txn = capture
+		}
 		r, err := stage(txn)
 		if err != nil {
 			return err
 		}
 		result = r
+		if capture != nil {
+			// A failure to describe the write must not fail the write.
+			if cs, err := capture.ChangeSet(); err == nil {
+				changes = cs
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	b.hub.Committed(changes) // only after a successful commit
 	return result, nil
 }
 
