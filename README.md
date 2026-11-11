@@ -525,6 +525,10 @@ Read side:
   `m['k']`), slices (`l[1..3]`), list comprehensions
   (`[x IN l WHERE x > 0 | x * 2]`) and `any`/`all`/`none`/`single(x IN l WHERE ...)`.
 - `RETURN` with projection, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`.
+  `ORDER BY` (after `RETURN` or `WITH`) sorts on the returned columns and on
+  the variables matched before the projection, so `RETURN p.name ORDER BY p.age`
+  works; after `DISTINCT` or an aggregation only the returned columns and
+  expressions can be sort keys.
 - `WITH` chaining and scope reset; `UNWIND list AS x`.
 - `UNION` / `UNION ALL`.
 - Variable-length paths `-[:T*1..3]->` (trail semantics: no repeated

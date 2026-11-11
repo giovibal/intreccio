@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -608,23 +609,53 @@ func residualPredicates(nodes []pnode, rels []prel) []ast.Expr {
 // --- Projection ---
 
 func (pl *planner) planReturn(r *ast.Return) error {
-	pl.projectOrAggregate(r.Star, r.Items, r.Distinct)
-	pl.applyTail(r.OrderBy, r.Skip, r.Limit)
-	return nil
+	return pl.planProjection(r.Star, r.Items, r.Distinct, nil, r.OrderBy, r.Skip, r.Limit)
 }
 
 func (pl *planner) planWith(w *ast.With) error {
-	pl.projectOrAggregate(w.Star, w.Items, w.Distinct)
-	if w.Where != nil {
-		pl.plan = &Filter{Input: pl.plan, Pred: w.Where}
+	return pl.planProjection(w.Star, w.Items, w.Distinct, w.Where, w.OrderBy, w.Skip, w.Limit)
+}
+
+// planProjection plans a RETURN / WITH: the projection, the WHERE of a WITH,
+// then ORDER BY, SKIP and LIMIT.
+//
+// The Sort goes above the projection when every sort key can be computed from
+// the projected columns, and below it when a key reads a variable the
+// projection drops (MATCH (p) RETURN p.name ORDER BY p.age). Sorting first is
+// sound there because a plain projection keeps the order of its input.
+func (pl *planner) planProjection(star bool, items []ast.ReturnItem, distinct bool, where ast.Expr, orderBy []ast.SortItem, skip, limit ast.Expr) error {
+	projItems := pl.expandItems(star, items)
+	aggregating := false
+	for _, pi := range projItems {
+		if containsAggregate(pi.Expr) {
+			aggregating = true
+		}
 	}
-	pl.applyTail(w.OrderBy, w.Skip, w.Limit)
+
+	keys, below, err := sortKeys(projItems, distinct || aggregating, orderBy)
+	if err != nil {
+		return err
+	}
+	if below {
+		pl.plan = &Sort{Input: pl.plan, Keys: keys}
+	}
+	pl.projectOrAggregate(projItems, distinct)
+	if where != nil {
+		pl.plan = &Filter{Input: pl.plan, Pred: where}
+	}
+	if len(keys) > 0 && !below {
+		pl.plan = &Sort{Input: pl.plan, Keys: keys}
+	}
+	if skip != nil {
+		pl.plan = &Skip{Input: pl.plan, Count: skip}
+	}
+	if limit != nil {
+		pl.plan = &Limit{Input: pl.plan, Count: limit}
+	}
 	return nil
 }
 
-func (pl *planner) projectOrAggregate(star bool, items []ast.ReturnItem, distinct bool) {
-	projItems := pl.expandItems(star, items)
-
+func (pl *planner) projectOrAggregate(projItems []ProjItem, distinct bool) {
 	var groups, aggs []ProjItem
 	hasAgg := false
 	for _, pi := range projItems {
@@ -666,20 +697,168 @@ func (pl *planner) expandItems(star bool, items []ast.ReturnItem) []ProjItem {
 	return out
 }
 
-func (pl *planner) applyTail(orderBy []ast.SortItem, skip, limit ast.Expr) {
-	if len(orderBy) > 0 {
-		keys := make([]SortKey, len(orderBy))
-		for i, s := range orderBy {
-			keys[i] = SortKey{Expr: s.Expr, Desc: s.Desc}
+// sortKeys resolves the ORDER BY of a projection: the keys to sort on and
+// whether the Sort belongs below the projection instead of above it. merging
+// tells that the projection is DISTINCT or aggregates.
+func sortKeys(items []ProjItem, merging bool, orderBy []ast.SortItem) (keys []SortKey, below bool, err error) {
+	if len(orderBy) == 0 {
+		return nil, false, nil
+	}
+	columns := make(map[string]bool, len(items))
+	for _, it := range items {
+		columns[it.Column] = true
+	}
+
+	// Above the projection: possible when every key reads projected columns
+	// only, once the projected expressions it repeats are read from their
+	// column.
+	keys = make([]SortKey, len(orderBy))
+	above := true
+	for i, s := range orderBy {
+		e := columnRefs(s.Expr, items)
+		for _, v := range exprVars(e) {
+			if !columns[v] {
+				above = false
+			}
 		}
-		pl.plan = &Sort{Input: pl.plan, Keys: keys}
+		keys[i] = SortKey{Expr: e, Desc: s.Desc}
 	}
-	if skip != nil {
-		pl.plan = &Skip{Input: pl.plan, Count: skip}
+	if above {
+		return keys, false, nil
 	}
-	if limit != nil {
-		pl.plan = &Limit{Input: pl.plan, Count: limit}
+	if merging {
+		// The analyzer rejects this; a plan built without it must not sort
+		// on rows the projection has already merged.
+		return nil, false, fmt.Errorf("plan: ORDER BY after DISTINCT or an aggregation can only use the projected columns")
 	}
+
+	// Below the projection: the keys are computed on its input, so a column
+	// they name is replaced by the expression that produces it.
+	for i, s := range orderBy {
+		e, err := inlineColumns(s.Expr, items)
+		if err != nil {
+			return nil, false, err
+		}
+		keys[i] = SortKey{Expr: e, Desc: s.Desc}
+	}
+	return keys, true, nil
+}
+
+// columnRefs rewrites a sort key for evaluation above the projection: each
+// sub-expression that repeats a projected one becomes a reference to its
+// column (ORDER BY n.age + 1 after RETURN n.age + 1, or ORDER BY count(*)).
+func columnRefs(e ast.Expr, items []ProjItem) ast.Expr {
+	return rewriteScoped(e, func(x ast.Expr, locals []string) (ast.Expr, bool) {
+		switch x.(type) {
+		case *ast.Variable, *ast.Literal, *ast.Param:
+			return nil, false
+		}
+		if readsAny(x, locals) {
+			return nil, false
+		}
+		for _, it := range items {
+			if ast.Equal(x, it.Expr) {
+				return &ast.Variable{Name: it.Column}, true
+			}
+		}
+		return nil, false
+	})
+}
+
+// inlineColumns rewrites a sort key for evaluation below the projection: a
+// reference to a projected column becomes the expression behind it. A column
+// name hides a variable of the same name, as it does above the projection.
+func inlineColumns(e ast.Expr, items []ProjItem) (ast.Expr, error) {
+	var err error
+	out := rewriteScoped(e, func(x ast.Expr, locals []string) (ast.Expr, bool) {
+		v, ok := x.(*ast.Variable)
+		if !ok || slices.Contains(locals, v.Name) {
+			return nil, false
+		}
+		// The last item wins, as it does in the projected row.
+		for i := len(items) - 1; i >= 0; i-- {
+			it := items[i]
+			if it.Column != v.Name {
+				continue
+			}
+			if same, ok := it.Expr.(*ast.Variable); ok && same.Name == v.Name {
+				return nil, false
+			}
+			switch {
+			case !deterministic(it.Expr):
+				// Computing it a second time would sort on other values than
+				// the ones returned.
+				err = fmt.Errorf("plan: ORDER BY cannot combine column %q, whose value changes at each evaluation, "+
+					"with variables that are not projected", it.Column)
+			case readsAny(it.Expr, locals):
+				err = fmt.Errorf("plan: ORDER BY cannot use column %q inside an expression that redefines "+
+					"a variable the column is computed from", it.Column)
+			}
+			return it.Expr, true
+		}
+		return nil, false
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// rewriteScoped is ast.Rewrite with the local variables in scope passed to
+// fn: the variables of the list comprehensions and quantifiers around the
+// expression it is called with.
+func rewriteScoped(e ast.Expr, fn func(e ast.Expr, locals []string) (ast.Expr, bool)) ast.Expr {
+	var locals []string
+	var visit func(ast.Expr) (ast.Expr, bool)
+	rewrite := func(e ast.Expr) ast.Expr { return ast.Rewrite(e, visit) }
+	inScope := func(local string, body func()) {
+		locals = append(locals, local)
+		body()
+		locals = locals[:len(locals)-1]
+	}
+	visit = func(x ast.Expr) (ast.Expr, bool) {
+		if repl, ok := fn(x, locals); ok {
+			return repl, true
+		}
+		switch c := x.(type) {
+		case *ast.ListComprehension:
+			out := &ast.ListComprehension{Variable: c.Variable, List: rewrite(c.List), Pos: c.Pos}
+			inScope(c.Variable, func() { out.Where, out.Map = rewrite(c.Where), rewrite(c.Map) })
+			return out, true
+		case *ast.Quantifier:
+			out := &ast.Quantifier{Kind: c.Kind, Variable: c.Variable, List: rewrite(c.List), Pos: c.Pos}
+			inScope(c.Variable, func() { out.Where = rewrite(c.Where) })
+			return out, true
+		}
+		return nil, false
+	}
+	return rewrite(e)
+}
+
+// readsAny reports whether e reads one of the named variables.
+func readsAny(e ast.Expr, names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, v := range exprVars(e) {
+		if slices.Contains(names, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// deterministic reports whether evaluating e twice on the same row gives the
+// same value.
+func deterministic(e ast.Expr) bool {
+	ok := true
+	ast.Walk(e, func(x ast.Expr) bool {
+		if fc, isCall := x.(*ast.FunctionCall); isCall && strings.EqualFold(fc.Name, "rand") {
+			ok = false
+		}
+		return ok
+	})
+	return ok
 }
 
 // --- Expression helpers ---

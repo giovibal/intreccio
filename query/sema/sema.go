@@ -39,6 +39,8 @@ func Analyze(q *ast.Query) (*Result, error) {
 
 type analyzer struct {
 	result Result
+	// order is set while the sort keys of an ORDER BY are being checked.
+	order *orderScope
 }
 
 func (a *analyzer) errf(pos ast.Pos, format string, args ...any) *SemaError {
@@ -384,8 +386,12 @@ func (a *analyzer) with(sc *scope, w *ast.With) error {
 		next.define(name, exprPos(item.Expr))
 	}
 
-	// ORDER BY/SKIP/LIMIT/WHERE reference the projected columns.
-	if err := a.checkProjectionTail(next, w.OrderBy, w.Skip, w.Limit); err != nil {
+	// ORDER BY may also read the variables in scope before the projection;
+	// SKIP/LIMIT/WHERE reference the projected columns.
+	if err := a.checkOrderBy(sc, next, w.Items, w.Distinct, w.OrderBy); err != nil {
+		return err
+	}
+	if err := a.checkSkipLimit(next, w.Skip, w.Limit); err != nil {
 		return err
 	}
 	if w.Where != nil {
@@ -408,23 +414,28 @@ func (a *analyzer) ret(sc *scope, r *ast.Return) error {
 		return a.errf(r.Pos, "RETURN * is not allowed with no variables in scope")
 	}
 
-	// ORDER BY in RETURN may reference both the in-scope variables and the projected aliases.
+	projected := newScope()
+	cols := a.columns(sc, r.Star, r.Items, projected)
+	if err := a.checkOrderBy(sc, projected, r.Items, r.Distinct, r.OrderBy); err != nil {
+		return err
+	}
 	tail := newScope()
 	tail.merge(sc)
-	cols := a.columns(sc, r.Star, r.Items, tail)
-	if err := a.checkProjectionTail(tail, r.OrderBy, r.Skip, r.Limit); err != nil {
+	tail.merge(projected)
+	if err := a.checkSkipLimit(tail, r.Skip, r.Limit); err != nil {
 		return err
 	}
 	a.result.Columns = cols
 	return nil
 }
 
-// columns computes the output column names and also registers them in tail (so
-// ORDER BY can reference them).
-func (a *analyzer) columns(sc *scope, star bool, items []ast.ReturnItem, tail *scope) []string {
+// columns computes the output column names and also registers them in
+// projected, the scope the projection leaves behind.
+func (a *analyzer) columns(sc *scope, star bool, items []ast.ReturnItem, projected *scope) []string {
 	var cols []string
 	if star {
 		cols = append(cols, sc.order...)
+		projected.merge(sc)
 	}
 	for _, item := range items {
 		name := item.Alias
@@ -432,17 +443,82 @@ func (a *analyzer) columns(sc *scope, star bool, items []ast.ReturnItem, tail *s
 			name = exprString(item.Expr)
 		}
 		cols = append(cols, name)
-		tail.define(name, exprPos(item.Expr))
+		projected.define(name, exprPos(item.Expr))
 	}
 	return cols
 }
 
-func (a *analyzer) checkProjectionTail(sc *scope, orderBy []ast.SortItem, skip, limit ast.Expr) error {
+// orderScope is what ORDER BY may read besides the names in its scope.
+type orderScope struct {
+	// items are the projected expressions: a sort key may repeat one of them
+	// (ORDER BY count(*) after RETURN count(*)) wherever it is written.
+	items []ast.Expr
+	// hidden is the scope before the projection when the projection is
+	// DISTINCT or aggregates: its variables no longer identify a row, so a
+	// sort key cannot read them.
+	hidden *scope
+}
+
+// checkOrderBy validates the sort keys of a RETURN / WITH. pre is the scope
+// before the projection, projected the one after it.
+//
+// A plain projection keeps one output row per input row, so its ORDER BY may
+// read the variables of both scopes (a projected name wins). A DISTINCT or
+// aggregating projection merges rows: only the projected columns and
+// expressions are left to sort on.
+func (a *analyzer) checkOrderBy(pre, projected *scope, items []ast.ReturnItem, distinct bool, orderBy []ast.SortItem) error {
+	if len(orderBy) == 0 {
+		return nil
+	}
+	order := &orderScope{}
+	merging := distinct
+	for _, item := range items {
+		order.items = append(order.items, item.Expr)
+		if hasAggregate(item.Expr) {
+			merging = true
+		}
+	}
+	sc := projected
+	if merging {
+		order.hidden = pre
+	} else {
+		sc = newScope()
+		sc.merge(pre)
+		sc.merge(projected)
+	}
+
+	a.order = order
+	defer func() { a.order = nil }()
 	for _, s := range orderBy {
 		if err := a.checkExpr(sc, s.Expr, false); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// repeatsProjection reports whether e is one of the projected expressions.
+func (o *orderScope) repeatsProjection(e ast.Expr) bool {
+	for _, item := range o.items {
+		if ast.Equal(e, item) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAggregate(e ast.Expr) bool {
+	found := false
+	ast.Walk(e, func(x ast.Expr) bool {
+		if fc, ok := x.(*ast.FunctionCall); ok && isAggregate(fc.Name) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+func (a *analyzer) checkSkipLimit(sc *scope, skip, limit ast.Expr) error {
 	if skip != nil {
 		if err := a.checkExpr(sc, skip, false); err != nil {
 			return err
@@ -458,6 +534,9 @@ func (a *analyzer) checkProjectionTail(sc *scope, orderBy []ast.SortItem, skip, 
 
 // checkExpr validates variable references and the use of aggregations.
 func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
+	if a.order != nil && a.order.repeatsProjection(e) {
+		return nil
+	}
 	switch ex := e.(type) {
 	case *ast.Literal:
 		return nil
@@ -469,6 +548,10 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 		return nil
 	case *ast.Variable:
 		if !sc.has(ex.Name) {
+			if a.order != nil && a.order.hidden != nil && a.order.hidden.has(ex.Name) {
+				return a.errf(ex.Pos, "ORDER BY cannot use variable %s: after DISTINCT or an aggregation "+
+					"only the projected columns and expressions can be sorted on", ex.Name)
+			}
 			return a.errf(ex.Pos, "undefined variable: %s", ex.Name)
 		}
 		return nil
@@ -555,6 +638,10 @@ func (a *analyzer) checkExpr(sc *scope, e ast.Expr, inAgg bool) error {
 		agg := isAggregate(ex.Name)
 		if agg && inAgg {
 			return a.errf(ex.Pos, "aggregation nested inside another aggregation")
+		}
+		if agg && a.order != nil {
+			return a.errf(ex.Pos, "ORDER BY cannot compute %s(...): an aggregation used as a sort key "+
+				"must also be one of the projected expressions", strings.ToLower(ex.Name))
 		}
 		childAgg := inAgg || agg
 		for _, arg := range ex.Args {
