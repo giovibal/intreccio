@@ -46,6 +46,7 @@ internal/storage/     Store interface + codec + adapters (badger, bolt)
 internal/catalog/     dictionaries, ID counters, index registry
 internal/graph/       model + transactional CRUD + traversal primitives
 internal/changefeed/  live queries: delta capture at commit + watcher registry
+internal/wire/        cluster wire protocol: frames, handshake, message codecs
 internal/exec/        executor operators (Volcano) — the engine
 query/                public openCypher front-end: ast, parser, sema, plan
 intreccio.go           public embeddable API (package intreccio)

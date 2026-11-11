@@ -58,6 +58,7 @@ keeps the nil-in-container limitation and gives no row identity.
   forwarded.
 - The forwarding reply format changes (`ForwardReply.Rows` is `[][]byte`): the
   members of a cluster must run the same version across this change. Parameters
-  still travel through gob until the transport of ADR 0011 replaces it.
+  travelled through gob until the transport of ADR 0011 replaced it; they now
+  use this encoding as well.
 - A parameter of an unsupported Go type returned as-is (`RETURN $p`) still works
   embedded and still fails when forwarded, now with an explicit encoding error.

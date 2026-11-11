@@ -264,11 +264,17 @@ Notes for operators:
 - It uses **full replication** to the quorum (each voter holds the whole graph);
   sharding is out of scope.
 - **TLS is opt-in**: set `Config.TLS` to encrypt the Raft transport and the
-  forwarding RPC endpoint and (with a CA) require mutually authenticated peers.
+  forwarding endpoint and (with a CA) require mutually authenticated peers.
+
+Queries forwarded between members honour the caller's `context` and
+`WithMaxRows` end to end: cancelling a query on a follower or a client stops its
+execution on the leader. Members speak a versioned binary protocol on the
+forwarding address, so **every member of a cluster must run the same version**;
+a mismatch is reported at connection time.
 
 ### Securing the cluster with TLS
 
-The Raft transport and the forwarding RPC endpoint use plaintext TCP by default.
+The Raft transport and the forwarding endpoint use plaintext TCP by default.
 Set `Config.TLS` to encrypt both and, when a CA is supplied, require mutually
 authenticated peers:
 

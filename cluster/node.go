@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -23,6 +24,7 @@ import (
 	"github.com/giovibal/intreccio/internal/changefeed"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 const (
@@ -52,11 +54,14 @@ type Node struct {
 	trans *raft.NetworkTransport
 	log   *raftboltdb.BoltStore
 
-	// forwardAddrByID maps a Raft ServerID to that node's forwarding RPC address.
+	// forwardAddrByID maps a Raft ServerID to that node's forwarding address.
 	forwardAddrByID map[string]string
-	fwdListener     net.Listener
-	localExec       localExecutor
-	applyTimeout    time.Duration
+	// fwd serves the requests other members forward to this node.
+	fwd *forwardServer
+	// localExec is set once the owning DB exists, possibly while the forward
+	// server is already accepting, hence the atomic pointer.
+	localExec    atomic.Pointer[localExecutor]
+	applyTimeout time.Duration
 	// tlsServer/tlsClient are nil on a plaintext cluster.
 	tlsServer *tls.Config
 	tlsClient *tls.Config
@@ -179,7 +184,7 @@ func newNode(cfg Config) (*Node, error) {
 		storeMu:         storeMu,
 		tlsServer:       tlsServer,
 		tlsClient:       tlsClient,
-		pool:            newConnPoolTLS(0, tlsClient),
+		pool:            newConnPool(tlsClient),
 		stop:            make(chan struct{}),
 	}
 
@@ -234,19 +239,21 @@ func (n *Node) ReadBarrier() error {
 	return nil
 }
 
-// Forward sends a query to the leader for execution (used by followers for
-// writes and linearizable reads). ctx bounds the wait for a reply.
-func (n *Node) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error) {
-	return n.forward(ctx, cypher, params, write, linearizable)
+// Forward sends a request to the leader for execution (used by followers for
+// writes and linearizable reads). ctx bounds the wait for a reply, and ending
+// it stops the execution on the leader.
+func (n *Node) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+	return n.callLeader(ctx, req)
 }
 
 // Local reports that a voter can serve reads from its local store.
 func (n *Node) Local() bool { return true }
 
-// SetLocalExecutor wires the root package's local query execution, used by the
-// leader to run forwarded queries.
-func (n *Node) SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]byte, error)) {
-	n.localExec = fn
+// SetLocalExecutor wires the root package's local query execution, used to run
+// the requests other members forward to this node.
+func (n *Node) SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error)) {
+	exec := localExecutor(fn)
+	n.localExec.Store(&exec)
 }
 
 // SetChangeHub wires the hub of the owning DB into the FSM, which reports every
@@ -318,14 +325,19 @@ func (n *Node) Close() error {
 			firstErr = err
 		}
 	}
-	if n.fwdListener != nil {
-		keep(n.fwdListener.Close())
+	if n.fwd != nil {
+		keep(n.fwd.shutdown()) // stop accepting; cancel forwarded requests
 	}
 	if n.pool != nil {
 		keep(n.pool.Close())
 	}
 	if n.raft != nil {
 		keep(n.raft.Shutdown().Error())
+	}
+	if n.fwd != nil {
+		// Raft is down, so no forwarded request can still be waiting on it:
+		// let them all return before the store goes away under them.
+		n.fwd.wait()
 	}
 	if n.trans != nil {
 		keep(n.trans.Close())

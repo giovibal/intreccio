@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 // client is a dataless cluster member: it stores nothing and forwards every
@@ -41,7 +42,7 @@ func newClient(cfg Config) (*client, error) {
 			return nil, err
 		}
 	}
-	return &client{peers: voters, pool: newConnPoolTLS(0, tlsClient)}, nil
+	return &client{peers: voters, pool: newConnPool(tlsClient)}, nil
 }
 
 // IsLeader is always false for a client.
@@ -53,30 +54,27 @@ func (c *client) Local() bool { return false }
 // ReadBarrier is never invoked on a client (it is not the leader).
 func (c *client) ReadBarrier() error { return nil }
 
-// Forward sends the query to a voter, trying each in turn (round-robin with
+// Forward sends the request to a voter, trying each in turn (round-robin with
 // failover) until one answers. The contacted voter serves default reads locally
 // and proxies writes/linearizable reads to the leader.
-func (c *client) Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error) {
-	args := &ForwardArgs{
-		Cypher:       cypher,
-		Params:       sanitizeParams(params),
-		Write:        write,
-		Linearizable: linearizable,
-	}
+func (c *client) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	start := int(c.next.Add(1))
 	var lastErr error
 	for i := range c.peers {
 		p := c.peers[(start+i)%len(c.peers)]
-		rep, err := c.pool.call(ctx, p.ForwardAddr, args)
-		if err != nil {
-			lastErr = err
-			continue // voter unreachable: try the next one
+		cols, rows, err := c.pool.call(ctx, p.ForwardAddr, req)
+		if err == nil {
+			return cols, rows, nil
 		}
-		if rep.Err != "" {
-			lastErr = errors.New(rep.Err)
-			continue // e.g. no leader momentarily: try another voter
+		if ctx.Err() != nil {
+			return nil, nil, err // the caller gave up: no point trying elsewhere
 		}
-		return rep.Columns, rep.Rows, nil
+		var remote *wire.Error
+		if errors.As(err, &remote) && remote.Code != wire.CodeGeneric {
+			return nil, nil, err // a definite answer about the query itself
+		}
+		// Voter unreachable, or e.g. no leader momentarily: try the next one.
+		lastErr = err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("cluster: no voters available")

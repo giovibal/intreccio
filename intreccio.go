@@ -3,6 +3,7 @@ package intreccio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/giovibal/intreccio/internal/exec"
 	"github.com/giovibal/intreccio/internal/storage"
 	badgerstore "github.com/giovibal/intreccio/internal/storage/badger"
+	"github.com/giovibal/intreccio/internal/wire"
 	"github.com/giovibal/intreccio/query/ast"
 	"github.com/giovibal/intreccio/query/parser"
 	"github.com/giovibal/intreccio/query/plan"
@@ -58,7 +60,7 @@ func New(be Backend) *DB {
 		db.watchable = true
 	}
 	if s, ok := be.(localExecutorSetter); ok {
-		s.SetLocalExecutor(db.executeLocalText)
+		s.SetLocalExecutor(db.executeLocal)
 	}
 	return db
 }
@@ -92,17 +94,18 @@ type clusterBackend interface {
 	// dataless client returns false, so every query is forwarded.
 	Local() bool
 	ReadBarrier() error
-	// Forward runs the query on another member and returns its rows in the
-	// canonical row encoding (see rowcodec.go), which the backend carries as
-	// opaque bytes.
-	Forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error)
+	// Forward runs the request on another member and returns its rows in the
+	// canonical row encoding (see rowcodec.go). The backend carries parameters
+	// and rows as opaque bytes. Ending ctx stops the remote execution too.
+	Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error)
 }
 
-// localExecutorSetter lets a backend receive this DB's local executor (used by a
-// leader to run forwarded queries). The executor returns rows in the canonical
-// row encoding, so the backend never needs to know the result value types.
+// localExecutorSetter lets a backend receive this DB's local executor (used to
+// run the requests other members forward to it). The executor takes parameters
+// and returns rows in the canonical row encoding, so the backend never needs to
+// know the value model.
 type localExecutorSetter interface {
-	SetLocalExecutor(fn func(cypher string, params map[string]any) ([]string, [][]byte, error))
+	SetLocalExecutor(fn func(ctx context.Context, req wire.Request) ([]string, [][]byte, error))
 }
 
 // QueryOption configures a single Query call.
@@ -238,9 +241,22 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 			(write && !cb.IsLeader()) ||
 			(o.linearizable && !write && !cb.IsLeader())
 		if forward {
-			cols, enc, err := cb.Forward(ctx, cypher, params, write, o.linearizable && !write)
+			encParams, err := encodeParams(params)
 			if err != nil {
 				return nil, fmt.Errorf("query: %w", err)
+			}
+			req := wire.Request{
+				Cypher:       cypher,
+				Params:       encParams,
+				Write:        write,
+				Linearizable: o.linearizable && !write,
+			}
+			if !write {
+				req.MaxRows = o.maxRows // writes are never capped, as locally
+			}
+			cols, enc, err := cb.Forward(ctx, req)
+			if err != nil {
+				return nil, fmt.Errorf("query: %w", fromRemote(err))
 			}
 			rows, err := decodeRows(enc)
 			if err != nil {
@@ -290,12 +306,16 @@ func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, para
 	return result, nil
 }
 
-// executeLocalText parses and runs a query entirely on the local node, returning
-// the columns and the rows in the canonical row encoding. It is wired into a
-// clustered backend so the leader can execute forwarded queries; it never
-// forwards.
-func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, [][]byte, error) {
-	q, err := parser.Parse(cypher)
+// executeLocal parses and runs a forwarded request entirely on the local node,
+// returning the columns and the rows in the canonical row encoding. It is wired
+// into a clustered backend so a member can execute the queries others forward
+// to it; it never forwards. ctx bounds the execution.
+func (db *DB) executeLocal(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+	params, err := decodeParams(req.Params)
+	if err != nil {
+		return nil, nil, err
+	}
+	q, err := parser.Parse(req.Cypher)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -306,15 +326,66 @@ func (db *DB) executeLocalText(cypher string, params map[string]any) ([]string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err := db.runLocal(context.Background(), q, semaRes.Columns, params, isWriteQuery(q), 0)
+	write := isWriteQuery(q)
+	maxRows := req.MaxRows
+	if write {
+		maxRows = 0
+	}
+	res, err := db.runLocal(ctx, q, semaRes.Columns, params, write, maxRows)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, toRemote(err)
 	}
 	enc, err := encodeRows(res.Rows)
 	if err != nil {
 		return nil, nil, err
 	}
 	return res.Columns, enc, nil
+}
+
+// toRemote tags an error that the requesting member must be able to recognise
+// with its wire code; any other error travels as its message.
+func toRemote(err error) error {
+	if errors.Is(err, ErrResultLimit) {
+		return &wire.Error{Code: wire.CodeResultLimit, Msg: err.Error()}
+	}
+	return err
+}
+
+// fromRemote is the inverse of toRemote on the requesting member.
+func fromRemote(err error) error {
+	var remote *wire.Error
+	if errors.As(err, &remote) && remote.Code == wire.CodeResultLimit {
+		return ErrResultLimit
+	}
+	return err
+}
+
+// encodeParams serializes a query's parameter map for forwarding, as a
+// one-value row. A nil map stays empty bytes.
+func encodeParams(params map[string]any) ([]byte, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	return encodeRow([]any{params})
+}
+
+// decodeParams is the inverse of encodeParams.
+func decodeParams(b []byte) (map[string]any, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	row, err := decodeRow(b)
+	if err != nil {
+		return nil, err
+	}
+	if len(row) != 1 {
+		return nil, errors.New("intreccio: malformed parameters")
+	}
+	params, ok := row[0].(map[string]any)
+	if !ok {
+		return nil, errors.New("intreccio: malformed parameters")
+	}
+	return params, nil
 }
 
 // runQuery plans and executes an already-parsed, already-analyzed query against

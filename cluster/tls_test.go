@@ -10,13 +10,13 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
-	"net/rpc"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/giovibal/intreccio"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 // writeTestCerts creates a throwaway CA and a leaf certificate valid for
@@ -143,7 +143,7 @@ func TestTLSClusterClient(t *testing.T) {
 }
 
 // TestTLSRejectsPlaintext verifies the forwarding endpoint requires TLS: a
-// plaintext RPC client cannot execute a query against it.
+// plaintext member cannot execute a query against it.
 func TestTLSRejectsPlaintext(t *testing.T) {
 	ca, cert, key := writeTestCerts(t)
 	cfg := Config{
@@ -161,14 +161,11 @@ func TestTLSRejectsPlaintext(t *testing.T) {
 	}
 	defer func() { _ = node.Close() }()
 
-	c, err := rpc.Dial("tcp", cfg.ForwardAddr)
-	if err != nil {
-		t.Fatalf("plaintext dial: %v", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	var reply ForwardReply
-	if err := c.Call("Forward.Query", &ForwardArgs{Cypher: "RETURN 1"}, &reply); err == nil {
+	plaintext := newConnPool(nil)
+	defer func() { _ = plaintext.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, _, err := plaintext.call(ctx, cfg.ForwardAddr, wire.Request{Cypher: "RETURN 1"}); err == nil {
 		t.Fatal("plaintext call against a TLS endpoint unexpectedly succeeded")
 	}
 }

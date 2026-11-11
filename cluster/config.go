@@ -19,13 +19,13 @@ const (
 )
 
 // Peer identifies a voter in the cluster: its Raft server identity/address and
-// the address of its forwarding RPC endpoint. Every node is configured with the
+// the address of its forwarding endpoint. Every node is configured with the
 // full set of voters (including itself) so any node can locate the leader's
 // forwarding endpoint.
 type Peer struct {
 	ID          string // Raft ServerID
 	RaftAddr    string // Raft transport address (host:port)
-	ForwardAddr string // forwarding RPC address (host:port)
+	ForwardAddr string // forwarding address (host:port)
 }
 
 // Config configures a clustered node. It is supplied from the library by the
@@ -37,7 +37,7 @@ type Config struct {
 	DataDir string
 	// BindAddr is the address the Raft transport listens on (host:port).
 	BindAddr string
-	// ForwardAddr is the address the forwarding RPC server listens on (host:port).
+	// ForwardAddr is the address the forwarding server listens on (host:port).
 	// Followers forward writes (and linearizable reads) to the leader here.
 	ForwardAddr string
 	// Role is the part this node plays. Phases B–C: RoleVoter only.
@@ -49,7 +49,7 @@ type Config struct {
 	// Peers is the full set of voters (including this node), used to add members
 	// after bootstrap and to resolve the leader's forwarding address.
 	Peers []Peer
-	// TLS, when non-nil, encrypts the Raft transport and the forwarding RPC
+	// TLS, when non-nil, encrypts the Raft transport and the forwarding
 	// endpoint and (if a CA is configured) authenticates peers with mutual TLS.
 	// Nil keeps plaintext TCP. Must be the same on every node.
 	TLS *TLSConfig

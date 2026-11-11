@@ -3,111 +3,53 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"net"
-	"net/rpc"
 
 	"github.com/hashicorp/raft"
+
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
-// localExecutor runs a query string entirely on this node (no forwarding) and
+// localExecutor runs a request entirely on this node (no forwarding) and
 // returns the columns plus the rows in the root package's canonical row
 // encoding. It is injected by the root package, which owns the Cypher pipeline
-// and the result value model; the cluster layer carries rows as opaque bytes
-// and stays ignorant of both.
-type localExecutor func(cypher string, params map[string]any) (cols []string, rows [][]byte, err error)
-
-// nullValue is a gob-encodable stand-in for a nil interface element, since gob
-// cannot encode a nil interface inside a slice/map. Params are sanitized on the
-// wire and restored at the destination.
-type nullValue struct{}
-
-func init() {
-	// Register the scalar types that may appear in query parameters.
-	gob.Register(nullValue{})
-	gob.Register(int(0))
-	gob.Register(int64(0))
-	gob.Register(float64(0))
-	gob.Register(false)
-	gob.Register("")
-	gob.Register([]any(nil))
-	gob.Register(map[string]any(nil))
-}
-
-// ForwardArgs is the request sent to the leader. It is exported only because
-// net/rpc requires exported argument types; it is not part of the user API.
-type ForwardArgs struct {
-	Cypher       string
-	Params       map[string]any
-	Write        bool
-	Linearizable bool
-}
-
-// ForwardReply is the leader's response. Rows holds one canonically encoded
-// row per element. Exported for the same reason as ForwardArgs.
-type ForwardReply struct {
-	Columns []string
-	Rows    [][]byte
-	Err     string
-}
+// and the result value model; the cluster layer carries parameters and rows as
+// opaque bytes and stays ignorant of both. ctx ends when the requester gives
+// up, so the execution can stop too.
+type localExecutor func(ctx context.Context, req wire.Request) (cols []string, rows [][]byte, err error)
 
 // needsLeader reports whether the request must be served by the leader: writes
 // (replicated) and linearizable reads. Default reads can be served by any voter.
-func (a *ForwardArgs) needsLeader() bool { return a.Write || a.Linearizable }
+func needsLeader(req wire.Request) bool { return req.Write || req.Linearizable }
 
-// forwardService is the net/rpc receiver registered on every voter. Followers
-// dial the leader directly; dataless clients dial any voter, which serves
-// default reads locally and proxies leader-bound requests to the leader.
-type forwardService struct{ node *Node }
-
-// Query serves a forwarded query. Errors are returned in reply.Err (not as the
-// RPC error) so the caller sees the original message.
-func (s *forwardService) Query(args *ForwardArgs, reply *ForwardReply) error {
-	n := s.node
-
-	// Leader-bound request received by a non-leader voter: proxy to the leader.
-	// Bound the proxy wait by the apply timeout.
-	if args.needsLeader() && n.raft.State() != raft.Leader {
-		ctx, cancel := context.WithTimeout(context.Background(), n.applyTimeout)
+// serve handles a request received from another member. Followers dial the
+// leader directly; dataless clients dial any voter, which serves default reads
+// locally and proxies leader-bound requests to the leader.
+func (n *Node) serve(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+	// Leader-bound request received by a non-leader voter: proxy to the leader,
+	// bounding the wait by the apply timeout.
+	if needsLeader(req) && n.raft.State() != raft.Leader {
+		ctx, cancel := context.WithTimeout(ctx, n.applyTimeout)
 		defer cancel()
-		rep, err := n.callLeader(ctx, args)
-		if err != nil {
-			reply.Err = err.Error()
-			return nil
-		}
-		*reply = *rep
-		return nil
+		return n.callLeader(ctx, req)
 	}
 
-	if args.Linearizable {
+	if req.Linearizable {
 		if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
-			reply.Err = fmt.Sprintf("cluster: read barrier: %v", err)
-			return nil
+			return nil, nil, fmt.Errorf("cluster: read barrier: %w", err)
 		}
 	}
-	exec := n.localExec
+	exec := n.localExec.Load()
 	if exec == nil {
-		reply.Err = "cluster: no local executor wired"
-		return nil
+		return nil, nil, errors.New("cluster: no local executor wired")
 	}
-	cols, rows, err := exec(args.Cypher, desanitizeParams(args.Params))
-	if err != nil {
-		reply.Err = err.Error()
-		return nil
-	}
-	reply.Columns = cols
-	reply.Rows = rows
-	return nil
+	return (*exec)(ctx, req)
 }
 
-// startForwardServer starts serving forwarding RPCs on cfg.ForwardAddr.
+// startForwardServer starts serving forwarded requests on cfg.ForwardAddr.
 func (n *Node) startForwardServer() error {
-	srv := rpc.NewServer()
-	if err := srv.RegisterName("Forward", &forwardService{node: n}); err != nil {
-		return fmt.Errorf("cluster: register forward service: %w", err)
-	}
 	var (
 		l   net.Listener
 		err error
@@ -120,78 +62,21 @@ func (n *Node) startForwardServer() error {
 	if err != nil {
 		return fmt.Errorf("cluster: forward listen: %w", err)
 	}
-	n.fwdListener = l
-	go srv.Accept(l) // returns when the listener is closed
+	n.fwd = newForwardServer(l, n.serve)
+	n.fwd.start()
 	return nil
 }
 
-// callLeader resolves the current leader's forwarding address and forwards args
-// to it unchanged (used by a follower/voter that received a leader-bound query).
-func (n *Node) callLeader(ctx context.Context, args *ForwardArgs) (*ForwardReply, error) {
+// callLeader resolves the current leader's forwarding address and sends req to
+// it (used by a voter for leader-bound requests, its own or proxied).
+func (n *Node) callLeader(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	_, leaderID := n.raft.LeaderWithID()
 	if leaderID == "" {
-		return nil, errors.New("cluster: no leader available")
+		return nil, nil, errors.New("cluster: no leader available")
 	}
 	addr, ok := n.forwardAddrByID[string(leaderID)]
 	if !ok {
-		return nil, fmt.Errorf("cluster: no forwarding address for leader %q", leaderID)
+		return nil, nil, fmt.Errorf("cluster: no forwarding address for leader %q", leaderID)
 	}
-	return n.pool.call(ctx, addr, args)
-}
-
-// forward is the voter-side entry used by the root router: it forwards a query
-// to the leader (writes, linearizable reads) and returns the encoded rows.
-func (n *Node) forward(ctx context.Context, cypher string, params map[string]any, write, linearizable bool) ([]string, [][]byte, error) {
-	args := &ForwardArgs{
-		Cypher:       cypher,
-		Params:       sanitizeParams(params),
-		Write:        write,
-		Linearizable: linearizable,
-	}
-	rep, err := n.callLeader(ctx, args)
-	if err != nil {
-		return nil, nil, err
-	}
-	if rep.Err != "" {
-		return nil, nil, errors.New(rep.Err)
-	}
-	return rep.Columns, rep.Rows, nil
-}
-
-// --- nil-safe wire sanitization -------------------------------------------------
-
-func sanitizeValue(v any) any {
-	if v == nil {
-		return nullValue{}
-	}
-	return v
-}
-
-func desanitizeValue(v any) any {
-	if _, ok := v.(nullValue); ok {
-		return nil
-	}
-	return v
-}
-
-func sanitizeParams(params map[string]any) map[string]any {
-	if params == nil {
-		return nil
-	}
-	out := make(map[string]any, len(params))
-	for k, v := range params {
-		out[k] = sanitizeValue(v)
-	}
-	return out
-}
-
-func desanitizeParams(params map[string]any) map[string]any {
-	if params == nil {
-		return nil
-	}
-	out := make(map[string]any, len(params))
-	for k, v := range params {
-		out[k] = desanitizeValue(v)
-	}
-	return out
+	return n.pool.call(ctx, addr, req)
 }

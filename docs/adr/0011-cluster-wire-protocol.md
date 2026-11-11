@@ -21,8 +21,9 @@ One TCP (or TLS) connection per peer pair carries many logical streams:
     frame = length | streamID | type | payload
 
 Frame types: `Query`, `Rows` (chunked), `End`, `Error`, `Subscribe`, `Change`,
-`Cancel`, `Ping`. The first frame of a connection is a handshake carrying the
-**protocol version**, so incompatible members fail fast and explicitly.
+`Cancel`, `Ping`. A connection starts with a handshake carrying the
+**protocol version**, so incompatible members fail fast and explicitly. The
+exact layout is in "The protocol as implemented" below.
 
 Rows and parameters travel in the canonical row encoding of ADR 0012; the
 cluster layer treats them as opaque bytes and stays ignorant of the Cypher
@@ -53,7 +54,50 @@ this invisible to the application:
 
 The cost is the result set held in memory on the client as well.
 
+## The protocol as implemented (version 1)
+Encoding lives in `internal/wire`; scheduling in `cluster` (`mux.go` for the
+dialling side, `server.go` for the accepting side, `pool.go` for one shared
+connection per member address).
+
+    connection = handshake frame*
+    handshake  = "ITRC" version(2, big-endian) reserved(2)
+    frame      = length(4, big-endian) stream(4, big-endian) type(1) payload
+
+- **Handshake**: the dialling side sends first and the other side always
+  answers, even on a mismatch, so the dialler reports which version it met.
+  A peer that does not send the magic is dropped without a reply.
+- **Frames**: `Query` (opens a stream), `Result` (column names), `Rows`
+  (a chunk of rows), `End`, `Error`, `Cancel`, and `Ping` / `Pong` on stream 0.
+  The dialling side allocates stream IDs. A frame the receiver may not be sent
+  closes the connection.
+- **Request**: flags (write, linearizable), row cap, relative timeout, query
+  text, parameters. The timeout is the caller's remaining deadline: the member
+  that executes the query stops at it even if no `Cancel` arrives. Cancelling
+  the caller's context sends `Cancel`, which cancels the execution's context;
+  a proxying voter passes both on to the leader.
+- **Errors** carry a code next to the message, so a sentinel such as
+  `ErrResultLimit` survives forwarding.
+- **Limits**: 32 MiB per frame (so per row and per request); a result is split
+  into `Rows` frames of about 256 KiB. A row over the limit is an error reply,
+  not a broken connection. A frame is never trusted to deliver the length it
+  announces. The decoders are fuzzed.
+- **Keepalive**: the dialling side pings every 3 s; either side drops a
+  connection silent for 10 s, cancelling the requests it was serving. This is
+  what detects a member that died without closing, since a multiplexed
+  connection cannot be abandoned just because one request timed out.
+- **Retry**: as before, a request whose connection fails before the reply is
+  complete is retried once on a fresh connection, and a dataless client then
+  moves on to the next voter. See the caveat below.
+
+What it does **not** do yet: a result is chunked on the wire but still
+materialised on both ends — the executor returns whole results. Streaming rows
+end to end needs an iterator API in the executor.
+
 ## Consequences
+- **At-least-once writes (unchanged, now explicit)**: retrying after a
+  connection failure cannot tell "never arrived" from "applied, reply lost", so
+  a forwarded write can in rare cases be applied twice. This was already true
+  with `net/rpc`; making forwarded writes idempotent is a separate decision.
 - The forwarding wire format changes incompatibly: all members of a cluster must
   run the same minor version across this change (pre-1.0, a minor bump).
 - `net/rpc`, gob and the nil-sanitising helpers are removed from the `cluster`
