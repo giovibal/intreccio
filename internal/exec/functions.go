@@ -370,8 +370,6 @@ func sizeOf(name string, v any) (any, error) {
 		return int64(len([]rune(x))), nil
 	case []any:
 		return int64(len(x)), nil
-	case []graph.Edge:
-		return int64(len(x)), nil
 	case graph.Path:
 		if name == "length" {
 			return int64(len(x.Rels)), nil // a path's length is its number of hops
