@@ -618,10 +618,16 @@ type sortOp struct {
 	ctx    *Context
 	input  op
 	keys   []plan.SortKey
-	rows   []binding
+	rows   []sortRow
 	pos    int
 	loaded bool
 	err    error
+}
+
+// sortRow is a buffered row with its sort keys, evaluated once.
+type sortRow struct {
+	row  binding
+	keys []any
 }
 
 func (s *sortOp) next() (binding, bool, error) {
@@ -634,7 +640,7 @@ func (s *sortOp) next() (binding, bool, error) {
 	if s.pos >= len(s.rows) {
 		return nil, false, nil
 	}
-	r := s.rows[s.pos]
+	r := s.rows[s.pos].row
 	s.pos++
 	return r, true, nil
 }
@@ -654,13 +660,20 @@ func (s *sortOp) load() {
 		if !ok {
 			break
 		}
-		s.rows = append(s.rows, b)
+		// A key that cannot be evaluated fails the query: sorting it as null
+		// would return rows in an order nobody asked for.
+		keys := make([]any, len(s.keys))
+		for i, k := range s.keys {
+			if keys[i], err = eval(k.Expr, b, s.ctx); err != nil {
+				s.err = err
+				return
+			}
+		}
+		s.rows = append(s.rows, sortRow{row: b, keys: keys})
 	}
 	sort.SliceStable(s.rows, func(i, j int) bool {
-		for _, k := range s.keys {
-			vi := s.sortValue(s.rows[i], k.Expr)
-			vj := s.sortValue(s.rows[j], k.Expr)
-			c, ok := compareValues(vi, vj)
+		for n, k := range s.keys {
+			c, ok := compareValues(s.rows[i].keys[n], s.rows[j].keys[n])
 			if !ok || c == 0 {
 				continue
 			}
@@ -671,33 +684,6 @@ func (s *sortOp) load() {
 		}
 		return false
 	})
-}
-
-// sortValue resolves a sort key: if it names an output column it uses that value,
-// otherwise it evaluates the expression against the row.
-func (s *sortOp) sortValue(b binding, e ast.Expr) any {
-	if col := columnKey(e); col != "" {
-		if v, ok := b[col]; ok {
-			return v
-		}
-	}
-	v, err := eval(e, b, s.ctx)
-	if err != nil {
-		return nil
-	}
-	return v
-}
-
-func columnKey(e ast.Expr) string {
-	switch ex := e.(type) {
-	case *ast.Variable:
-		return ex.Name
-	case *ast.PropertyAccess:
-		if v, ok := ex.Target.(*ast.Variable); ok {
-			return v.Name + "." + ex.Key
-		}
-	}
-	return ""
 }
 
 type skip struct {
