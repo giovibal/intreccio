@@ -140,6 +140,20 @@ func WithMaxRows(limit int) QueryOption {
 // ErrResultLimit is returned by Query when a result exceeds WithMaxRows.
 var ErrResultLimit = exec.ErrResultLimit
 
+// ErrWriteOutcomeUnknown is returned by a write on a clustered database when
+// it cannot be told whether the write was applied: it was handed over for
+// replication, or sent to the member that runs it, and the answer never came
+// (a connection failed, leadership changed, the context ended first). The
+// write is never repeated automatically, because repeating one that was
+// applied would apply it twice.
+//
+// It is the only error after which a write may have taken effect; any other
+// error means it did not. To recover, read back what the write was meant to
+// change, or repeat it if it is idempotent (MERGE, SET). An error that also
+// matches context.Canceled or context.DeadlineExceeded tells why the wait
+// ended. An embedded, non-clustered database never returns it.
+var ErrWriteOutcomeUnknown = errors.New("intreccio: write outcome unknown")
+
 // ErrConflict is returned by Query when a write kept conflicting with
 // concurrent writes to the same data, even after automatic retries with
 // backoff. Nothing is committed and the write can be retried. It is rare: it
@@ -288,7 +302,7 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 				MaxRows:      o.maxRows,
 			})
 			if err != nil {
-				return nil, fmt.Errorf("query: %w", fromRemote(err))
+				return nil, fmt.Errorf("query: %w", forwardError(ctx, err))
 			}
 			rows, err := decodeRows(enc)
 			if err != nil {
@@ -319,7 +333,9 @@ func (db *DB) runLocal(ctx context.Context, q *ast.Query, columns []string, para
 			return runQuery(txn, q, columns, params, ctx, 0)
 		})
 		if err != nil {
-			return nil, err
+			// A clustered backend reports a write it could not see through
+			// with a wire code, here too: give it its sentinel.
+			return nil, fromRemote(err)
 		}
 		return res.(*Result), nil
 	}
@@ -359,13 +375,19 @@ func (db *DB) executeLocal(ctx context.Context, req wire.Request) ([]string, [][
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err := db.runLocal(ctx, q, semaRes.Columns, params, isWriteQuery(q), req.MaxRows)
+	write := isWriteQuery(q)
+	res, err := db.runLocal(ctx, q, semaRes.Columns, params, write, req.MaxRows)
 	if err != nil {
 		return nil, nil, toRemote(err)
 	}
 	enc, err := encodeRows(res.Rows)
 	if err != nil {
-		return nil, nil, err
+		if write {
+			// Applied already: the requester must not read this error as a
+			// write that did not happen.
+			err = fmt.Errorf("%w: applied, but its result cannot be encoded: %v", ErrWriteOutcomeUnknown, err)
+		}
+		return nil, nil, toRemote(err)
 	}
 	return res.Columns, enc, nil
 }
@@ -383,6 +405,7 @@ var remoteSentinels = []struct {
 	{wire.CodeConstraintViolation, ErrConstraintViolation},
 	{wire.CodeDeadlineExceeded, context.DeadlineExceeded},
 	{wire.CodeCanceled, context.Canceled},
+	{wire.CodeOutcomeUnknown, ErrWriteOutcomeUnknown},
 }
 
 // toRemote tags an error that the requesting member must be able to recognise
@@ -415,6 +438,27 @@ func fromRemote(err error) error {
 	}
 	return err
 }
+
+// forwardError is the error of a forwarded request as the caller sees it.
+// When the caller's context ended while a write was unanswered, the error
+// matches both ErrWriteOutcomeUnknown and the context's error.
+func forwardError(ctx context.Context, err error) error {
+	err = fromRemote(err)
+	if cause := ctx.Err(); cause != nil && errors.Is(err, ErrWriteOutcomeUnknown) && !errors.Is(err, cause) {
+		return &abandonedWrite{err: err, cause: cause}
+	}
+	return err
+}
+
+// abandonedWrite is a write whose outcome is unknown because the caller's
+// context ended before the answer came.
+type abandonedWrite struct {
+	err   error // matches ErrWriteOutcomeUnknown; its message names the cause
+	cause error // the context's error
+}
+
+func (e *abandonedWrite) Error() string   { return e.err.Error() }
+func (e *abandonedWrite) Unwrap() []error { return []error{e.err, e.cause} }
 
 // remoteError is an error that happened on another member.
 type remoteError struct {

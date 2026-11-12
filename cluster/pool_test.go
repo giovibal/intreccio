@@ -475,7 +475,7 @@ func TestKeepaliveDetectsADeadPeer(t *testing.T) {
 		}
 		defer c.Close()
 		start := time.Now()
-		_, _, err = c.query(context.Background(), wire.Request{Cypher: "x"})
+		_, _, _, err = c.query(context.Background(), wire.Request{Cypher: "x"})
 		var ce *connError
 		if !errors.As(err, &ce) {
 			t.Fatalf("err = %v, want a connection error", err)

@@ -362,6 +362,13 @@ Notes for operators:
   errors still match `ErrResultLimit`, `ErrConflict`, `ErrTxnTooLarge`,
   `ErrIntegerOverflow` and `context.DeadlineExceeded` with `errors.Is`. Canceling
   the context stops the work on the leader too, with or without a deadline.
+- A write is **never applied twice**. When it cannot be told whether a write
+  was applied — the connection to the leader failed after the write was sent,
+  leadership changed while it was being committed, the context ended before
+  the answer came — the error matches `intreccio.ErrWriteOutcomeUnknown` and
+  nothing is retried for you. Read back what the write was meant to change, or
+  repeat it if it is idempotent (`MERGE`, `SET`). Any other error means the
+  write did not happen.
 - Set `Config.LogOutput` (e.g. `os.Stderr`) for Raft logs and `Config.ApplyTimeout`
   to tune write/read-barrier deadlines.
 - It uses **full replication** to the quorum (each voter holds the whole graph);

@@ -350,6 +350,11 @@ const (
 	CodeConstraintViolation
 	CodeDeadlineExceeded
 	CodeCanceled
+	// CodeOutcomeUnknown means a write may or may not have been applied: it
+	// was handed over for replication, or sent to the member that runs it,
+	// and no answer came back. It must never be retried blindly. Every other
+	// error of a write means it was not applied.
+	CodeOutcomeUnknown
 )
 
 // Error is a failure reported by the member that ran a request.

@@ -331,9 +331,31 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	}
 
 	if err := n.raft.Apply(writeSet, n.applyTimeout).Error(); err != nil {
-		return nil, fmt.Errorf("cluster: replicate write: %w", err)
+		return nil, replicateError(err)
 	}
 	return result, nil
+}
+
+// replicateError turns the failure of a Raft apply into the error of the
+// write. Raft rejects an entry before it enters the log in three cases, and
+// only then is the write known not to have happened. After that point the
+// entry may still be committed by this leader or by its successor, whatever
+// the error says, so the outcome is unknown.
+func replicateError(err error) error {
+	switch {
+	case errors.Is(err, raft.ErrNotLeader),
+		errors.Is(err, raft.ErrEnqueueTimeout),
+		errors.Is(err, raft.ErrLeadershipTransferInProgress):
+		return fmt.Errorf("cluster: replicate write: %w", err)
+	}
+	return unknownOutcome("replicate write: %v", err)
+}
+
+// unknownOutcome is the error of a write that may or may not have been
+// applied (ADR 0013). It travels between members with its code, and the root
+// package turns it into ErrWriteOutcomeUnknown.
+func unknownOutcome(format string, args ...any) error {
+	return &wire.Error{Code: wire.CodeOutcomeUnknown, Msg: "cluster: write outcome unknown: " + fmt.Sprintf(format, args...)}
 }
 
 // Close shuts down Raft and releases all resources.
