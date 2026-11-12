@@ -59,7 +59,7 @@ type Subscription struct {
 	columns []string
 	changes chan Change
 	cancel  context.CancelCauseFunc
-	done    chan struct{} // closed after err is set and changes is closed
+	done    chan struct{} // closed once err is set, just before changes is closed
 	err     error
 }
 
@@ -240,8 +240,10 @@ func (db *DB) Subscribe(ctx context.Context, cypher string, params map[string]an
 		db.untrack(sub)
 		cancel(nil) // release the context if run ended on its own
 		sub.err = err
-		close(sub.changes)
+		// done before changes: a consumer that sees Changes closed and asks
+		// Err must find the reason already set.
 		close(sub.done)
+		close(sub.changes)
 	}()
 	return sub, nil
 }
