@@ -78,7 +78,13 @@ func (s *shortestPathOp) next() (binding, bool, error) {
 				out[s.pathVar] = p
 			}
 			if s.relVar != "" {
-				out[s.relVar] = p.Rels
+				// The relationship variable is a list, as for any
+				// variable-length pattern.
+				rels := make([]any, len(p.Rels))
+				for i, r := range p.Rels {
+					rels[i] = r
+				}
+				out[s.relVar] = rels
 			}
 			return out, true, nil
 		}

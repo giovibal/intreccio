@@ -529,8 +529,9 @@ Read side:
   regular expressions (`s =~ 're'`, Go RE2 syntax, whole-string match), `IN`
   with lists, `CASE WHEN ... THEN ... ELSE ... END` (simple and searched).
 - Lists and maps: literals, `.key` on maps, subscripts (`l[0]`, `l[-1]`,
-  `m['k']`), slices (`l[1..3]`), list comprehensions
-  (`[x IN l WHERE x > 0 | x * 2]`) and `any`/`all`/`none`/`single(x IN l WHERE ...)`.
+  `m['k']`), slices (`l[1..3]`), concatenation (`l1 + l2`, `l + x`), list
+  comprehensions (`[x IN l WHERE x > 0 | x * 2]`) and
+  `any`/`all`/`none`/`single(x IN l WHERE ...)`.
 - `RETURN` with projection, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`.
   `ORDER BY` (after `RETURN` or `WITH`) sorts on the returned columns and on
   the variables matched before the projection, so `RETURN p.name ORDER BY p.age`
@@ -539,7 +540,9 @@ Read side:
 - `WITH` chaining and scope reset; `UNWIND list AS x`.
 - `UNION` / `UNION ALL`.
 - Variable-length paths `-[:T*1..3]->` (trail semantics: no repeated
-  relationships).
+  relationships). The relationship variable of `-[r:T*1..3]->` is the list of
+  the path's relationships, so `[x IN r | x.since]`, `UNWIND r AS x` or
+  `r[0]` work on it.
 - Shortest paths between two already bound nodes:
   `MATCH (a {..}), (b {..}), p = shortestPath((a)-[:T*..5]-(b))` and
   `allShortestPaths(...)` (bidirectional breadth-first search), with

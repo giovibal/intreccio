@@ -163,16 +163,6 @@ func (r *resolver) public(v any) (any, error) {
 		return r.node(x)
 	case graph.Edge:
 		return r.rel(x)
-	case []graph.Edge: // a variable-length relationship
-		out := make([]any, len(x))
-		for i, e := range x {
-			rel, err := r.rel(e)
-			if err != nil {
-				return nil, err
-			}
-			out[i] = rel
-		}
-		return out, nil
 	case graph.Path:
 		p := Path{Nodes: make([]Node, len(x.Nodes)), Relationships: make([]Relationship, len(x.Rels))}
 		for i, n := range x.Nodes {

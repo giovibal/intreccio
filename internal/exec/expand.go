@@ -386,11 +386,12 @@ func (e *varExpand) neighbors(nodeID uint64) ([]neighborHit, error) {
 	return out, nil
 }
 
-func (e *varExpand) fetchEdges(ids []uint64) ([]graph.Edge, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	out := make([]graph.Edge, len(ids))
+// fetchEdges loads the relationships of a path, in order. The result is the
+// value of the pattern's relationship variable: an ordinary list (of
+// graph.Edge), so that every list operation works on it. A path of length 0
+// gives the empty list.
+func (e *varExpand) fetchEdges(ids []uint64) ([]any, error) {
+	out := make([]any, len(ids))
 	for i, id := range ids {
 		edge, err := graph.GetEdge(e.ctx.Txn, id)
 		if err != nil {

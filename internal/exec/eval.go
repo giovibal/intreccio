@@ -678,6 +678,9 @@ func arithmetic(op string, a, b any) (any, error) {
 				return as + bs, nil
 			}
 		}
+		if l, ok := concat(a, b); ok {
+			return l, nil
+		}
 	}
 	ai, aIsInt := a.(int64)
 	bi, bIsInt := b.(int64)
@@ -693,6 +696,25 @@ func arithmetic(op string, a, b any) (any, error) {
 		return nil, fmt.Errorf("exec: arithmetic requires numbers, got %T", b)
 	}
 	return floatArithmetic(op, af, bf)
+}
+
+// concat evaluates + with a list on either side: two lists are joined, and
+// any other value is appended to the list or prepended to it. A null operand
+// is left to the arithmetic rules, as for numbers.
+func concat(a, b any) ([]any, bool) {
+	al, aList := a.([]any)
+	bl, bList := b.([]any)
+	if !aList && !bList || a == nil || b == nil {
+		return nil, false
+	}
+	if !aList {
+		al = []any{a}
+	}
+	if !bList {
+		bl = []any{b}
+	}
+	out := make([]any, 0, len(al)+len(bl))
+	return append(append(out, al...), bl...), true
 }
 
 // ErrIntegerOverflow is returned when integer arithmetic leaves the int64
