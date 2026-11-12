@@ -89,7 +89,8 @@ func (s *relSeek) next() (binding, bool, error) {
 		if s.x.Dir == ast.DirOut || s.x.Dir == ast.DirBoth {
 			pairs = append(pairs, [2]graph.Node{src, dst})
 		}
-		if s.x.Dir == ast.DirIn || s.x.Dir == ast.DirBoth {
+		// A self-loop reads the same both ways: one row, not two.
+		if s.x.Dir == ast.DirIn || (s.x.Dir == ast.DirBoth && e.Src != e.Dst) {
 			pairs = append(pairs, [2]graph.Node{dst, src})
 		}
 		for _, p := range pairs {

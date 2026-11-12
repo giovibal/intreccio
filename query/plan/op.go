@@ -255,8 +255,8 @@ func (*ShortestPath) op() {}
 // RelByProperty seeks, through the relationship index, the relationships of
 // Type whose Key equals Value, and binds Rel and its endpoints: From is the
 // start and To the end for DirOut, the reverse for DirIn, and both ways (two
-// rows) for DirBoth. When From and To are the same variable only self-loops
-// match.
+// rows, one for a self-loop) for DirBoth. When From and To are the same
+// variable only self-loops match.
 type RelByProperty struct {
 	Rel   string
 	From  string
