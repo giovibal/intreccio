@@ -319,7 +319,9 @@ intreccio/
   feature is identical embedded and on every voter. See ADR 0010.
 - **Framed wire protocol** for cluster forwarding and streaming, replacing
   `net/rpc`; it carries live queries to dataless clients with transparent
-  failover. See ADR 0011.
+  failover. See ADR 0011. A forwarded write is sent at most once past the point
+  where it may have been applied; an unanswered one ends in
+  `ErrWriteOutcomeUnknown` instead of a retry. See ADR 0013.
 - Cost-based planner with statistics.
 - Full-text and vector indexes (for GraphRAG), if the use case requires it.
 - Extension toward GQL / post-9 constructs.

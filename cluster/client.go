@@ -61,6 +61,11 @@ func (c *client) ReadBarrier() error { return nil }
 // Forward sends the request to a voter, trying each in turn (round-robin with
 // failover) until one answers. The contacted voter serves default reads locally
 // and proxies writes/linearizable reads to the leader.
+//
+// A write moves on to the next voter only while it provably was not applied.
+// Once its outcome is unknown — it was sent and no answer came, here or
+// between the voter and the leader — Forward stops with that error: the next
+// voter would apply it a second time (ADR 0013).
 func (c *client) Forward(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
 	start := int(c.next.Add(1))
 	var lastErr error
@@ -75,7 +80,9 @@ func (c *client) Forward(ctx context.Context, req wire.Request) ([]string, [][]b
 		}
 		var remote *wire.Error
 		if errors.As(err, &remote) && remote.Code != wire.CodeGeneric && !retryable(remote) {
-			return nil, nil, err // a definite answer (limit, conflict, timeout...)
+			// A definite answer (limit, conflict, timeout...), or a write
+			// whose outcome is unknown: neither is to be tried elsewhere.
+			return nil, nil, err
 		}
 		// Voter unreachable, or e.g. no leader momentarily: try the next one.
 		lastErr = err

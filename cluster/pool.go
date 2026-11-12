@@ -103,10 +103,14 @@ func (p *connPool) dial(addr string, e *poolEntry) {
 }
 
 // call runs req on the member at addr and returns its columns and encoded
-// rows. If the connection fails mid-request the call is retried once on a
-// fresh one, so a stale pooled connection recovers transparently. ctx bounds
-// the whole call; its deadline travels with the request so that the member
-// executing it stops too.
+// rows. ctx bounds the whole call; its deadline travels with the request so
+// that the member executing it stops too.
+//
+// If the connection fails the call is retried once on a fresh one, so a stale
+// pooled connection recovers transparently — unless req is a write that was
+// already sent. That write may have been applied, and sending it again could
+// apply it twice: the call ends with an outcome-unknown error instead
+// (ADR 0013). The same holds when ctx ends while a sent write is unanswered.
 func (p *connPool) call(ctx context.Context, addr string, req wire.Request) ([]string, [][]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -126,13 +130,23 @@ func (p *connPool) call(ctx context.Context, addr string, req wire.Request) ([]s
 		if err != nil {
 			return nil, nil, err
 		}
-		cols, rows, err := c.query(ctx, req)
+		cols, rows, sent, err := c.query(ctx, req)
+		if err == nil {
+			return cols, rows, nil
+		}
+		var remote *wire.Error
+		if errors.As(err, &remote) {
+			return nil, nil, err // the member answered
+		}
+		if req.Write && sent {
+			return nil, nil, unknownOutcome("no reply from %s: %v", addr, err)
+		}
 		var ce *connError
 		if errors.As(err, &ce) {
 			lastErr = err
 			continue
 		}
-		return cols, rows, err
+		return nil, nil, err
 	}
 	return nil, nil, fmt.Errorf("cluster: forward call: %w", lastErr)
 }
