@@ -92,7 +92,7 @@ func (db *DB) Update(ctx context.Context, fn func(tx *Tx) error) error {
 		defer func() { tx.done = true }()
 		return nil, fn(tx)
 	})
-	return err
+	return fromRemote(err) // ErrWriteOutcomeUnknown, if replication was cut short
 }
 
 // View runs fn in one read-only transaction: all its queries see the same

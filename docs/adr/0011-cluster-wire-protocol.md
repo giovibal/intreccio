@@ -140,6 +140,8 @@ end to end needs an iterator API in the executor.
   connection failure cannot tell "never arrived" from "applied, reply lost", so
   a forwarded write can in rare cases be applied twice. This was already true
   with `net/rpc`; making forwarded writes idempotent is a separate decision.
+  *Superseded by ADR 0013: a write that may have been applied is no longer
+  retried, and the caller gets an explicit outcome-unknown error.*
 - The forwarding wire format changes incompatibly: all members of a cluster must
   run the same minor version across this change (pre-1.0, a minor bump).
 - `net/rpc`, gob and the nil-sanitising helpers are removed from the `cluster`

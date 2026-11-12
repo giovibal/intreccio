@@ -236,6 +236,13 @@ func (c *serverConn) serve(ctx context.Context, _ *serverStream, stream uint32, 
 		// so that a client may still try another voter.
 		err = &wire.Error{Code: wire.CodeDeadlineExceeded, Msg: err.Error()}
 	}
+	if err == nil && req.Write {
+		// The write is applied. If its result cannot be sent back, the
+		// requester must not take that for a write that did not happen.
+		if err = oversizedRow(rows); err != nil {
+			err = unknownOutcome("the write was applied but its result cannot be returned: %v", err)
+		}
+	}
 	c.reply(ctx, stream, cols, rows, err)
 }
 
@@ -310,12 +317,7 @@ func (c *serverConn) reply(ctx context.Context, stream uint32, cols []string, ro
 		return // cancelled or disconnected: nobody is listening for the reply
 	}
 	if err == nil {
-		for _, row := range rows {
-			if len(row) > wire.MaxPayload-16 {
-				err = fmt.Errorf("cluster: a result row of %d bytes exceeds the %d-byte frame limit", len(row), wire.MaxPayload)
-				break
-			}
-		}
+		err = oversizedRow(rows)
 	}
 	if err != nil {
 		c.replyError(stream, err)
@@ -330,6 +332,16 @@ func (c *serverConn) reply(ctx context.Context, stream uint32, cols []string, ro
 		}
 	}
 	_ = c.write(stream, wire.FrameEnd, nil)
+}
+
+// oversizedRow reports a row that does not fit in a frame.
+func oversizedRow(rows [][]byte) error {
+	for _, row := range rows {
+		if len(row) > wire.MaxPayload-16 {
+			return fmt.Errorf("cluster: a result row of %d bytes exceeds the %d-byte frame limit", len(row), wire.MaxPayload)
+		}
+	}
+	return nil
 }
 
 func (c *serverConn) write(stream uint32, typ wire.FrameType, payload []byte) error {

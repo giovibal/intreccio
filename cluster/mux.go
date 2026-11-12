@@ -224,54 +224,55 @@ func (c *muxConn) release(s *muxStream) {
 // when the connection failed, a *wire.Error when the peer reported a failure,
 // and ctx's error when ctx ended first — in which case the peer is told to
 // abandon the request.
-func (c *muxConn) query(ctx context.Context, req wire.Request) ([]string, [][]byte, error) {
+//
+// sent reports whether the request left in full. Until then the peer cannot
+// have run it; from then on it may have, whatever happens to the reply.
+func (c *muxConn) query(ctx context.Context, req wire.Request) (cols []string, rows [][]byte, sent bool, err error) {
 	s, err := c.open()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	defer c.release(s)
 
+	// A frame is delivered whole or not at all: the peer acts on it only
+	// once it has read all of it, and a failed write leaves it incomplete.
 	if err := c.write(s.id, wire.FrameQuery, wire.EncodeRequest(req)); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
-	var (
-		cols []string
-		rows [][]byte
-	)
 	for {
 		select {
 		case <-ctx.Done():
 			_ = c.write(s.id, wire.FrameCancel, nil) // best effort
-			return nil, nil, ctx.Err()
+			return nil, nil, true, ctx.Err()
 		case <-c.closed:
-			return nil, nil, c.failure()
+			return nil, nil, true, c.failure()
 		case f := <-s.frames:
 			switch f.Type {
 			case wire.FrameResult:
 				if cols, err = wire.DecodeColumns(f.Payload); err != nil {
 					c.fail(err)
-					return nil, nil, c.failure()
+					return nil, nil, true, c.failure()
 				}
 			case wire.FrameRows:
 				chunk, err := wire.DecodeRows(f.Payload)
 				if err != nil {
 					c.fail(err)
-					return nil, nil, c.failure()
+					return nil, nil, true, c.failure()
 				}
 				rows = append(rows, chunk...)
 			case wire.FrameEnd:
-				return cols, rows, nil
+				return cols, rows, true, nil
 			case wire.FrameError:
 				remote, err := wire.DecodeError(f.Payload)
 				if err != nil {
 					c.fail(err)
-					return nil, nil, c.failure()
+					return nil, nil, true, c.failure()
 				}
-				return nil, nil, remote
+				return nil, nil, true, remote
 			default:
 				c.fail(fmt.Errorf("%w: unexpected frame type %d in a reply", wire.ErrProtocol, f.Type))
-				return nil, nil, c.failure()
+				return nil, nil, true, c.failure()
 			}
 		}
 	}
