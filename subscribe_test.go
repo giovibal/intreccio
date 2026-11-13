@@ -586,3 +586,24 @@ func TestSubscribeOnPersistentDatabase(t *testing.T) {
 	mustExec(t, db, "CREATE (:Person {name: 'Ann'})")
 	wantChange(t, nextChange(t, sub), oneCol("Ann"), nil)
 }
+
+// TestErrIsSetWhenChangesCloses checks the contract of Changes: once the
+// channel is closed, Err already tells why. Changes used to be closed before
+// the reason was published, so a consumer reading Err right away could get
+// nil.
+func TestErrIsSetWhenChangesCloses(t *testing.T) {
+	db := newDB(t)
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		sub, err := db.Subscribe(ctx, "MATCH (n) RETURN n", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		for range sub.Changes() {
+		}
+		if err := sub.Err(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("run %d: Err right after Changes closed = %v, want context.Canceled", i, err)
+		}
+	}
+}
