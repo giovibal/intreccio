@@ -164,6 +164,13 @@ func newNode(cfg Config) (*raftNode, error) {
 
 	storeMu := new(sync.RWMutex)
 	f := newFSM(store, store, cfg.DataDir, storeMu)
+	// The FSM can fail while Raft replays the log, before the node exists.
+	var self atomic.Pointer[raftNode]
+	f.onFail = func(error) {
+		if n := self.Load(); n != nil {
+			n.replicaFailed()
+		}
+	}
 	r, err := raft.NewRaft(rcfg, f, boltStore, boltStore, snaps, trans)
 	if err != nil {
 		_ = trans.Close()
@@ -191,6 +198,10 @@ func newNode(cfg Config) (*raftNode, error) {
 		tlsClient:       tlsClient,
 		pool:            newConnPool(tlsClient),
 		stop:            make(chan struct{}),
+	}
+	self.Store(n)
+	if f.failed() != nil {
+		n.replicaFailed() // failed during the replay above
 	}
 
 	if err := n.startForwardServer(); err != nil {
@@ -277,6 +288,9 @@ func (n *raftNode) SetChangeHub(h *changefeed.Hub) { n.fsm.hub.Store(h) }
 // stale on a follower unless a ReadBarrier preceded it). The shared read-lock
 // keeps it from overlapping a snapshot Restore.
 func (n *raftNode) View(fn func(storage.Txn) error) error {
+	if err := n.fsm.failed(); err != nil {
+		return err
+	}
 	n.storeMu.RLock()
 	defer n.storeMu.RUnlock()
 	return n.store.View(fn)
@@ -292,6 +306,9 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 
 	if n.raft.State() != raft.Leader {
 		return nil, errNotLeader
+	}
+	if err := n.fsm.failed(); err != nil {
+		return nil, err // staging would read a state missing a write
 	}
 	// A newly elected leader can hold committed entries its state machine has
 	// not applied yet. Staging against that store would read stale data and
@@ -330,10 +347,30 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 		return result, nil // no mutations to replicate
 	}
 
-	if err := n.raft.Apply(writeSet, n.applyTimeout).Error(); err != nil {
+	future := n.raft.Apply(writeSet, n.applyTimeout)
+	if err := future.Error(); err != nil {
 		return nil, replicateError(err)
 	}
+	if err, ok := future.Response().(error); ok && err != nil {
+		// The entry is committed: the other replicas apply it. Only this
+		// member failed to store it, so the write took effect, but this
+		// member cannot confirm it.
+		return nil, unknownOutcome("committed, but this member failed to store it: %v", err)
+	}
 	return result, nil
+}
+
+// replicaFailed reacts to the state machine's failure (ErrReplicaFailed):
+// live queries are woken so that they end instead of serving a state that
+// misses a write, and a leader hands leadership to a healthy voter, since it
+// can no longer stage writes.
+func (n *raftNode) replicaFailed() {
+	if hub := n.fsm.hub.Load(); hub != nil {
+		hub.Invalidate()
+	}
+	if n.raft.State() == raft.Leader {
+		go func() { _ = n.raft.LeadershipTransfer().Error() }()
+	}
 }
 
 // replicateError turns the failure of a Raft apply into the error of the

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,33 @@ type fsm struct {
 	// to make a replica's state machine lag behind its log; it is nil in
 	// production.
 	beforeApply atomic.Pointer[func()]
+	// applyFault, when set, runs inside each apply transaction; an error from
+	// it fails that transaction as a storage failure would. Tests use it to
+	// inject one; it is nil in production.
+	applyFault atomic.Pointer[func() error]
+
+	// failure is set once a committed entry could not be stored (see
+	// failed). It is cleared only by a successful Restore.
+	failure atomic.Pointer[error]
+	// onFail, when set, is called once when the state machine fails. Set
+	// before Raft starts.
+	onFail func(error)
+}
+
+// ErrReplicaFailed is the error of a member whose state machine could not
+// store a committed write (a disk failure, say). Raft does not deliver an
+// entry twice, so the member's state is missing that write: it stops
+// applying later ones, serving reads and taking snapshots, and gives up
+// leadership. Restarting it recovers: Raft replays its log, from its last
+// snapshot, into the state machine.
+var ErrReplicaFailed = errors.New("cluster: this member failed to store a committed write and must be restarted")
+
+// failed returns the state machine's failure, or nil while it is healthy.
+func (f *fsm) failed() error {
+	if p := f.failure.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 var _ raft.FSM = (*fsm)(nil)
@@ -49,10 +77,17 @@ func newFSM(store storage.Store, snap storage.Snapshotter, tmpDir string, storeM
 	return &fsm{store: store, snap: snap, tmpDir: tmpDir, storeMu: storeMu}
 }
 
-// Apply applies one committed log entry (a write-set) to the local store.
+// Apply applies one committed log entry (a write-set) to the local store. It
+// returns nil, or the error that failed the state machine: Raft hands it to
+// the leader's ApplyFuture as the response, not as the future's error.
 func (f *fsm) Apply(l *raft.Log) any {
 	if l.Type != raft.LogCommand {
 		return nil
+	}
+	if err := f.failed(); err != nil {
+		// The state is missing an earlier write: applying this one on top
+		// of it would build a state no other replica has.
+		return err
 	}
 	if hook := f.beforeApply.Load(); hook != nil {
 		(*hook)()
@@ -61,16 +96,32 @@ func (f *fsm) Apply(l *raft.Log) any {
 		if err := applyWriteSet(l.Data, txn); err != nil {
 			return err
 		}
+		if fault := f.applyFault.Load(); fault != nil {
+			if err := (*fault)(); err != nil {
+				return err
+			}
+		}
 		// Recorded with the data it describes, so a reader always knows
 		// exactly which index its snapshot reflects. A dataless client's
 		// subscription relies on it to change voter without going backwards.
 		return catalog.SetAppliedIndex(txn, l.Index)
 	}
+	var err error
 	if hub := f.hub.Load(); hub != nil {
 		// Commits through the store, then reports the write to the watchers.
-		return hub.Update(f.store, apply)
+		err = hub.Update(f.store, apply)
+	} else {
+		err = f.store.Update(apply)
 	}
-	return f.store.Update(apply)
+	if err != nil {
+		err = fmt.Errorf("%w (entry %d: %v)", ErrReplicaFailed, l.Index, err)
+		f.failure.Store(&err)
+		if f.onFail != nil {
+			f.onFail(err)
+		}
+		return err
+	}
+	return nil
 }
 
 // Snapshot captures the full store state at the current applied index by backing
@@ -78,6 +129,11 @@ func (f *fsm) Apply(l *raft.Log) any {
 // bounds memory for large stores while still reflecting state as of this call,
 // per Raft's contract.
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
+	if err := f.failed(); err != nil {
+		// A snapshot of a state missing a write would let Raft drop the log
+		// entries a restart needs to recover it.
+		return nil, err
+	}
 	tmp, err := os.CreateTemp(f.tmpDir, "snapshot-*.bak")
 	if err != nil {
 		return nil, fmt.Errorf("fsm: snapshot temp: %w", err)
@@ -111,6 +167,9 @@ func (f *fsm) Restore(rc io.ReadCloser) error {
 	if err != nil {
 		return fmt.Errorf("fsm: restore: %w", err)
 	}
+	// A complete state from the leader replaces whatever this replica was
+	// missing.
+	f.failure.Store(nil)
 	return nil
 }
 
