@@ -304,7 +304,13 @@ func (s *streamSink) Batch(b wire.Batch) error {
 // replyError sends err as an Error frame, keeping its code if it has one.
 func (c *serverConn) replyError(stream uint32, err error) {
 	var remote *wire.Error
-	if !errors.As(err, &remote) {
+	switch {
+	case errors.As(err, &remote):
+	case errors.Is(err, ErrReplicaFailed):
+		// Another voter can serve it: a client moves on, a dataless
+		// subscriber fails over.
+		remote = &wire.Error{Code: wire.CodeUnavailable, Msg: err.Error()}
+	default:
 		remote = &wire.Error{Code: wire.CodeGeneric, Msg: err.Error()}
 	}
 	_ = c.write(stream, wire.FrameError, wire.EncodeError(remote))
