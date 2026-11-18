@@ -338,3 +338,147 @@ func TestChecksSurviveUnavailableProbes(t *testing.T) {
 		waitForCounter(t, tc.dbs[i], 2)
 	}
 }
+
+// heldIncrement runs the #98 sequence: an increment staged on leader a and
+// held while leadership goes a -> b -> a, with an increment committed on b
+// meanwhile. It returns the held Update's error and the second increment's.
+func heldIncrement(t *testing.T, tc *testCluster, a, b int) (held, onB error) {
+	t.Helper()
+	ctx := context.Background()
+	staged := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- tc.dbs[a].Update(ctx, func(tx *intreccio.Tx) error {
+			if _, err := tx.Query(ctx, "MATCH (c:Counter) SET c.v = c.v + 1", nil); err != nil {
+				return err
+			}
+			if calls.Add(1) == 1 {
+				close(staged)
+				<-release
+			}
+			return nil
+		})
+	}()
+	<-staged
+	tc.transferTo(t, a, b)
+	_, onB = tc.dbs[b].Query(ctx, "MATCH (c:Counter) SET c.v = c.v + 1", nil)
+	tc.transferTo(t, b, a)
+	close(release)
+	return <-done, onB
+}
+
+// TestUnknownMemberRefusesUnprotectedWrites: before the check is on, a member
+// whose version is unknown (its probe times out, though Raft reaches it)
+// might be older, and then a checked entry would not be checked there, or
+// newer, and then an unchecked one could lose an update. A write is refused
+// with a retryable error rather than acknowledged unprotected: no warm-up,
+// no lost update.
+func TestUnknownMemberRefusesUnprotectedWrites(t *testing.T) {
+	ctx := context.Background()
+	tc := startCluster(t, 3)
+	a := tc.leaderIndex(t)
+	b := (a + 1) % 3
+	silent := tc.peers[(a+2)%3].ForwardAddr
+	var probeDown atomic.Bool
+	probeDown.Store(true)
+	for _, nd := range tc.nodes {
+		real := nd.dialVersion
+		nd.probeVersion = func(ctx context.Context, addr string) (uint16, error) {
+			if addr == silent && probeDown.Load() {
+				return 0, context.DeadlineExceeded
+			}
+			return real(ctx, addr)
+		}
+	}
+
+	_, err := tc.dbs[a].Query(ctx, "CREATE (:Counter {v: 0})", nil)
+	if !errors.Is(err, intreccio.ErrConflict) {
+		t.Fatalf("write with a member of unknown version: err = %v, want a retryable ErrConflict", err)
+	}
+	if got := counterNodes(t, tc.dbs[a]); got != 0 {
+		t.Fatalf("Counter nodes = %d, want 0: the refused write was applied", got)
+	}
+
+	// The member answers again: the next write is accepted and turns the
+	// check on, and the #98 sequence keeps both increments.
+	probeDown.Store(false)
+	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
+	if !checksOn(t, tc.nodes[a]) {
+		t.Fatal("the first write with every member known did not turn the check on")
+	}
+	held, onB := heldIncrement(t, tc, a, b)
+	if held != nil || onB != nil {
+		t.Fatalf("increments: held %v, on b %v", held, onB)
+	}
+	if got := counter(t, tc.dbs[a]); got != 2 {
+		t.Errorf("counter = %d, want 2", got)
+	}
+}
+
+func counterNodes(t *testing.T, db *intreccio.DB) int64 {
+	t.Helper()
+	res, err := db.Query(context.Background(), "MATCH (c:Counter) RETURN count(c)", nil, intreccio.Linearizable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toInt64(t, res.Rows[0][0])
+}
+
+// TestConfiguredVoterNotYetAdmitted: a voter listed in Peers that has not
+// joined yet will apply the whole log once addVoters admits it, so the check
+// cannot be turned on, and no write accepted unprotected, before its version
+// is known.
+func TestConfiguredVoterNotYetAdmitted(t *testing.T) {
+	ctx := context.Background()
+	peers := make([]Peer, 3)
+	for i := range peers {
+		peers[i] = Peer{ID: fmt.Sprintf("n%d", i+1), RaftAddr: freeAddr(t), ForwardAddr: freeAddr(t)}
+	}
+	start := func(i int) *raftNode {
+		node, err := newNode(Config{
+			NodeID: peers[i].ID, DataDir: t.TempDir(), BindAddr: peers[i].RaftAddr,
+			ForwardAddr: peers[i].ForwardAddr, Role: RoleVoter, Bootstrap: i == 0, Peers: peers,
+		})
+		if err != nil {
+			t.Fatalf("start %s: %v", peers[i].ID, err)
+		}
+		t.Cleanup(func() { _ = node.Close() })
+		return node
+	}
+	n1, _ := start(0), start(1)
+	deadline := time.Now().Add(10 * time.Second)
+	for n1.raft.State() != raft.Leader {
+		if time.Now().After(deadline) {
+			t.Fatal("n1 never became leader")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	db := wrap(n1)
+
+	// n3 is configured but not running: its version is unknown.
+	if _, err := db.Query(ctx, "CREATE (:Counter {v: 0})", nil); !errors.Is(err, intreccio.ErrConflict) {
+		t.Fatalf("write before n3 is known: err = %v, want a retryable ErrConflict", err)
+	}
+	if checksOn(t, n1) {
+		t.Fatal("the check was turned on before every configured voter was known")
+	}
+
+	// Once it runs, writes go through and turn the check on.
+	start(2)
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		_, err := db.Query(ctx, "CREATE (:Counter {v: 0})", nil)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, intreccio.ErrConflict) || time.Now().After(deadline) {
+			t.Fatalf("write after n3 started: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !checksOn(t, n1) {
+		t.Error("the check is still off with every configured voter known")
+	}
+}

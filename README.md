@@ -420,7 +420,9 @@ member at a time**: members of different versions forward to each other in the
 older version. Versions further apart are refused at connection time. The
 check that guards writes against a leadership change (ADR 0007) turns on by
 itself once every member runs the new version; downgrading a member after that
-is not supported.
+is not supported. Until it is on, a write is refused with `ErrConflict`
+(retryable) while a member has never answered: on a new cluster, writes start
+once every configured voter has been reachable.
 
 ### Securing the cluster with TLS
 

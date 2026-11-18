@@ -90,10 +90,8 @@ type raftNode struct {
 	shedding atomic.Bool
 
 	// peerVersions holds the forwarding-protocol version each other member
-	// answered with, by node ID (see membersCheckStale).
+	// answered with, by node ID (see membersCapability).
 	peerVersions sync.Map
-	// probing is set while probePeers runs.
-	probing atomic.Bool
 	// probeVersion asks the member at a forwarding address which protocol
 	// version it speaks. Tests replace it; it is dialVersion otherwise.
 	probeVersion func(ctx context.Context, addr string) (uint16, error)
@@ -332,56 +330,84 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	}
 }
 
-// membersCheckStale reports whether every other member of the Raft
-// configuration has said, by the protocol version it answers the forwarding
-// handshake with, that its state machine checks the base of an entry. Only
-// then may the cluster turn the check on (see stage): a member built before
-// it ignores the base and would apply an entry the others refuse. While the
-// answer is not known this starts a probe in the background and reports
-// false.
-//
-// It decides only when the check is turned on. Once it is, every entry
-// carries a base whatever the probes say, and the state machine refuses one
-// without it.
-func (n *raftNode) membersCheckStale() bool {
-	future := n.raft.GetConfiguration()
-	if future.Error() != nil {
-		return false
-	}
-	var unknown []raft.Server
-	for _, srv := range future.Configuration().Servers {
-		if string(srv.ID) == n.cfg.NodeID {
-			continue
-		}
-		if v, ok := n.peerVersions.Load(string(srv.ID)); !ok || v.(uint16) < wire.VersionStaleWriteCheck {
-			unknown = append(unknown, srv)
-		}
-	}
-	if len(unknown) == 0 {
-		return true
-	}
-	if n.probing.CompareAndSwap(false, true) {
-		go n.probePeers(unknown)
-	}
-	return false
-}
+// capability says what the other members of the cluster are known to do
+// with the base of an entry (see membersCapability).
+type capability int
 
-// probePeers asks each server which protocol version it speaks and records
-// the answers.
-func (n *raftNode) probePeers(servers []raft.Server) {
-	defer n.probing.Store(false)
-	for _, srv := range servers {
-		addr, ok := n.forwardAddrByID[string(srv.ID)]
-		if !ok {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
-		v, err := n.probeVersion(ctx, addr)
-		cancel()
-		if err == nil {
-			n.peerVersions.Store(string(srv.ID), v)
+const (
+	// allCheck: every other member checks the base. The cluster may turn
+	// the check on.
+	allCheck capability = iota
+	// someLegacy: every member's version is known, and one is older than
+	// the check (a rolling upgrade). Entries go unchecked, so that every
+	// replica applies the same ones.
+	someLegacy
+	// someUnknown: a member has not answered (it is down, unreachable, or
+	// not yet admitted). An unchecked entry is safe only if that member is
+	// older, a checked one only if it is newer: no write can be protected,
+	// and none is accepted until the check is on.
+	someUnknown
+)
+
+// capabilityProbeTimeout bounds how long a write waits for the members whose
+// version it does not know yet.
+const capabilityProbeTimeout = 500 * time.Millisecond
+
+// membersCapability finds out, by the protocol version each member answers
+// the forwarding handshake with, whether the other members check the base of
+// an entry. The members are those of the Raft configuration and those
+// configured in Peers: a voter that addVoters has not admitted yet will
+// apply the log all the same. Members whose version is not known are asked
+// now, in parallel; an answer, legacy ones included, is remembered.
+func (n *raftNode) membersCapability() (capability, string) {
+	ids := map[string]bool{}
+	for _, p := range n.cfg.Peers {
+		ids[p.ID] = true
+	}
+	if future := n.raft.GetConfiguration(); future.Error() == nil {
+		for _, srv := range future.Configuration().Servers {
+			ids[string(srv.ID)] = true
 		}
 	}
+	delete(ids, n.cfg.NodeID)
+
+	var unknown []string
+	for id := range ids {
+		if _, ok := n.peerVersions.Load(id); !ok {
+			unknown = append(unknown, id)
+		}
+	}
+	if len(unknown) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), capabilityProbeTimeout)
+		var wg sync.WaitGroup
+		for _, id := range unknown {
+			addr, ok := n.forwardAddrByID[id]
+			if !ok {
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if v, err := n.probeVersion(ctx, addr); err == nil {
+					n.peerVersions.Store(id, v)
+				}
+			}()
+		}
+		wg.Wait()
+		cancel()
+	}
+
+	result, culprit := allCheck, ""
+	for id := range ids {
+		v, ok := n.peerVersions.Load(id)
+		switch {
+		case !ok:
+			return someUnknown, id
+		case v.(uint16) < wire.VersionStaleWriteCheck:
+			result, culprit = someLegacy, id
+		}
+	}
+	return result, culprit
 }
 
 // dialVersion connects to a member's forwarding address and returns the
@@ -428,12 +454,27 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 		n.barrierTerm = term
 	}
 
-	result, writeSet, base, checked, err := n.stage(stage, n.membersCheckStale())
+	// Until the cluster checks entries, find out whether it can start to,
+	// and whether an unchecked entry is safe meanwhile.
+	capable, member := allCheck, ""
+	if on, err := n.staleChecksOn(); err != nil {
+		return nil, false, err
+	} else if !on {
+		capable, member = n.membersCapability()
+	}
+
+	result, writeSet, base, checked, err := n.stage(stage, capable == allCheck)
 	if err != nil {
 		return nil, false, err
 	}
 	if writeSet == nil {
 		return result, false, nil // no mutations to replicate
+	}
+	if !checked && capable == someUnknown {
+		// An unchecked entry could overwrite a newer state, a checked one
+		// could be applied unchecked by an older member: refuse the write
+		// before anything is proposed, so that it can be retried.
+		return nil, false, fmt.Errorf("cluster: cannot protect the write while the version of member %s is unknown: %w", member, storage.ErrConflict)
 	}
 
 	var ext []byte
@@ -448,6 +489,17 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 		return nil, rejected, err
 	}
 	return result, false, nil
+}
+
+// staleChecksOn reports whether the cluster has turned the stale-write check
+// on (catalog.StaleChecks), in this member's state.
+func (n *raftNode) staleChecksOn() (bool, error) {
+	var on bool
+	err := n.View(func(txn storage.Txn) (err error) {
+		on, err = catalog.StaleChecks(txn)
+		return err
+	})
+	return on, err
 }
 
 // stage runs a write against a recording transaction and returns its result,
