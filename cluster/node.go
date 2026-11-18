@@ -84,6 +84,9 @@ type raftNode struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// shedding is set while shedLeadership runs (the replica has failed).
+	shedding atomic.Bool
 }
 
 // newNode starts a clustered node. Phases B–C support RoleVoter. A single node
@@ -368,8 +371,33 @@ func (n *raftNode) replicaFailed() {
 	if hub := n.fsm.hub.Load(); hub != nil {
 		hub.Invalidate()
 	}
-	if n.raft.State() == raft.Leader {
-		go func() { _ = n.raft.LeadershipTransfer().Error() }()
+	if n.shedding.CompareAndSwap(false, true) {
+		go n.shedLeadership()
+	}
+}
+
+// shedLeadershipEvery is how often a failed replica checks whether it holds
+// leadership.
+const shedLeadershipEvery = 100 * time.Millisecond
+
+// shedLeadership keeps a failed replica from holding leadership for as long
+// as it stays failed. Its log is up to date, so it stays eligible: it can win
+// an election, or be handed leadership, after it failed. Each time it finds
+// itself leader it transfers leadership to a healthy voter, retrying when a
+// transfer fails.
+func (n *raftNode) shedLeadership() {
+	defer n.shedding.Store(false)
+	t := time.NewTicker(shedLeadershipEvery)
+	defer t.Stop()
+	for n.fsm.failed() != nil {
+		if n.raft.State() == raft.Leader {
+			_ = n.raft.LeadershipTransfer().Error()
+		}
+		select {
+		case <-n.stop:
+			return
+		case <-t.C:
+		}
 	}
 }
 

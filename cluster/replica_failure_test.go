@@ -135,3 +135,48 @@ func TestFollowerFailsToStoreACommittedWrite(t *testing.T) {
 	createPerson(t, tc.dbs[lead], "third")
 	waitForCountLocal(t, tc.dbs[f], 3, 20*time.Second)
 }
+
+// TestFailedReplicaDoesNotKeepLeadership: a follower that failed can still
+// be handed leadership (or win an election) afterwards, since its log is up
+// to date. It must give leadership up again, so that writes keep working
+// without restarting it.
+func TestFailedReplicaDoesNotKeepLeadership(t *testing.T) {
+	tc := startCluster(t, 3)
+	lead := tc.leaderIndex(t)
+	f := tc.aFollower(t)
+
+	failNextApply(tc.nodes[f])
+	createPerson(t, tc.dbs[lead], "first")
+	waitFailed(t, tc.nodes[f])
+
+	// Hand leadership to the failed member.
+	p := tc.peers[f]
+	if err := tc.nodes[lead].raft.LeadershipTransferToServer(raft.ServerID(p.ID), raft.ServerAddress(p.RaftAddr)).Error(); err != nil {
+		t.Fatalf("transfer leadership to the failed member: %v", err)
+	}
+
+	// It gives it up to a healthy voter.
+	deadline := time.Now().Add(20 * time.Second)
+	healthy := -1
+	for healthy < 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the failed member kept leadership")
+		}
+		if tc.nodes[f].raft.State() != raft.Leader {
+			for i, nd := range tc.nodes {
+				if i != f && nd.raft.State() == raft.Leader {
+					healthy = i
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Writes work again, through the healthy leader and through the failed
+	// member, which forwards them; nothing was restarted.
+	createPerson(t, tc.dbs[healthy], "second")
+	createPerson(t, tc.dbs[f], "third")
+	if got := personCount(t, tc.dbs[healthy], intreccio.Linearizable()); got != 3 {
+		t.Errorf("count = %d, want 3", got)
+	}
+}

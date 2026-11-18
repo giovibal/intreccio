@@ -395,7 +395,8 @@ Notes for operators:
   write did not happen.
 - A voter that fails to store a committed write (a disk failure, say) stops
   serving: its queries fail with `cluster.ErrReplicaFailed`, it takes no
-  snapshot and hands leadership to a healthy voter, while dataless clients
+  snapshot and hands leadership to a healthy voter whenever it gets it, while
+  dataless clients
   move on to the other voters. A write that hit the failure on the leader
   returns `ErrWriteOutcomeUnknown`, since the other replicas have it. Restart
   the member to recover: Raft replays its log into the state machine.
