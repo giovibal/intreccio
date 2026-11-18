@@ -165,6 +165,37 @@ func clone(b []byte) []byte {
 // and stays identical.
 var errStaleWrite = errors.New("cluster: write staged on a stale state")
 
+// errEntryRefused is the state machine's answer to an entry it cannot apply
+// for a reason found in the entry itself (a malformed extension): every
+// replica refuses it alike and writes nothing.
+var errEntryRefused = errors.New("cluster: log entry refused")
+
+// applyResponse interprets the state machine's response to a write-set
+// entry this leader proposed and Raft committed:
+//
+//   - nil: applied.
+//   - errStaleWrite: refused everywhere because the state it was staged on
+//     changed; nothing was written and the write may be staged again
+//     (rejected is true).
+//   - errEntryRefused: refused everywhere; nothing was written, but staging
+//     it again would not help.
+//   - anything else, ErrReplicaFailed included: this member failed to store
+//     an entry the other replicas apply, so the write took effect but cannot
+//     be confirmed here (ErrWriteOutcomeUnknown).
+func applyResponse(resp any) (rejected bool, err error) {
+	respErr, _ := resp.(error)
+	switch {
+	case respErr == nil:
+		return false, nil
+	case errors.Is(respErr, errStaleWrite):
+		return true, nil
+	case errors.Is(respErr, errEntryRefused):
+		return false, respErr
+	default:
+		return false, unknownOutcome("committed, but this member failed to store it: %v", respErr)
+	}
+}
+
 // extBaseV1 tags the version-1 extension of a write-set entry.
 const extBaseV1 byte = 1
 

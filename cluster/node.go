@@ -84,6 +84,9 @@ type raftNode struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// shedding is set while shedLeadership runs (the replica has failed).
+	shedding atomic.Bool
 }
 
 // newNode starts a clustered node. Phases B–C support RoleVoter. A single node
@@ -164,6 +167,13 @@ func newNode(cfg Config) (*raftNode, error) {
 
 	storeMu := new(sync.RWMutex)
 	f := newFSM(store, store, cfg.DataDir, storeMu)
+	// The FSM can fail while Raft replays the log, before the node exists.
+	var self atomic.Pointer[raftNode]
+	f.onFail = func(error) {
+		if n := self.Load(); n != nil {
+			n.replicaFailed()
+		}
+	}
 	r, err := raft.NewRaft(rcfg, f, boltStore, boltStore, snaps, trans)
 	if err != nil {
 		_ = trans.Close()
@@ -191,6 +201,10 @@ func newNode(cfg Config) (*raftNode, error) {
 		tlsClient:       tlsClient,
 		pool:            newConnPool(tlsClient),
 		stop:            make(chan struct{}),
+	}
+	self.Store(n)
+	if f.failed() != nil {
+		n.replicaFailed() // failed during the replay above
 	}
 
 	if err := n.startForwardServer(); err != nil {
@@ -277,6 +291,9 @@ func (n *raftNode) SetChangeHub(h *changefeed.Hub) { n.fsm.hub.Store(h) }
 // stale on a follower unless a ReadBarrier preceded it). The shared read-lock
 // keeps it from overlapping a snapshot Restore.
 func (n *raftNode) View(fn func(storage.Txn) error) error {
+	if err := n.fsm.failed(); err != nil {
+		return err
+	}
 	n.storeMu.RLock()
 	defer n.storeMu.RUnlock()
 	return n.store.View(fn)
@@ -317,6 +334,9 @@ const maxStaleRetries = 10
 func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result any, rejected bool, err error) {
 	if n.raft.State() != raft.Leader {
 		return nil, false, errNotLeader
+	}
+	if err := n.fsm.failed(); err != nil {
+		return nil, false, err // staging would read a state missing a write
 	}
 	// A newly elected leader can hold committed entries its state machine has
 	// not applied yet. Staging against that store would read stale data and
@@ -368,10 +388,48 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 	if err := future.Error(); err != nil {
 		return nil, false, replicateError(err)
 	}
-	if err, ok := future.Response().(error); ok && errors.Is(err, errStaleWrite) {
-		return nil, true, nil
+	if rejected, err := applyResponse(future.Response()); rejected || err != nil {
+		return nil, rejected, err
 	}
 	return result, false, nil
+}
+
+// replicaFailed reacts to the state machine's failure (ErrReplicaFailed):
+// live queries are woken so that they end instead of serving a state that
+// misses a write, and a leader hands leadership to a healthy voter, since it
+// can no longer stage writes.
+func (n *raftNode) replicaFailed() {
+	if hub := n.fsm.hub.Load(); hub != nil {
+		hub.Invalidate()
+	}
+	if n.shedding.CompareAndSwap(false, true) {
+		go n.shedLeadership()
+	}
+}
+
+// shedLeadershipEvery is how often a failed replica checks whether it holds
+// leadership.
+const shedLeadershipEvery = 100 * time.Millisecond
+
+// shedLeadership keeps a failed replica from holding leadership for as long
+// as it stays failed. Its log is up to date, so it stays eligible: it can win
+// an election, or be handed leadership, after it failed. Each time it finds
+// itself leader it transfers leadership to a healthy voter, retrying when a
+// transfer fails.
+func (n *raftNode) shedLeadership() {
+	defer n.shedding.Store(false)
+	t := time.NewTicker(shedLeadershipEvery)
+	defer t.Stop()
+	for n.fsm.failed() != nil {
+		if n.raft.State() == raft.Leader {
+			_ = n.raft.LeadershipTransfer().Error()
+		}
+		select {
+		case <-n.stop:
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // replicateError turns the failure of a Raft apply into the error of the

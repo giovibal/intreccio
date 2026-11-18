@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -9,6 +11,8 @@ import (
 	"github.com/hashicorp/raft"
 
 	"github.com/giovibal/intreccio"
+	"github.com/giovibal/intreccio/internal/catalog"
+	"github.com/giovibal/intreccio/internal/storage"
 )
 
 // transferTo moves leadership from node from to node to and waits for it.
@@ -116,5 +120,70 @@ func TestEntryBaseExtension(t *testing.T) {
 		if _, _, err := decodeBase(bad); err == nil {
 			t.Errorf("decodeBase(%v): want an error", bad)
 		}
+	}
+}
+
+// TestApplyResponse covers how a leader reads the state machine's answer to
+// its own entry, #97 and #98 together: a stale entry is staged again, an
+// entry refused everywhere fails plainly, and a local storage failure is an
+// unknown outcome, never a success or a retry.
+func TestApplyResponse(t *testing.T) {
+	cases := []struct {
+		name     string
+		resp     any
+		rejected bool
+		check    func(error) bool
+	}{
+		{"applied", nil, false, func(err error) bool { return err == nil }},
+		{"stale: stage again", errStaleWrite, true, func(err error) bool { return err == nil }},
+		{"refused everywhere", fmt.Errorf("%w: bad extension", errEntryRefused), false,
+			func(err error) bool { return errors.Is(err, errEntryRefused) && !outcomeUnknown(err) }},
+		{"replica failed", fmt.Errorf("%w (entry 7: disk)", ErrReplicaFailed), false, outcomeUnknown},
+		{"any other error", errors.New("unexpected"), false, outcomeUnknown},
+	}
+	for _, tc := range cases {
+		rejected, err := applyResponse(tc.resp)
+		if rejected != tc.rejected || !tc.check(err) {
+			t.Errorf("%s: rejected = %v, err = %v", tc.name, rejected, err)
+		}
+	}
+}
+
+// TestRefusalsDoNotFailTheReplica: an entry the state machine refuses for a
+// reason every replica shares (stale, or a malformed extension) writes
+// nothing and must not put the replica out of service, as a storage failure
+// does.
+func TestRefusalsDoNotFailTheReplica(t *testing.T) {
+	tc := startCluster(t, 1)
+	node := tc.nodes[tc.leaderIndex(t)]
+	run(t, tc.dbs[0], "CREATE (:Counter {v: 0})")
+
+	var applied uint64
+	if err := node.store.View(func(txn storage.Txn) (err error) {
+		applied, err = catalog.AppliedIndex(txn)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, ext := range map[string][]byte{
+		"stale base":      encodeBase(applied + 100),
+		"malformed":       {extBaseV1, 0x80},
+		"unknown version": {9, 1},
+	} {
+		resp := node.fsm.Apply(&raft.Log{Type: raft.LogCommand, Index: applied + 1000, Data: []byte{0}, Extensions: ext})
+		if err, _ := resp.(error); err == nil {
+			t.Errorf("%s: applied, want a refusal", name)
+		}
+		if err := node.fsm.failed(); err != nil {
+			t.Fatalf("%s: the replica failed: %v", name, err)
+		}
+	}
+	// Still serving, and nothing was written.
+	if got := counter(t, tc.dbs[0]); got != 0 {
+		t.Errorf("counter = %d, want 0", got)
+	}
+	run(t, tc.dbs[0], "MATCH (c:Counter) SET c.v = c.v + 1")
+	if got := counter(t, tc.dbs[0]); got != 1 {
+		t.Errorf("counter = %d, want 1", got)
 	}
 }

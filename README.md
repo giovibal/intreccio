@@ -393,6 +393,13 @@ Notes for operators:
   nothing is retried for you. Read back what the write was meant to change, or
   repeat it if it is idempotent (`MERGE`, `SET`). Any other error means the
   write did not happen.
+- A voter that fails to store a committed write (a disk failure, say) stops
+  serving: its queries fail with `cluster.ErrReplicaFailed`, it takes no
+  snapshot and hands leadership to a healthy voter whenever it gets it, while
+  dataless clients
+  move on to the other voters. A write that hit the failure on the leader
+  returns `ErrWriteOutcomeUnknown`, since the other replicas have it. Restart
+  the member to recover: Raft replays its log into the state machine.
 - Set `Config.LogOutput` (e.g. `os.Stderr`) for Raft logs and `Config.ApplyTimeout`
   to tune write/read-barrier deadlines.
 - It uses **full replication** to the quorum (each voter holds the whole graph);
