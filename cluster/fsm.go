@@ -92,7 +92,38 @@ func (f *fsm) Apply(l *raft.Log) any {
 	if hook := f.beforeApply.Load(); hook != nil {
 		(*hook)()
 	}
+	base, checked, err := decodeBase(l.Extensions)
+	if err != nil {
+		// Every replica decodes the same bytes and refuses the entry alike,
+		// writing nothing: a refusal, not a failure of this replica.
+		return fmt.Errorf("%w: %v", errEntryRefused, err)
+	}
 	apply := func(txn storage.Txn) error {
+		if !checked {
+			// Once the cluster checks entries, one without a base was
+			// proposed before the check was on, or by a member that does not
+			// check: it cannot be shown to fit this state. Every replica has
+			// the same flag and refuses it alike; the leader stages the
+			// write again.
+			on, err := catalog.StaleChecks(txn)
+			if err != nil {
+				return err
+			}
+			if on {
+				return errStaleWrite
+			}
+		}
+		if checked {
+			// Refuse a write-set staged on a state other than this one:
+			// it would overwrite whatever was applied in between.
+			applied, err := catalog.AppliedIndex(txn)
+			if err != nil {
+				return err
+			}
+			if applied != base {
+				return errStaleWrite
+			}
+		}
 		if err := applyWriteSet(l.Data, txn); err != nil {
 			return err
 		}
@@ -106,12 +137,15 @@ func (f *fsm) Apply(l *raft.Log) any {
 		// subscription relies on it to change voter without going backwards.
 		return catalog.SetAppliedIndex(txn, l.Index)
 	}
-	var err error
 	if hub := f.hub.Load(); hub != nil {
 		// Commits through the store, then reports the write to the watchers.
 		err = hub.Update(f.store, apply)
 	} else {
 		err = f.store.Update(apply)
+	}
+	if errors.Is(err, errStaleWrite) {
+		// Decided from the replicated state alone: every replica refuses it.
+		return errStaleWrite
 	}
 	if err != nil {
 		err = fmt.Errorf("%w (entry %d: %v)", ErrReplicaFailed, l.Index, err)

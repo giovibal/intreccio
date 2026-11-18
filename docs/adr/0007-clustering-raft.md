@@ -63,6 +63,49 @@ removes every determinism hazard (clock, rand, map iteration order) and preserve
 invariant #1 for free — the leader already emitted all index keys into the
 write-set.
 
+A write-set is only valid on the state it was staged on. Each entry therefore
+carries, in `raft.Log.Extensions`, the applied index of that state (the catalog
+key `A`); the FSM refuses an entry whose base is no longer the applied index,
+and the leader stages the write again. This covers a leadership change between
+staging and proposing, including one that comes back to the same node after
+another leader has committed writes (#98). The refusal depends only on the
+replicated state, so every replica refuses the same entries. Entries without
+the extension, written before it existed, are applied as before.
+
+A member built before the check ignores the extension and would apply an
+entry the others refuse. So the check is turned on for the whole cluster, once,
+by a replicated write: the catalog key `S`, written in the write-set of the
+first write staged after every other member has answered the forwarding
+handshake with protocol version 2 or later (`wire.VersionStaleWriteCheck`).
+"Every other member" means the Raft configuration and the configured `Peers`:
+a voter not yet admitted by `addVoters` will apply the whole log too. After
+activation every entry carries a base, whatever later probes say, and the FSM
+refuses an entry without one as stale, so the leader stages it again. The key
+is part of the replicated state, so a new leader, a restarted member and a
+snapshot all carry it.
+
+Before activation a leader tells three cases apart, from the versions its
+members answered. Answers are remembered, legacy ones included; a legacy
+answer is asked again every few seconds, so that a member upgraded in place is
+noticed and the check turns on with a later write, under the same leader. A
+legacy answer stays valid until a new one comes, so a member restarting for
+its upgrade does not become unknown. The three cases:
+
+- every member answered 2 or later: the write turns the check on;
+- every member answered, one with an older version (a rolling upgrade):
+  entries go unchecked, as before the check, and every replica applies the
+  same ones;
+- a member has not answered (down, unreachable, not yet admitted): neither an
+  unchecked nor a checked entry is safe, so the write is refused with
+  `ErrConflict`, before anything is proposed, and can be retried.
+
+The last case trades availability for safety, and only before activation: a
+new cluster cannot write until all its configured voters have answered once,
+and a leader elected during an upgrade cannot write while a member it has not
+yet heard from is down. Once the check is on, a member that does not answer
+no longer matters. Downgrading a member to a build without the check once it
+is on is not supported.
+
 ### Topology: a small quorum of data nodes plus stateless clients
 A fixed set of **3 or 5 voting data nodes** forms the Raft quorum and holds the
 data. Other service instances join as **stateless clients** that forward writes to

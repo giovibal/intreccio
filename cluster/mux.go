@@ -50,6 +50,9 @@ var errConnClosed = errors.New("closed")
 type muxConn struct {
 	conn net.Conn
 	ka   keepalive
+	// version is the protocol version the connection speaks: this build's,
+	// or an older member's.
+	version uint16
 
 	wmu sync.Mutex // serializes frame writes
 
@@ -75,6 +78,34 @@ func dialMux(ctx context.Context, addr string, tlsCfg *tls.Config, ka keepalive)
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
+	conn, v, err := dialVersion(ctx, addr, tlsCfg, wire.Version)
+	if err != nil && v >= wire.MinVersion && v < wire.Version {
+		// An older member: it answered with its version and hung up. Dial
+		// again in that version; the frames are the same.
+		conn, v, err = dialVersion(ctx, addr, tlsCfg, v)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	c := &muxConn{
+		conn:    conn,
+		ka:      ka,
+		version: v,
+		streams: map[uint32]*muxStream{},
+		closed:  make(chan struct{}),
+	}
+	go c.readLoop()
+	go c.pingLoop()
+	return c, nil
+}
+
+// dialVersion connects to addr and sends a handshake announcing want. It
+// returns the connection and the version the member answered with when that
+// is want. When it is another version the connection is closed and the
+// error says so; the version is returned all the same, so that the caller
+// can dial again in a version both speak.
+func dialVersion(ctx context.Context, addr string, tlsCfg *tls.Config, want uint16) (net.Conn, uint16, error) {
 	var (
 		conn net.Conn
 		err  error
@@ -87,29 +118,24 @@ func dialMux(ctx context.Context, addr string, tlsCfg *tls.Config, ka keepalive)
 		conn, err = d.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("cluster: dial %s: %w", addr, err)
+		return nil, 0, fmt.Errorf("cluster: dial %s: %w", addr, err)
 	}
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	if err := wire.WriteHandshake(conn); err != nil {
+	if err := wire.WriteHandshakeVersion(conn, want); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("cluster: handshake with %s: %w", addr, err)
+		return nil, 0, fmt.Errorf("cluster: handshake with %s: %w", addr, err)
 	}
-	if err := wire.ReadHandshake(conn); err != nil {
+	got, err := wire.ReadHandshakeVersion(conn)
+	if err == nil && got != want {
+		err = &wire.VersionError{Local: want, Remote: got}
+	}
+	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("cluster: handshake with %s: %w", addr, err)
+		return nil, got, fmt.Errorf("cluster: handshake with %s: %w", addr, err)
 	}
 	_ = conn.SetDeadline(time.Time{})
-
-	c := &muxConn{
-		conn:    conn,
-		ka:      ka,
-		streams: map[uint32]*muxStream{},
-		closed:  make(chan struct{}),
-	}
-	go c.readLoop()
-	go c.pingLoop()
-	return c, nil
+	return conn, got, nil
 }
 
 // fail closes the connection, recording why. Every stream sees it.

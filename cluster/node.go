@@ -88,6 +88,17 @@ type raftNode struct {
 	// shedding is set once shedLeadership has been started (on the first
 	// failure); it is never cleared.
 	shedding atomic.Bool
+
+	// peerVersions holds, by node ID, the forwarding-protocol version each
+	// other member answered with, as a peerVersion (see membersCapability).
+	peerVersions sync.Map
+	// legacyRefresh is how long an answer older than the stale-write check
+	// is trusted before the member is asked again (it may have been
+	// upgraded in place). Tests shorten it.
+	legacyRefresh time.Duration
+	// probeVersion asks the member at a forwarding address which protocol
+	// version it speaks. Tests replace it; it is dialVersion otherwise.
+	probeVersion func(ctx context.Context, addr string) (uint16, error)
 }
 
 // newNode starts a clustered node. Phases B–C support RoleVoter. A single node
@@ -203,6 +214,8 @@ func newNode(cfg Config) (*raftNode, error) {
 		pool:            newConnPool(tlsClient),
 		stop:            make(chan struct{}),
 	}
+	n.probeVersion = n.dialVersion
+	n.legacyRefresh = defaultLegacyRefresh
 	self.Store(n)
 	if f.failed() != nil {
 		n.replicaFailed() // failed during the replay above
@@ -308,11 +321,155 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	n.writeMu.Lock()
 	defer n.writeMu.Unlock()
 
+	for attempt := 0; ; attempt++ {
+		result, rejected, err := n.applyOnce(stage)
+		if !rejected {
+			return result, err
+		}
+		// The write was staged on a state that changed before the entry was
+		// applied: every replica refused it, so nothing was written. Stage
+		// it again on the current state.
+		if attempt+1 >= maxStaleRetries {
+			return nil, fmt.Errorf("cluster: write kept being staged on a stale state: %w", storage.ErrConflict)
+		}
+	}
+}
+
+// capability says what the other members of the cluster are known to do
+// with the base of an entry (see membersCapability).
+type capability int
+
+const (
+	// allCheck: every other member checks the base. The cluster may turn
+	// the check on.
+	allCheck capability = iota
+	// someLegacy: every member's version is known, and one is older than
+	// the check (a rolling upgrade). Entries go unchecked, so that every
+	// replica applies the same ones.
+	someLegacy
+	// someUnknown: a member has not answered (it is down, unreachable, or
+	// not yet admitted). An unchecked entry is safe only if that member is
+	// older, a checked one only if it is newer: no write can be protected,
+	// and none is accepted until the check is on.
+	someUnknown
+)
+
+// capabilityProbeTimeout bounds how long a write waits for the members whose
+// version it does not know yet.
+const capabilityProbeTimeout = 500 * time.Millisecond
+
+// membersCapability finds out, by the protocol version each member answers
+// the forwarding handshake with, whether the other members check the base of
+// an entry. The members are those of the Raft configuration and those
+// configured in Peers: a voter that addVoters has not admitted yet will
+// apply the log all the same. Members whose version is not known are asked
+// now, in parallel; an answer, legacy ones included, is remembered.
+func (n *raftNode) membersCapability() (capability, string) {
+	ids := map[string]bool{}
+	for _, p := range n.cfg.Peers {
+		ids[p.ID] = true
+	}
+	if future := n.raft.GetConfiguration(); future.Error() == nil {
+		for _, srv := range future.Configuration().Servers {
+			ids[string(srv.ID)] = true
+		}
+	}
+	delete(ids, n.cfg.NodeID)
+
+	// Ask the members never heard from, and the ones last heard from in an
+	// older version once that answer is legacyRefresh old: they may have
+	// been upgraded in place. A legacy answer stays until a new one comes,
+	// so that a member restarting for its upgrade does not become unknown.
+	var ask []string
+	now := time.Now()
+	for id := range ids {
+		pv, ok := n.peerVersions.Load(id)
+		if !ok {
+			ask = append(ask, id)
+			continue
+		}
+		if p := pv.(peerVersion); p.version < wire.VersionStaleWriteCheck && now.Sub(p.asked) >= n.legacyRefresh {
+			n.peerVersions.Store(id, peerVersion{version: p.version, asked: now})
+			ask = append(ask, id)
+		}
+	}
+	if len(ask) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), capabilityProbeTimeout)
+		var wg sync.WaitGroup
+		for _, id := range ask {
+			addr, ok := n.forwardAddrByID[id]
+			if !ok {
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if v, err := n.probeVersion(ctx, addr); err == nil {
+					n.peerVersions.Store(id, peerVersion{version: v, asked: time.Now()})
+				}
+			}()
+		}
+		wg.Wait()
+		cancel()
+	}
+
+	result, culprit := allCheck, ""
+	for id := range ids {
+		pv, ok := n.peerVersions.Load(id)
+		switch {
+		case !ok:
+			return someUnknown, id
+		case pv.(peerVersion).version < wire.VersionStaleWriteCheck:
+			result, culprit = someLegacy, id
+		}
+	}
+	return result, culprit
+}
+
+// peerVersion is a member's answer to the version probe, and when it was
+// last asked.
+type peerVersion struct {
+	version uint16
+	asked   time.Time
+}
+
+// defaultLegacyRefresh is how long a legacy answer is trusted (see
+// raftNode.legacyRefresh): a member upgraded in place is noticed within it,
+// and the check turns on with the first write after that.
+const defaultLegacyRefresh = 5 * time.Second
+
+// dialVersion connects to a member's forwarding address and returns the
+// protocol version it answers the handshake with.
+func (n *raftNode) dialVersion(ctx context.Context, addr string) (uint16, error) {
+	c, err := dialMux(ctx, addr, n.tlsClient, defaultKeepalive)
+	var mismatch *wire.VersionError
+	switch {
+	case err == nil:
+		c.Close()
+		return c.version, nil
+	case errors.As(err, &mismatch):
+		return mismatch.Remote, nil
+	default:
+		return 0, err
+	}
+}
+
+// maxStaleRetries bounds how many times ApplyWrite stages a write again after
+// the state machine refused it as stale (see applyOnce). A refusal needs a
+// leadership change between staging and applying, so this is rarely more
+// than one.
+const maxStaleRetries = 10
+
+// applyOnce stages a write and proposes its write-set. rejected reports that
+// the state machine refused the entry because the state it was staged on had
+// changed meanwhile; nothing was applied anywhere, and the caller may stage
+// it again. Called with writeMu held.
+func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result any, rejected bool, err error) {
 	if n.raft.State() != raft.Leader {
-		return nil, errNotLeader
+		return nil, false, errNotLeader
 	}
 	if err := n.fsm.failed(); err != nil {
-		return nil, err // staging would read a state missing a write
+		return nil, false, err // staging would read a state missing a write
 	}
 	// A newly elected leader can hold committed entries its state machine has
 	// not applied yet. Staging against that store would read stale data and
@@ -320,43 +477,88 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	// each term waits for the state machine to catch up.
 	if term := n.raft.CurrentTerm(); term != n.barrierTerm {
 		if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
-			return nil, fmt.Errorf("cluster: leader barrier: %w", err)
+			return nil, false, fmt.Errorf("cluster: leader barrier: %w", err)
 		}
 		n.barrierTerm = term
 	}
 
-	result, writeSet, err := n.stage(stage)
+	// Until the cluster checks entries, find out whether it can start to,
+	// and whether an unchecked entry is safe meanwhile.
+	capable, member := allCheck, ""
+	if on, err := n.staleChecksOn(); err != nil {
+		return nil, false, err
+	} else if !on {
+		capable, member = n.membersCapability()
+	}
+
+	result, writeSet, base, checked, err := n.stage(stage, capable == allCheck)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if writeSet == nil {
-		return result, nil // no mutations to replicate
+		return result, false, nil // no mutations to replicate
+	}
+	if !checked && capable == someUnknown {
+		// An unchecked entry could overwrite a newer state, a checked one
+		// could be applied unchecked by an older member: refuse the write
+		// before anything is proposed, so that it can be retried.
+		return nil, false, fmt.Errorf("cluster: cannot protect the write while the version of member %s is unknown: %w", member, storage.ErrConflict)
 	}
 
-	future := n.raft.Apply(writeSet, n.applyTimeout)
+	var ext []byte
+	if checked {
+		ext = encodeBase(base)
+	}
+	future := n.raft.ApplyLog(raft.Log{Data: writeSet, Extensions: ext}, n.applyTimeout)
 	if err := future.Error(); err != nil {
-		return nil, replicateError(err)
+		return nil, false, replicateError(err)
 	}
-	if err, ok := future.Response().(error); ok && err != nil {
-		// The entry is committed: the other replicas apply it. Only this
-		// member failed to store it, so the write took effect, but this
-		// member cannot confirm it.
-		return nil, unknownOutcome("committed, but this member failed to store it: %v", err)
+	if rejected, err := applyResponse(future.Response()); rejected || err != nil {
+		return nil, rejected, err
 	}
-	return result, nil
+	return result, false, nil
 }
 
-// stage runs a write against a recording transaction and returns its result
-// and the write-set it produced (nil when it changed nothing). The
-// transaction is always rolled back: the FSM is the only writer.
+// staleChecksOn reports whether the cluster has turned the stale-write check
+// on (catalog.StaleChecks), in this member's state.
+func (n *raftNode) staleChecksOn() (bool, error) {
+	var on bool
+	err := n.View(func(txn storage.Txn) (err error) {
+		on, err = catalog.StaleChecks(txn)
+		return err
+	})
+	return on, err
+}
+
+// stage runs a write against a recording transaction and returns its result,
+// the write-set it produced (nil when it changed nothing), base, the applied
+// index of the state it was staged on, and checked, whether the entry must
+// carry that base (see encodeBase). The transaction is always rolled back:
+// the FSM is the only writer.
+//
+// Entries are checked once the cluster has turned the check on
+// (catalog.StaleChecks). enable turns it on, in the write-set of this very
+// write: the caller passes it once every member has said it checks entries.
 //
 // The store's read lock is released however stage ends, a panic in the
 // caller's code included: a Restore takes the lock exclusively and would
 // otherwise wait forever, with every later reader queued behind it.
-func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, writeSet []byte, err error) {
+func (n *raftNode) stage(stage func(txn storage.Txn) (any, error), enable bool) (result any, writeSet []byte, base uint64, checked bool, err error) {
 	n.storeMu.RLock()
 	defer n.storeMu.RUnlock()
 	err = n.store.Update(func(real storage.Txn) error {
+		// The last command applied to the state staged on. Leadership can
+		// change and come back while the caller's code runs, with another
+		// leader's writes applied meanwhile: the write-set below would then
+		// overwrite them. The state machine refuses it unless the state is
+		// still this one.
+		var err error
+		if base, err = catalog.AppliedIndex(real); err != nil {
+			return err
+		}
+		if checked, err = catalog.StaleChecks(real); err != nil {
+			return err
+		}
 		rec := newRecordTxn(real)
 		r, err := stage(rec)
 		if err != nil {
@@ -366,13 +568,19 @@ func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, 
 		if rec.empty() {
 			return errStaged
 		}
+		if !checked && enable {
+			if err := catalog.EnableStaleChecks(rec); err != nil {
+				return err
+			}
+			checked = true
+		}
 		writeSet = rec.encode()
 		return errStaged // roll back; effects are replicated, not committed here
 	})
 	if err != nil && !errors.Is(err, errStaged) {
-		return nil, nil, err
+		return nil, nil, 0, false, err
 	}
-	return result, writeSet, nil
+	return result, writeSet, base, checked, nil
 }
 
 // replicaFailed reacts to the state machine's failure (ErrReplicaFailed):

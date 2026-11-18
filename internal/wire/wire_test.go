@@ -456,3 +456,28 @@ func FuzzDecodeSubscription(f *testing.F) {
 		}
 	})
 }
+
+// TestHandshakeVersionRange: a handshake announcing any version from
+// MinVersion to Version is accepted and reported; one outside is a
+// *VersionError that still reports what the peer announced.
+func TestHandshakeVersionRange(t *testing.T) {
+	for v := MinVersion; v <= Version; v++ {
+		var buf bytes.Buffer
+		if err := WriteHandshakeVersion(&buf, v); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ReadHandshakeVersion(&buf)
+		if err != nil || got != v {
+			t.Errorf("version %d: got %d, %v", v, got, err)
+		}
+	}
+	for _, v := range []uint16{MinVersion - 1, Version + 1} {
+		var buf bytes.Buffer
+		_ = WriteHandshakeVersion(&buf, v)
+		got, err := ReadHandshakeVersion(&buf)
+		var ve *VersionError
+		if !errors.As(err, &ve) || got != v || ve.Remote != v {
+			t.Errorf("version %d: got %d, %v; want a VersionError naming it", v, got, err)
+		}
+	}
+}

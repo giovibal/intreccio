@@ -31,8 +31,27 @@ import (
 )
 
 // Version is the protocol version of this build. Bump it on any incompatible
-// change to the handshake, the frame layout or a message encoding.
-const Version uint16 = 1
+// change to the handshake, the frame layout or a message encoding, or to what
+// members expect of each other.
+//
+//   - 1: the framed protocol (ADR 0011).
+//   - 2: frames unchanged. The member's state machine refuses a write-set
+//     entry staged on a stale state (ADR 0007); a leader marks entries for
+//     that check only once every other member answers with version 2 or
+//     later, since an older one would apply them unchecked.
+const Version uint16 = 2
+
+// VersionStaleWriteCheck is the first version whose members check the base
+// of a write-set entry (see Version).
+const VersionStaleWriteCheck uint16 = 2
+
+// MinVersion is the oldest protocol version this build still speaks. Versions
+// from MinVersion to Version share the same frames, so a connection between
+// members of different versions in that range works, in the older version:
+// the accepting side answers the version the dialler asked for, and a
+// dialler turned down by an older member dials again in that member's
+// version. This is what lets a cluster be upgraded one member at a time.
+const MinVersion uint16 = 1
 
 // MaxPayload bounds the payload of one frame. Results are split over several
 // Rows frames, so the bound applies to a single row and to a single request.
@@ -153,29 +172,41 @@ func ReadFrame(r io.Reader) (Frame, error) {
 }
 
 // WriteHandshake sends this build's handshake.
-func WriteHandshake(w io.Writer) error {
+func WriteHandshake(w io.Writer) error { return WriteHandshakeVersion(w, Version) }
+
+// WriteHandshakeVersion sends a handshake announcing version v.
+func WriteHandshakeVersion(w io.Writer, v uint16) error {
 	var b [handshakeLen]byte
 	copy(b[:4], magic[:])
-	binary.BigEndian.PutUint16(b[4:6], Version)
+	binary.BigEndian.PutUint16(b[4:6], v)
 	_, err := w.Write(b[:])
 	return err
 }
 
 // ReadHandshake reads the peer's handshake. It returns a *VersionError when the
-// peer speaks another version, and an error wrapping ErrProtocol when the peer
-// does not speak this protocol at all.
+// peer speaks a version this build cannot (outside MinVersion..Version), and
+// an error wrapping ErrProtocol when the peer does not speak this protocol at
+// all.
 func ReadHandshake(r io.Reader) error {
+	_, err := ReadHandshakeVersion(r)
+	return err
+}
+
+// ReadHandshakeVersion is ReadHandshake, also returning the version the peer
+// announced (with a *VersionError as well, when it is out of range).
+func ReadHandshakeVersion(r io.Reader) (uint16, error) {
 	var b [handshakeLen]byte
 	if _, err := io.ReadFull(r, b[:]); err != nil {
-		return fmt.Errorf("%w: handshake: %v", ErrProtocol, err)
+		return 0, fmt.Errorf("%w: handshake: %v", ErrProtocol, err)
 	}
 	if [4]byte(b[:4]) != magic {
-		return fmt.Errorf("%w: handshake: not an intreccio cluster endpoint", ErrProtocol)
+		return 0, fmt.Errorf("%w: handshake: not an intreccio cluster endpoint", ErrProtocol)
 	}
-	if v := binary.BigEndian.Uint16(b[4:6]); v != Version {
-		return &VersionError{Local: Version, Remote: v}
+	v := binary.BigEndian.Uint16(b[4:6])
+	if v < MinVersion || v > Version {
+		return v, &VersionError{Local: Version, Remote: v}
 	}
-	return nil
+	return v, nil
 }
 
 // Request asks a member to run a query. It is also the seam between the root

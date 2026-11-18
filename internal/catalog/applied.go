@@ -43,3 +43,29 @@ func AppliedIndex(txn storage.Txn) (uint64, error) {
 	}
 	return binary.BigEndian.Uint64(v), nil
 }
+
+// tagStaleChecks is the first byte of the key that turns on the stale-write
+// check of a cluster (ADR 0007). Disjoint from every other tag.
+const tagStaleChecks byte = 'S'
+
+var staleChecksKey = []byte{tagStaleChecks}
+
+// EnableStaleChecks records that every member of the cluster checks the base
+// of a write-set entry, so that from now on every entry must carry one. It is
+// written by a replicated write-set, like the data, and never removed.
+func EnableStaleChecks(txn storage.Txn) error {
+	return txn.Set(staleChecksKey, []byte{1})
+}
+
+// StaleChecks reports whether EnableStaleChecks was written in the state txn
+// reads.
+func StaleChecks(txn storage.Txn) (bool, error) {
+	_, err := txn.Get(staleChecksKey)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
