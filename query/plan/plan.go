@@ -747,13 +747,19 @@ func sortKeys(items []ProjItem, merging bool, orderBy []ast.SortItem) (keys []So
 // columnRefs rewrites a sort key for evaluation above the projection: each
 // sub-expression that repeats a projected one becomes a reference to its
 // column (ORDER BY n.age + 1 after RETURN n.age + 1, or ORDER BY count(*)).
+//
+// A sub-expression that reads a name a column has rebound is not a repeat,
+// however alike it looks: in RETURN x.a AS original, x.b AS x ORDER BY x.a
+// the sort key reads the column x, not the variable x that original was
+// computed from.
 func columnRefs(e ast.Expr, items []ProjItem) ast.Expr {
+	rebound := reboundNames(items)
 	return rewriteScoped(e, func(x ast.Expr, locals []string) (ast.Expr, bool) {
 		switch x.(type) {
 		case *ast.Variable, *ast.Literal, *ast.Param:
 			return nil, false
 		}
-		if readsAny(x, locals) {
+		if readsAny(x, locals) || readsAny(x, rebound) {
 			return nil, false
 		}
 		for _, it := range items {
@@ -763,6 +769,23 @@ func columnRefs(e ast.Expr, items []ProjItem) ast.Expr {
 		}
 		return nil, false
 	})
+}
+
+// reboundNames returns the column names that stand for something other than
+// the variable of the same name before the projection (x.b AS x). The last
+// item of a name wins, as it does in the projected row.
+func reboundNames(items []ProjItem) []string {
+	last := make(map[string]ast.Expr, len(items))
+	for _, it := range items {
+		last[it.Column] = it.Expr
+	}
+	var out []string
+	for name, e := range last {
+		if v, ok := e.(*ast.Variable); !ok || v.Name != name {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // inlineColumns rewrites a sort key for evaluation below the projection: a
