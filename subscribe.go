@@ -20,7 +20,7 @@ import (
 const DefaultSubscriptionMaxRows = 10000
 
 var (
-	// ErrStreamQuery is returned by Query for a query carrying the STREAM
+	// ErrStreamQuery is returned by DB.Query and Tx.Query for a query carrying the STREAM
 	// prefix: a live query has no single result and must be run with Subscribe.
 	ErrStreamQuery = errors.New("a STREAM query is a live query: run it with Subscribe")
 
