@@ -6,6 +6,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 func people(n int) []map[string]any {
@@ -136,5 +139,57 @@ func TestImportRejectsBadInput(t *testing.T) {
 	}
 	if got := rowsOf(t, db, "MATCH (x:X) RETURN count(x)"); got != "[[0]]" {
 		t.Errorf("rejected imports wrote %s", got)
+	}
+}
+
+// unsureAfter is a backend that commits every write but reports the outcome
+// of the nth one as unknown, as a cluster does when the reply to a committed
+// write is lost.
+type unsureAfter struct {
+	*localBackend
+	n      int
+	writes int
+}
+
+func (b *unsureAfter) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, error) {
+	res, err := b.localBackend.ApplyWrite(stage)
+	if b.writes++; err == nil && b.writes == b.n {
+		return nil, &wire.Error{Code: wire.CodeOutcomeUnknown, Msg: "cluster: write outcome unknown: test"}
+	}
+	return res, err
+}
+
+// TestImportUnknownOutcome covers #89: when a batch's outcome is unknown,
+// Import reports the confirmed rows and an error matching
+// ErrWriteOutcomeUnknown, and the batch may well be in the database.
+func TestImportUnknownOutcome(t *testing.T) {
+	ctx := context.Background()
+	store, err := openMemStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := wrapBackend(&unsureAfter{localBackend: &localBackend{store: store}, n: 2})
+	defer func() { _ = db.Close() }()
+
+	rows := people(1000)
+	res, err := db.Import(ctx, "UNWIND $rows AS r CREATE (p:Person) SET p = r", rows, nil, WithBatchSize(300))
+	if !errors.Is(err, ErrWriteOutcomeUnknown) || !strings.Contains(err.Error(), "rows 300 to 599") {
+		t.Fatalf("err = %v, want ErrWriteOutcomeUnknown naming rows 300 to 599", err)
+	}
+	if res != (ImportResult{Rows: 300, Batches: 1}) {
+		t.Errorf("result = %+v, want the first batch only", res)
+	}
+	// The uncertain batch was in fact committed: resuming at res.Rows with
+	// CREATE would duplicate it, which is what the documentation warns of.
+	if got := rowsOf(t, db, "MATCH (p:Person) RETURN count(p)"); got != "[[600]]" {
+		t.Errorf("committed = %s, want 600 (the uncertain batch included)", got)
+	}
+	// Reconciling: an idempotent query can replay from res.Rows safely.
+	res, err = db.Import(ctx, "UNWIND $rows AS r MERGE (p:Person {uid: r.uid}) SET p = r", rows[res.Rows:], nil, WithBatchSize(300))
+	if err != nil || res.Rows != 700 {
+		t.Fatalf("replay = %+v, %v", res, err)
+	}
+	if got := rowsOf(t, db, "MATCH (p:Person) RETURN count(p)"); got != "[[1000]]" {
+		t.Errorf("after the replay = %s, want 1000", got)
 	}
 }

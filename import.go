@@ -32,10 +32,15 @@ func WithBatchSize(n int) ImportOption {
 
 // ImportResult reports how far an Import got.
 type ImportResult struct {
-	// Rows is the number of rows committed: the rows before the first
-	// failed batch, all of them on success.
+	// Rows is the number of rows confirmed committed: the rows before the
+	// first failed batch, all of them on success.
+	//
+	// It is where a failed import resumes, unless the error matches
+	// ErrWriteOutcomeUnknown. Then the failed batch, rows[Rows:] up to the
+	// end named in the error, may have been committed too: resuming at Rows
+	// would write it a second time. See Import.
 	Rows int
-	// Batches is the number of transactions committed.
+	// Batches is the number of transactions confirmed committed.
 	Batches int
 }
 
@@ -54,6 +59,18 @@ type ImportResult struct {
 // then names the failed rows (by index in rows) and ImportResult.Rows says
 // how many were committed, so the caller can resume from there. In cluster
 // mode every batch is a replicated write, forwarded to the leader as usual.
+//
+// One error is different. In cluster mode a batch can fail with an error
+// matching ErrWriteOutcomeUnknown: it was sent, and whether it was committed
+// cannot be told. The failed batch is then all or nothing, but which one is
+// not known, so do not simply resume at ImportResult.Rows:
+//
+//	res, err := db.Import(ctx, cypher, rows, nil)
+//	if errors.Is(err, intreccio.ErrWriteOutcomeUnknown) {
+//	    // rows[res.Rows:end] (end as named in err) may be committed:
+//	    // check for them, or replay them if the query is idempotent
+//	    // (MERGE rather than CREATE), before importing the rest.
+//	}
 func (db *DB) Import(ctx context.Context, cypher string, rows any, params map[string]any, opts ...ImportOption) (ImportResult, error) {
 	var res ImportResult
 	o := importOptions{batch: DefaultImportBatch}

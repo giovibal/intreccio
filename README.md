@@ -198,6 +198,25 @@ Each batch is atomic, the import as a whole is not: if a batch fails, the
 earlier ones stay committed, the error names the failed rows and `res.Rows`
 says how many rows were written, so the import can resume from there.
 
+In a cluster there is one exception. A batch that fails with
+`intreccio.ErrWriteOutcomeUnknown` was sent, and whether it was committed
+cannot be told (see
+[Clustering](#clustering-optional-high-availability)). That batch may be in
+the database already, so resuming at `res.Rows` could write it twice. Check
+for its rows first, or replay it when the query is idempotent (`MERGE`
+instead of `CREATE`):
+
+```go
+res, err := db.Import(ctx, cypher, rows, nil)
+switch {
+case errors.Is(err, intreccio.ErrWriteOutcomeUnknown):
+    // rows[res.Rows:] up to the end named in err may be committed:
+    // reconcile that batch, then import what follows it.
+case err != nil:
+    // nothing after rows[:res.Rows] was written: resume at res.Rows.
+}
+```
+
 `CREATE INDEX` indexes the existing nodes of its label in the same
 transaction, so on a label with more nodes than the limit, create the index
 before loading the data.
