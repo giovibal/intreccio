@@ -85,7 +85,11 @@ is part of the replicated state, so a new leader, a restarted member and a
 snapshot all carry it.
 
 Before activation a leader tells three cases apart, from the versions its
-members answered (answers are remembered, legacy ones included):
+members answered. Answers are remembered, legacy ones included; a legacy
+answer is asked again every few seconds, so that a member upgraded in place is
+noticed and the check turns on with a later write, under the same leader. A
+legacy answer stays valid until a new one comes, so a member restarting for
+its upgrade does not become unknown. The three cases:
 
 - every member answered 2 or later: the write turns the check on;
 - every member answered, one with an older version (a rolling upgrade):

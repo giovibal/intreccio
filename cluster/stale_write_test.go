@@ -482,3 +482,50 @@ func TestConfiguredVoterNotYetAdmitted(t *testing.T) {
 		t.Error("the check is still off with every configured voter known")
 	}
 }
+
+// TestInPlaceUpgradeTurnsTheCheckOn: the last legacy member is upgraded in
+// place, with the same leader throughout. The leader must notice it from a
+// new answer, not keep its old one forever, and turn the check on with a
+// later write, without a restart or a leadership change.
+func TestInPlaceUpgradeTurnsTheCheckOn(t *testing.T) {
+	tc := startCluster(t, 3)
+	a := tc.leaderIndex(t)
+	legacyAddr := tc.peers[(a+2)%3].ForwardAddr
+	var upgraded atomic.Bool
+	var asked atomic.Int32
+	for _, nd := range tc.nodes {
+		real := nd.dialVersion
+		nd.legacyRefresh = 50 * time.Millisecond
+		nd.probeVersion = func(ctx context.Context, addr string) (uint16, error) {
+			if addr != legacyAddr {
+				return real(ctx, addr)
+			}
+			asked.Add(1)
+			if upgraded.Load() {
+				return wire.VersionStaleWriteCheck, nil
+			}
+			return wire.VersionStaleWriteCheck - 1, nil
+		}
+	}
+
+	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
+	if checksOn(t, tc.nodes[a]) {
+		t.Fatal("the check is on with a legacy member")
+	}
+
+	upgraded.Store(true) // the member restarts on the new build
+	deadline := time.Now().Add(10 * time.Second)
+	for !checksOn(t, tc.nodes[a]) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the check never turned on after the upgrade (member asked %d times)", asked.Load())
+		}
+		time.Sleep(60 * time.Millisecond)
+		run(t, tc.dbs[a], "CREATE (:Warmup)")
+	}
+	if tc.nodes[a].raft.State() != raft.Leader {
+		t.Error("leadership changed during the test")
+	}
+	if n := asked.Load(); n < 2 {
+		t.Errorf("the upgraded member was asked %d times, want at least 2", n)
+	}
+}

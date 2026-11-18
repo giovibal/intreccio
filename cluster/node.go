@@ -89,9 +89,13 @@ type raftNode struct {
 	// failure); it is never cleared.
 	shedding atomic.Bool
 
-	// peerVersions holds the forwarding-protocol version each other member
-	// answered with, by node ID (see membersCapability).
+	// peerVersions holds, by node ID, the forwarding-protocol version each
+	// other member answered with, as a peerVersion (see membersCapability).
 	peerVersions sync.Map
+	// legacyRefresh is how long an answer older than the stale-write check
+	// is trusted before the member is asked again (it may have been
+	// upgraded in place). Tests shorten it.
+	legacyRefresh time.Duration
 	// probeVersion asks the member at a forwarding address which protocol
 	// version it speaks. Tests replace it; it is dialVersion otherwise.
 	probeVersion func(ctx context.Context, addr string) (uint16, error)
@@ -211,6 +215,7 @@ func newNode(cfg Config) (*raftNode, error) {
 		stop:            make(chan struct{}),
 	}
 	n.probeVersion = n.dialVersion
+	n.legacyRefresh = defaultLegacyRefresh
 	self.Store(n)
 	if f.failed() != nil {
 		n.replicaFailed() // failed during the replay above
@@ -371,16 +376,27 @@ func (n *raftNode) membersCapability() (capability, string) {
 	}
 	delete(ids, n.cfg.NodeID)
 
-	var unknown []string
+	// Ask the members never heard from, and the ones last heard from in an
+	// older version once that answer is legacyRefresh old: they may have
+	// been upgraded in place. A legacy answer stays until a new one comes,
+	// so that a member restarting for its upgrade does not become unknown.
+	var ask []string
+	now := time.Now()
 	for id := range ids {
-		if _, ok := n.peerVersions.Load(id); !ok {
-			unknown = append(unknown, id)
+		pv, ok := n.peerVersions.Load(id)
+		if !ok {
+			ask = append(ask, id)
+			continue
+		}
+		if p := pv.(peerVersion); p.version < wire.VersionStaleWriteCheck && now.Sub(p.asked) >= n.legacyRefresh {
+			n.peerVersions.Store(id, peerVersion{version: p.version, asked: now})
+			ask = append(ask, id)
 		}
 	}
-	if len(unknown) > 0 {
+	if len(ask) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), capabilityProbeTimeout)
 		var wg sync.WaitGroup
-		for _, id := range unknown {
+		for _, id := range ask {
 			addr, ok := n.forwardAddrByID[id]
 			if !ok {
 				continue
@@ -389,7 +405,7 @@ func (n *raftNode) membersCapability() (capability, string) {
 			go func() {
 				defer wg.Done()
 				if v, err := n.probeVersion(ctx, addr); err == nil {
-					n.peerVersions.Store(id, v)
+					n.peerVersions.Store(id, peerVersion{version: v, asked: time.Now()})
 				}
 			}()
 		}
@@ -399,16 +415,28 @@ func (n *raftNode) membersCapability() (capability, string) {
 
 	result, culprit := allCheck, ""
 	for id := range ids {
-		v, ok := n.peerVersions.Load(id)
+		pv, ok := n.peerVersions.Load(id)
 		switch {
 		case !ok:
 			return someUnknown, id
-		case v.(uint16) < wire.VersionStaleWriteCheck:
+		case pv.(peerVersion).version < wire.VersionStaleWriteCheck:
 			result, culprit = someLegacy, id
 		}
 	}
 	return result, culprit
 }
+
+// peerVersion is a member's answer to the version probe, and when it was
+// last asked.
+type peerVersion struct {
+	version uint16
+	asked   time.Time
+}
+
+// defaultLegacyRefresh is how long a legacy answer is trusted (see
+// raftNode.legacyRefresh): a member upgraded in place is noticed within it,
+// and the check turns on with the first write after that.
+const defaultLegacyRefresh = 5 * time.Second
 
 // dialVersion connects to a member's forwarding address and returns the
 // protocol version it answers the handshake with.
