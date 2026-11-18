@@ -202,16 +202,21 @@ In a cluster there is one exception. A batch that fails with
 `intreccio.ErrWriteOutcomeUnknown` was sent, and whether it was committed
 cannot be told (see
 [Clustering](#clustering-optional-high-availability)). That batch may be in
-the database already, so resuming at `res.Rows` could write it twice. Check
-for its rows first, or replay it when the query is idempotent (`MERGE`
-instead of `CREATE`):
+the database already, so resuming at `res.Rows` could write it twice.
+
+The error names the batch as `rows first to last`, with `last` inclusive: the
+uncertain rows are `rows[res.Rows:last+1]`. Replay them with an idempotent
+query (`MERGE` on a unique key instead of `CREATE`), then go on from
+`last+1`. Looking the rows up can confirm that the batch was written, but not
+finding them proves nothing: a default read may come from a follower that is
+behind, and a write whose reply was lost may still be about to commit.
 
 ```go
 res, err := db.Import(ctx, cypher, rows, nil)
 switch {
 case errors.Is(err, intreccio.ErrWriteOutcomeUnknown):
-    // rows[res.Rows:] up to the end named in err may be committed:
-    // reconcile that batch, then import what follows it.
+    // rows[res.Rows:last+1] may be committed (last as named in err):
+    // replay them with MERGE, then import rows[last+1:].
 case err != nil:
     // nothing after rows[:res.Rows] was written: resume at res.Rows.
 }

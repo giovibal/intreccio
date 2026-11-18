@@ -184,12 +184,23 @@ func TestImportUnknownOutcome(t *testing.T) {
 	if got := rowsOf(t, db, "MATCH (p:Person) RETURN count(p)"); got != "[[600]]" {
 		t.Errorf("committed = %s, want 600 (the uncertain batch included)", got)
 	}
-	// Reconciling: an idempotent query can replay from res.Rows safely.
-	res, err = db.Import(ctx, "UNWIND $rows AS r MERGE (p:Person {uid: r.uid}) SET p = r", rows[res.Rows:], nil, WithBatchSize(300))
-	if err != nil || res.Rows != 700 {
-		t.Fatalf("replay = %+v, %v", res, err)
+	// The error names the batch with an inclusive last index: the uncertain
+	// rows are rows[300:600], and 600 is the first row never sent.
+	first, last := res.Rows, 599
+	// Recovery: replay exactly the uncertain batch with an idempotent query,
+	// then import the rest as before.
+	merge := "UNWIND $rows AS r MERGE (p:Person {uid: r.uid}) SET p = r"
+	if res, err := db.Import(ctx, merge, rows[first:last+1], nil); err != nil || res.Rows != 300 {
+		t.Fatalf("replay of the uncertain batch = %+v, %v", res, err)
+	}
+	if got := rowsOf(t, db, "MATCH (p:Person) RETURN count(p)"); got != "[[600]]" {
+		t.Errorf("after the replay = %s, want still 600", got)
+	}
+	res, err = db.Import(ctx, "UNWIND $rows AS r CREATE (p:Person) SET p = r", rows[last+1:], nil, WithBatchSize(300))
+	if err != nil || res.Rows != 400 {
+		t.Fatalf("rest = %+v, %v", res, err)
 	}
 	if got := rowsOf(t, db, "MATCH (p:Person) RETURN count(p)"); got != "[[1000]]" {
-		t.Errorf("after the replay = %s, want 1000", got)
+		t.Errorf("after the rest = %s, want 1000", got)
 	}
 }

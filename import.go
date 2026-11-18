@@ -36,9 +36,10 @@ type ImportResult struct {
 	// first failed batch, all of them on success.
 	//
 	// It is where a failed import resumes, unless the error matches
-	// ErrWriteOutcomeUnknown. Then the failed batch, rows[Rows:] up to the
-	// end named in the error, may have been committed too: resuming at Rows
-	// would write it a second time. See Import.
+	// ErrWriteOutcomeUnknown. Then the failed batch, which the error names
+	// as "rows Rows to last" (last inclusive, so rows[Rows:last+1]), may have
+	// been committed too: resuming at Rows would write it a second time. See
+	// Import.
 	Rows int
 	// Batches is the number of transactions confirmed committed.
 	Batches int
@@ -63,13 +64,22 @@ type ImportResult struct {
 // One error is different. In cluster mode a batch can fail with an error
 // matching ErrWriteOutcomeUnknown: it was sent, and whether it was committed
 // cannot be told. The failed batch is then all or nothing, but which one is
-// not known, so do not simply resume at ImportResult.Rows:
+// not known, so do not simply resume at ImportResult.Rows.
+//
+// The error names the batch as "rows first to last", with last inclusive:
+// the uncertain rows are rows[res.Rows:last+1], and the first row the import
+// did not send is last+1. The safe recovery is to replay that batch with an
+// idempotent query (MERGE on a unique key rather than CREATE) and then go on
+// from last+1. Looking the rows up can confirm that the batch was written,
+// but not finding them proves nothing: a default read may be served by a
+// follower that is behind, and a write whose reply was lost may still be on
+// its way to being committed.
 //
 //	res, err := db.Import(ctx, cypher, rows, nil)
 //	if errors.Is(err, intreccio.ErrWriteOutcomeUnknown) {
-//	    // rows[res.Rows:end] (end as named in err) may be committed:
-//	    // check for them, or replay them if the query is idempotent
-//	    // (MERGE rather than CREATE), before importing the rest.
+//	    // rows[res.Rows:last+1] may be committed (first and last as named
+//	    // in err): replay them with an idempotent query, then import
+//	    // rows[last+1:].
 //	}
 func (db *DB) Import(ctx context.Context, cypher string, rows any, params map[string]any, opts ...ImportOption) (ImportResult, error) {
 	var res ImportResult
