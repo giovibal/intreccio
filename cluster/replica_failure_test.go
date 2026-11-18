@@ -180,3 +180,52 @@ func TestFailedReplicaDoesNotKeepLeadership(t *testing.T) {
 		t.Errorf("count = %d, want 3", got)
 	}
 }
+
+// TestSecondFailureStillShedsLeadership: the leadership monitor started by a
+// first failure must still cover a second failure after a restore cleared
+// the first. A monitor that exited once the failure was cleared could miss a
+// failure arriving while it released its ownership.
+func TestSecondFailureStillShedsLeadership(t *testing.T) {
+	tc := startCluster(t, 3)
+	lead := tc.leaderIndex(t)
+	f := tc.aFollower(t)
+
+	failNextApply(tc.nodes[f])
+	createPerson(t, tc.dbs[lead], "first")
+	waitFailed(t, tc.nodes[f])
+
+	// A restore installed from the leader clears the failure, and a second
+	// one follows at once.
+	tc.nodes[f].fsm.failure.Store(nil)
+	failNextApply(tc.nodes[f])
+	createPerson(t, tc.dbs[lead], "second")
+	waitFailed(t, tc.nodes[f])
+	if !tc.nodes[f].shedding.Load() {
+		t.Fatal("no leadership monitor after the second failure")
+	}
+
+	// Handed leadership, the twice-failed member gives it up again.
+	p := tc.peers[f]
+	if err := tc.nodes[lead].raft.LeadershipTransferToServer(raft.ServerID(p.ID), raft.ServerAddress(p.RaftAddr)).Error(); err != nil {
+		t.Fatalf("transfer leadership to the failed member: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		healthy := -1
+		if tc.nodes[f].raft.State() != raft.Leader {
+			for i, nd := range tc.nodes {
+				if i != f && nd.raft.State() == raft.Leader {
+					healthy = i
+				}
+			}
+		}
+		if healthy >= 0 {
+			createPerson(t, tc.dbs[healthy], "third")
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the member that failed twice kept leadership")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

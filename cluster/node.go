@@ -85,7 +85,8 @@ type raftNode struct {
 	stop     chan struct{}
 	stopOnce sync.Once
 
-	// shedding is set while shedLeadership runs (the replica has failed).
+	// shedding is set once shedLeadership has been started (on the first
+	// failure); it is never cleared.
 	shedding atomic.Bool
 }
 
@@ -324,26 +325,8 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 		n.barrierTerm = term
 	}
 
-	var (
-		result   any
-		writeSet []byte
-	)
-	n.storeMu.RLock()
-	err := n.store.Update(func(real storage.Txn) error {
-		rec := newRecordTxn(real)
-		r, err := stage(rec)
-		if err != nil {
-			return err
-		}
-		result = r
-		if rec.empty() {
-			return errStaged
-		}
-		writeSet = rec.encode()
-		return errStaged // roll back; effects are replicated, not committed here
-	})
-	n.storeMu.RUnlock()
-	if err != nil && !errors.Is(err, errStaged) {
+	result, writeSet, err := n.stage(stage)
+	if err != nil {
 		return nil, err
 	}
 	if writeSet == nil {
@@ -363,6 +346,35 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	return result, nil
 }
 
+// stage runs a write against a recording transaction and returns its result
+// and the write-set it produced (nil when it changed nothing). The
+// transaction is always rolled back: the FSM is the only writer.
+//
+// The store's read lock is released however stage ends, a panic in the
+// caller's code included: a Restore takes the lock exclusively and would
+// otherwise wait forever, with every later reader queued behind it.
+func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, writeSet []byte, err error) {
+	n.storeMu.RLock()
+	defer n.storeMu.RUnlock()
+	err = n.store.Update(func(real storage.Txn) error {
+		rec := newRecordTxn(real)
+		r, err := stage(rec)
+		if err != nil {
+			return err
+		}
+		result = r
+		if rec.empty() {
+			return errStaged
+		}
+		writeSet = rec.encode()
+		return errStaged // roll back; effects are replicated, not committed here
+	})
+	if err != nil && !errors.Is(err, errStaged) {
+		return nil, nil, err
+	}
+	return result, writeSet, nil
+}
+
 // replicaFailed reacts to the state machine's failure (ErrReplicaFailed):
 // live queries are woken so that they end instead of serving a state that
 // misses a write, and a leader hands leadership to a healthy voter, since it
@@ -376,21 +388,23 @@ func (n *raftNode) replicaFailed() {
 	}
 }
 
-// shedLeadershipEvery is how often a failed replica checks whether it holds
-// leadership.
+// shedLeadershipEvery is how often a replica that has failed once checks
+// whether it is failed and holds leadership.
 const shedLeadershipEvery = 100 * time.Millisecond
 
-// shedLeadership keeps a failed replica from holding leadership for as long
-// as it stays failed. Its log is up to date, so it stays eligible: it can win
-// an election, or be handed leadership, after it failed. Each time it finds
-// itself leader it transfers leadership to a healthy voter, retrying when a
-// transfer fails.
+// shedLeadership keeps a failed replica from holding leadership. Its log is
+// up to date, so it stays eligible: it can win an election, or be handed
+// leadership, after it failed. Each time it finds itself failed and leader it
+// transfers leadership to a healthy voter, retrying when a transfer fails.
+//
+// Started by the first failure, it runs until the node closes, also while a
+// restore has cleared the failure: a monitor that exited then could miss a
+// second failure arriving as it released its ownership.
 func (n *raftNode) shedLeadership() {
-	defer n.shedding.Store(false)
 	t := time.NewTicker(shedLeadershipEvery)
 	defer t.Stop()
-	for n.fsm.failed() != nil {
-		if n.raft.State() == raft.Leader {
+	for {
+		if n.fsm.failed() != nil && n.raft.State() == raft.Leader {
 			_ = n.raft.LeadershipTransfer().Error()
 		}
 		select {

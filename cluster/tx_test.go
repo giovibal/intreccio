@@ -64,3 +64,45 @@ func TestUpdateOnCluster(t *testing.T) {
 		t.Fatalf("View on client = %v, want ErrTxNotOnLeader", err)
 	}
 }
+
+// TestUpdatePanicReleasesTheStoreLock covers #99: a panic in a DB.Update
+// callback, recovered by the application, must not leave the store's read
+// lock held. A snapshot restore takes that lock exclusively and would wait
+// forever, with every later reader queued behind it.
+func TestUpdatePanicReleasesTheStoreLock(t *testing.T) {
+	ctx := context.Background()
+	tc := startCluster(t, 1)
+	lead := tc.leaderIndex(t)
+	db, node := tc.dbs[lead], tc.nodes[lead]
+
+	func() {
+		defer func() {
+			if r := recover(); r != "boom" {
+				t.Fatalf("recovered %v, want the callback's panic", r)
+			}
+		}()
+		_ = db.Update(ctx, func(tx *intreccio.Tx) error {
+			if _, err := tx.Query(ctx, "CREATE (:Staged)", nil); err != nil {
+				return err
+			}
+			panic("boom")
+		})
+	}()
+
+	if !node.storeMu.TryLock() {
+		t.Fatal("the store lock is still held after the panic unwound")
+	}
+	node.storeMu.Unlock()
+
+	// Nothing was replicated, and the node keeps working.
+	if _, err := db.Query(ctx, "CREATE (:After)", nil); err != nil {
+		t.Fatalf("write after the panic: %v", err)
+	}
+	res, err := db.Query(ctx, "MATCH (n) RETURN labels(n)[0] AS l", nil, intreccio.Linearizable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0] != "After" {
+		t.Errorf("rows = %v, want only the node written after the panic", res.Rows)
+	}
+}

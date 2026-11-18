@@ -3,6 +3,7 @@ package intreccio
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -215,4 +216,93 @@ func TestTxQueryRejectsStream(t *testing.T) {
 			t.Errorf("Update: %s = %v; want ErrStreamQuery", q, err)
 		}
 	}
+}
+
+// TestFailedWriteAbortsTheTransaction covers #100: a write query that fails
+// after some of its changes aborts the whole transaction, even when the
+// function handles the error and returns nil.
+func TestFailedWriteAbortsTheTransaction(t *testing.T) {
+	ctx := context.Background()
+	// The first row is created, the second divides by zero.
+	const failing = "UNWIND [1, 0] AS x CREATE (n:Item {v: 10 / x}) RETURN n.v"
+	count := func(t *testing.T, db *DB) any {
+		t.Helper()
+		return mustQuery(t, db, "MATCH (n:Item) RETURN count(n)", nil).Rows[0][0]
+	}
+
+	t.Run("handled error, nil returned", func(t *testing.T) {
+		db := newDB(t)
+		mustQuery(t, db, "CREATE (:Item {v: 0})", nil) // committed before
+		var stmtErr, laterErr error
+		err := db.Update(ctx, func(tx *Tx) error {
+			_, stmtErr = tx.Query(ctx, "CREATE (:Item {v: 1})", nil)
+			if stmtErr != nil {
+				return stmtErr
+			}
+			_, stmtErr = tx.Query(ctx, failing, nil)
+			_, laterErr = tx.Query(ctx, "MATCH (n:Item) RETURN count(n)", nil)
+			return nil // the caller ignores the failure
+		})
+		if stmtErr == nil || errors.Is(stmtErr, ErrTxAborted) {
+			t.Fatalf("failing statement: %v, want its own error", stmtErr)
+		}
+		if !strings.Contains(stmtErr.Error(), "division by zero") {
+			t.Fatalf("failing statement: %v, want a division by zero", stmtErr)
+		}
+		if !errors.Is(laterErr, ErrTxAborted) || !errors.Is(laterErr, stmtErr) {
+			t.Errorf("later statement: %v, want ErrTxAborted wrapping the division by zero", laterErr)
+		}
+		if !errors.Is(err, ErrTxAborted) || !errors.Is(err, stmtErr) {
+			t.Errorf("Update = %v, want ErrTxAborted wrapping the division by zero", err)
+		}
+		// Nothing of the transaction was committed: neither the half of the
+		// failed statement nor the statement before it.
+		if got := count(t, db); got != int64(1) {
+			t.Errorf("Items after Update = %v, want 1 (only the one committed before)", got)
+		}
+	})
+
+	t.Run("error returned", func(t *testing.T) {
+		db := newDB(t)
+		err := db.Update(ctx, func(tx *Tx) error {
+			_, err := tx.Query(ctx, failing, nil)
+			return err
+		})
+		if err == nil || errors.Is(err, ErrTxAborted) {
+			t.Errorf("Update = %v, want the statement's own error", err)
+		}
+		if got := count(t, db); got != int64(0) {
+			t.Errorf("Items = %v, want 0", got)
+		}
+	})
+
+	t.Run("failures that change nothing keep the transaction usable", func(t *testing.T) {
+		db := newDB(t)
+		err := db.Update(ctx, func(tx *Tx) error {
+			if _, err := tx.Query(ctx, "CREATE (:Item {v: 1})", nil); err != nil {
+				return err
+			}
+			if _, err := tx.Query(ctx, "MATCH (n RETURN n", nil); err == nil {
+				return errors.New("a syntax error was accepted")
+			}
+			if _, err := tx.Query(ctx, "RETURN 1 / 0", nil); err == nil {
+				return errors.New("a failing read succeeded")
+			}
+			// A write refused by the planner, before any operator runs.
+			if _, err := tx.Query(ctx, "CREATE (n:New) RETURN rand() AS r ORDER BY r, n.score", nil); err == nil {
+				return errors.New("a write the planner refuses was accepted")
+			}
+			_, err := tx.Query(ctx, "CREATE (:Item {v: 2})", nil)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if got := count(t, db); got != int64(2) {
+			t.Errorf("Items = %v, want 2", got)
+		}
+		if got := mustQuery(t, db, "MATCH (n:New) RETURN count(n)", nil).Rows[0][0]; got != int64(0) {
+			t.Errorf("New = %v, want 0: the refused write ran", got)
+		}
+	})
 }
