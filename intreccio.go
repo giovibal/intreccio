@@ -286,9 +286,20 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 	// reads locally and writes/linearizable reads via the leader (forwarding when
 	// it is not the leader; issuing a read barrier first when it is).
 	if cb, ok := db.be.(clusterBackend); ok {
-		forward := !cb.Local() ||
-			(write && !cb.IsLeader()) ||
-			(o.linearizable && !write && !cb.IsLeader())
+		linearizable := o.linearizable && !write
+		forward := !cb.Local() || ((write || linearizable) && !cb.IsLeader())
+		if !forward && linearizable {
+			// The barrier is what makes a local read linearizable: once a local
+			// read is chosen it is never skipped, whatever leadership does
+			// meanwhile. A barrier refused because this member stepped down
+			// sends the read to the new leader instead.
+			if err := cb.ReadBarrier(); err != nil {
+				if cb.IsLeader() {
+					return nil, fmt.Errorf("query: %w", err)
+				}
+				forward = true
+			}
+		}
 		if forward {
 			encParams, err := encodeParams(params)
 			if err != nil {
@@ -298,7 +309,7 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 				Cypher:       cypher,
 				Params:       encParams,
 				Write:        write,
-				Linearizable: o.linearizable && !write,
+				Linearizable: linearizable,
 				MaxRows:      o.maxRows,
 			})
 			if err != nil {
@@ -309,11 +320,6 @@ func (db *DB) Query(ctx context.Context, cypher string, params map[string]any, o
 				return nil, fmt.Errorf("query: %w", err)
 			}
 			return &Result{Columns: cols, Rows: rows}, nil
-		}
-		if o.linearizable && !write && cb.IsLeader() {
-			if err := cb.ReadBarrier(); err != nil {
-				return nil, fmt.Errorf("query: %w", err)
-			}
 		}
 	}
 
