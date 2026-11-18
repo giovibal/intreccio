@@ -90,7 +90,7 @@ type raftNode struct {
 	shedding atomic.Bool
 
 	// peerVersions holds the forwarding-protocol version each other member
-	// answered with, by node ID (see staleChecks).
+	// answered with, by node ID (see membersCheckStale).
 	peerVersions sync.Map
 	// probing is set while probePeers runs.
 	probing atomic.Bool
@@ -332,16 +332,18 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	}
 }
 
-// staleChecks reports whether this leader's entries can carry the base of
-// the state they were staged on (encodeBase). A member built before that
-// check ignores the extension and would apply an entry the others refuse, so
-// entries carry it only once every other member of the configuration has
-// answered with a protocol version that checks it. Until then this starts a
-// probe in the background, and entries go without it, as before the check.
+// membersCheckStale reports whether every other member of the Raft
+// configuration has said, by the protocol version it answers the forwarding
+// handshake with, that its state machine checks the base of an entry. Only
+// then may the cluster turn the check on (see stage): a member built before
+// it ignores the base and would apply an entry the others refuse. While the
+// answer is not known this starts a probe in the background and reports
+// false.
 //
-// A member that has answered once is not asked again: replacing it with an
-// older build (a downgrade) is not supported.
-func (n *raftNode) staleChecks() bool {
+// It decides only when the check is turned on. Once it is, every entry
+// carries a base whatever the probes say, and the state machine refuses one
+// without it.
+func (n *raftNode) membersCheckStale() bool {
 	future := n.raft.GetConfiguration()
 	if future.Error() != nil {
 		return false
@@ -390,7 +392,7 @@ func (n *raftNode) dialVersion(ctx context.Context, addr string) (uint16, error)
 	switch {
 	case err == nil:
 		c.Close()
-		return wire.Version, nil
+		return c.version, nil
 	case errors.As(err, &mismatch):
 		return mismatch.Remote, nil
 	default:
@@ -426,7 +428,7 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 		n.barrierTerm = term
 	}
 
-	result, writeSet, base, err := n.stage(stage)
+	result, writeSet, base, checked, err := n.stage(stage, n.membersCheckStale())
 	if err != nil {
 		return nil, false, err
 	}
@@ -435,7 +437,7 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 	}
 
 	var ext []byte
-	if n.staleChecks() {
+	if checked {
 		ext = encodeBase(base)
 	}
 	future := n.raft.ApplyLog(raft.Log{Data: writeSet, Extensions: ext}, n.applyTimeout)
@@ -449,14 +451,19 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 }
 
 // stage runs a write against a recording transaction and returns its result,
-// the write-set it produced (nil when it changed nothing) and base, the
-// applied index of the state it was staged on (see encodeBase). The
-// transaction is always rolled back: the FSM is the only writer.
+// the write-set it produced (nil when it changed nothing), base, the applied
+// index of the state it was staged on, and checked, whether the entry must
+// carry that base (see encodeBase). The transaction is always rolled back:
+// the FSM is the only writer.
+//
+// Entries are checked once the cluster has turned the check on
+// (catalog.StaleChecks). enable turns it on, in the write-set of this very
+// write: the caller passes it once every member has said it checks entries.
 //
 // The store's read lock is released however stage ends, a panic in the
 // caller's code included: a Restore takes the lock exclusively and would
 // otherwise wait forever, with every later reader queued behind it.
-func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, writeSet []byte, base uint64, err error) {
+func (n *raftNode) stage(stage func(txn storage.Txn) (any, error), enable bool) (result any, writeSet []byte, base uint64, checked bool, err error) {
 	n.storeMu.RLock()
 	defer n.storeMu.RUnlock()
 	err = n.store.Update(func(real storage.Txn) error {
@@ -469,6 +476,9 @@ func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, 
 		if base, err = catalog.AppliedIndex(real); err != nil {
 			return err
 		}
+		if checked, err = catalog.StaleChecks(real); err != nil {
+			return err
+		}
 		rec := newRecordTxn(real)
 		r, err := stage(rec)
 		if err != nil {
@@ -478,13 +488,19 @@ func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, 
 		if rec.empty() {
 			return errStaged
 		}
+		if !checked && enable {
+			if err := catalog.EnableStaleChecks(rec); err != nil {
+				return err
+			}
+			checked = true
+		}
 		writeSet = rec.encode()
 		return errStaged // roll back; effects are replicated, not committed here
 	})
 	if err != nil && !errors.Is(err, errStaged) {
-		return nil, nil, 0, err
+		return nil, nil, 0, false, err
 	}
-	return result, writeSet, base, nil
+	return result, writeSet, base, checked, nil
 }
 
 // replicaFailed reacts to the state machine's failure (ErrReplicaFailed):

@@ -99,6 +99,20 @@ func (f *fsm) Apply(l *raft.Log) any {
 		return fmt.Errorf("%w: %v", errEntryRefused, err)
 	}
 	apply := func(txn storage.Txn) error {
+		if !checked {
+			// Once the cluster checks entries, one without a base was
+			// proposed before the check was on, or by a member that does not
+			// check: it cannot be shown to fit this state. Every replica has
+			// the same flag and refuses it alike; the leader stages the
+			// write again.
+			on, err := catalog.StaleChecks(txn)
+			if err != nil {
+				return err
+			}
+			if on {
+				return errStaleWrite
+			}
+		}
 		if checked {
 			// Refuse a write-set staged on a state other than this one:
 			// it would overwrite whatever was applied in between.

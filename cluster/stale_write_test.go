@@ -52,7 +52,7 @@ func TestStagedWriteSurvivesTwoLeadershipChanges(t *testing.T) {
 	a := tc.leaderIndex(t)
 	b := (a + 1) % 3
 	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
-	waitStaleChecks(t, tc.nodes[a])
+	waitStaleChecks(t, tc, a)
 
 	staged := make(chan struct{})
 	release := make(chan struct{})
@@ -167,10 +167,14 @@ func TestRefusalsDoNotFailTheReplica(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if !checksOn(t, node) {
+		t.Fatal("a single voter should have turned the check on with its first write")
+	}
 	for name, ext := range map[string][]byte{
-		"stale base":      encodeBase(applied + 100),
-		"malformed":       {extBaseV1, 0x80},
-		"unknown version": {9, 1},
+		"stale base":                 encodeBase(applied + 100),
+		"malformed":                  {extBaseV1, 0x80},
+		"unknown version":            {9, 1},
+		"no base once checks are on": nil,
 	} {
 		resp := node.fsm.Apply(&raft.Log{Type: raft.LogCommand, Index: applied + 1000, Data: []byte{0}, Extensions: ext})
 		if err, _ := resp.(error); err == nil {
@@ -190,15 +194,30 @@ func TestRefusalsDoNotFailTheReplica(t *testing.T) {
 	}
 }
 
-// waitStaleChecks waits until node, as leader, marks its entries for the
-// stale-state check: every other member has answered the version probe.
-func waitStaleChecks(t *testing.T, node *raftNode) {
+// checksOn reports whether node's state has the stale-write check turned on.
+func checksOn(t *testing.T, node *raftNode) bool {
+	t.Helper()
+	var on bool
+	if err := node.store.View(func(txn storage.Txn) (err error) {
+		on, err = catalog.StaleChecks(txn)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return on
+}
+
+// waitStaleChecks writes through the leader at index lead until the cluster
+// has turned the stale-write check on: the first write after every member
+// answered the version probe turns it on.
+func waitStaleChecks(t *testing.T, tc *testCluster, lead int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for !node.staleChecks() {
+	for !checksOn(t, tc.nodes[lead]) {
 		if time.Now().After(deadline) {
-			t.Fatal("the leader never enabled the stale-state check")
+			t.Fatal("the cluster never turned the stale-write check on")
 		}
+		run(t, tc.dbs[lead], "CREATE (:Warmup)")
 		time.Sleep(20 * time.Millisecond)
 	}
 }
@@ -206,8 +225,8 @@ func waitStaleChecks(t *testing.T, node *raftNode) {
 // TestOlderMemberDisablesStaleChecks covers the upgrade gate of #98: while a
 // member speaks a protocol version older than the check (a rolling upgrade
 // not yet finished), it would apply an entry the upgraded members refuse. So
-// the leader writes entries without the check, and every replica applies the
-// same ones: they may lose the update #98 is about, as before the check, but
+// the cluster does not turn the check on, and every replica applies the same
+// entries: they may lose the update #98 is about, as before the check, but
 // they never diverge.
 func TestOlderMemberDisablesStaleChecks(t *testing.T) {
 	ctx := context.Background()
@@ -226,9 +245,12 @@ func TestOlderMemberDisablesStaleChecks(t *testing.T) {
 		}
 	}
 	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
-	time.Sleep(200 * time.Millisecond) // let the probe answer
-	if tc.nodes[a].staleChecks() {
-		t.Fatal("stale-state checks enabled with a member on an older version")
+	for range 5 { // let the probe answer, and give the check every chance
+		time.Sleep(100 * time.Millisecond)
+		run(t, tc.dbs[a], "CREATE (:Warmup)")
+	}
+	if checksOn(t, tc.nodes[a]) {
+		t.Fatal("the stale-write check was turned on with a member on an older version")
 	}
 
 	// The #98 sequence.
@@ -262,5 +284,57 @@ func TestOlderMemberDisablesStaleChecks(t *testing.T) {
 	want := counter(t, tc.dbs[a])
 	for i := range tc.dbs {
 		waitForCounter(t, tc.dbs[i], want) // the replicas agree
+	}
+}
+
+// TestChecksSurviveUnavailableProbes: once the cluster has turned the check
+// on, it stays on whatever the version probes say. A member whose probe
+// fails (a timeout, a broken forwarding link) must not let a leader propose
+// an unchecked entry: the #98 sequence still ends with both increments.
+func TestChecksSurviveUnavailableProbes(t *testing.T) {
+	ctx := context.Background()
+	tc := startCluster(t, 3)
+	a := tc.leaderIndex(t)
+	b := (a + 1) % 3
+	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
+	waitStaleChecks(t, tc, a)
+
+	// From now on no member answers a probe, and no answer is remembered.
+	for _, nd := range tc.nodes {
+		nd.peerVersions.Clear()
+		nd.probeVersion = func(context.Context, string) (uint16, error) {
+			return 0, context.DeadlineExceeded
+		}
+	}
+
+	staged := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- tc.dbs[a].Update(ctx, func(tx *intreccio.Tx) error {
+			if _, err := tx.Query(ctx, "MATCH (c:Counter) SET c.v = c.v + 1", nil); err != nil {
+				return err
+			}
+			if calls.Add(1) == 1 {
+				close(staged)
+				<-release
+			}
+			return nil
+		})
+	}()
+	<-staged
+	tc.transferTo(t, a, b)
+	run(t, tc.dbs[b], "MATCH (c:Counter) SET c.v = c.v + 1")
+	tc.transferTo(t, b, a)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the held Update: %v", err)
+	}
+	if got := counter(t, tc.dbs[a]); got != 2 {
+		t.Errorf("counter = %d, want 2: an unchecked entry overwrote an update", got)
+	}
+	for i := range tc.dbs {
+		waitForCounter(t, tc.dbs[i], 2)
 	}
 }

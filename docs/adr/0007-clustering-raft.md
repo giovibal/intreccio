@@ -73,12 +73,18 @@ replicated state, so every replica refuses the same entries. Entries without
 the extension, written before it existed, are applied as before.
 
 A member built before the check ignores the extension and would apply an
-entry the others refuse. So a leader adds the extension only once every other
-member of the Raft configuration has answered the forwarding handshake with
-protocol version 2 or later (`wire.VersionStaleWriteCheck`); until then, as
-during a rolling upgrade, entries go without it and every replica applies the
-same ones. A member's answer is remembered: downgrading a member to an older
-build once the check is on is not supported.
+entry the others refuse. So the check is turned on for the whole cluster, once,
+by a replicated write: the catalog key `S`, written in the write-set of the
+first write staged after every other member of the Raft configuration has
+answered the forwarding handshake with protocol version 2 or later
+(`wire.VersionStaleWriteCheck`). Before that, as during a rolling upgrade,
+entries go without the extension and every replica applies the same ones.
+After it, every entry carries a base, whatever later probes say (a member
+that does not answer cannot reopen the gap), and the FSM refuses an entry
+without one as stale, so the leader stages it again. The key is part of the
+replicated state, so a new leader, a restarted member and a snapshot all carry
+it. Downgrading a member to a build without the check once it is on is not
+supported.
 
 ### Topology: a small quorum of data nodes plus stateless clients
 A fixed set of **3 or 5 voting data nodes** forms the Raft quorum and holds the

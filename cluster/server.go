@@ -28,6 +28,10 @@ type forwardServer struct {
 	handler   requestHandler
 	subscribe subscriptionHandler // nil: this member serves no live queries
 	ka        keepalive
+	// onlyVersion, when set, makes the server accept that protocol version
+	// alone, as a build of that version does. Tests use it to stand in for an
+	// older member; it is zero in production.
+	onlyVersion uint16
 
 	mu     sync.Mutex
 	conns  map[*serverConn]struct{}
@@ -129,15 +133,27 @@ func (c *serverConn) run() {
 		c.srv.mu.Unlock()
 	}()
 
-	// The requester speaks first. Answer even a version mismatch, so that it
-	// learns which version this member runs.
+	// The requester speaks first. A version this member speaks too is
+	// answered as asked, and the connection goes on in it (the frames are the
+	// same): an older member can still forward to this one. Any other version
+	// is answered with this member's own, so that the requester learns it,
+	// and the connection ends.
 	_ = c.conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	err := wire.ReadHandshake(c.conn)
+	v, err := wire.ReadHandshakeVersion(c.conn)
+	if only := c.srv.onlyVersion; only != 0 && err == nil && v != only {
+		// Behave as a build that speaks only that version.
+		_ = wire.WriteHandshakeVersion(c.conn, only)
+		return
+	}
 	var mismatch *wire.VersionError
-	if err != nil && !errors.As(err, &mismatch) {
+	switch {
+	case errors.As(err, &mismatch):
+		_ = wire.WriteHandshake(c.conn)
+		return
+	case err != nil:
 		return // not this protocol (or a failed TLS handshake)
 	}
-	if wire.WriteHandshake(c.conn) != nil || err != nil {
+	if wire.WriteHandshakeVersion(c.conn, v) != nil {
 		return
 	}
 	_ = c.conn.SetDeadline(time.Time{})

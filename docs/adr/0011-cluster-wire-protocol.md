@@ -58,8 +58,16 @@ The cost is the result set held in memory on the client as well.
 
 Version 2 keeps every frame and message of version 1 unchanged. It marks the
 members whose state machine refuses a write-set entry staged on a stale state
-(ADR 0007): a leader relies on that check only when every other member answers
-the handshake with version 2 or later.
+(ADR 0007): the cluster turns that check on only once every other member
+answers the handshake with version 2 or later.
+
+Since version 2 a member speaks every version from `wire.MinVersion` to its
+own, which share the same frames. The accepting side answers a version it
+speaks with that same version, and the connection goes on in it. A version-1
+member answers any other version with its own and hangs up, so a dialler
+turned down with an older version it speaks dials again in that version.
+Members one version apart therefore keep forwarding to each other during a
+rolling upgrade.
 Encoding lives in `internal/wire`; scheduling in `cluster` (`mux.go` for the
 dialling side, `server.go` for the accepting side, `pool.go` for one shared
 connection per member address).

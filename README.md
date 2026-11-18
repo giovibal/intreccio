@@ -414,9 +414,13 @@ Notes for operators:
 - **TLS is opt-in**: set `Config.TLS` to encrypt the Raft transport and the
   forwarding endpoint and (with a CA) require mutually authenticated peers.
 
-Members speak a versioned binary protocol on the forwarding address, so **every
-member of a cluster must run the same version**; a mismatch is reported at
-connection time.
+Members speak a versioned binary protocol on the forwarding address. A member
+also speaks the previous protocol version, so a cluster can be **upgraded one
+member at a time**: members of different versions forward to each other in the
+older version. Versions further apart are refused at connection time. The
+check that guards writes against a leadership change (ADR 0007) turns on by
+itself once every member runs the new version; downgrading a member after that
+is not supported.
 
 ### Securing the cluster with TLS
 
