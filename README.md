@@ -158,11 +158,12 @@ err := db.Update(ctx, func(tx *intreccio.Tx) error {
 })
 ```
 
-A write query that fails inside `Update` aborts the transaction: it may have
-made part of its changes before failing, so the later queries fail with
-`ErrTxAborted` and `Update` commits nothing, even if the function handles the
-error and returns `nil`. A failed read, or a query refused before it runs (a
-syntax error, for one), leaves the transaction usable.
+A write query that fails while executing inside `Update` aborts the
+transaction: it may have made part of its changes before failing, so the later
+queries fail with `ErrTxAborted` and `Update` commits nothing, even if the
+function handles the error and returns `nil`. A failed read, or a query
+refused before it runs (a syntax, semantic or planning error), leaves the
+transaction usable.
 
 On a write conflict the function is retried from the start on fresh data, so
 it must not have side effects outside the transaction. A write query inside

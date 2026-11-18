@@ -288,6 +288,10 @@ func TestFailedWriteAbortsTheTransaction(t *testing.T) {
 			if _, err := tx.Query(ctx, "RETURN 1 / 0", nil); err == nil {
 				return errors.New("a failing read succeeded")
 			}
+			// A write refused by the planner, before any operator runs.
+			if _, err := tx.Query(ctx, "CREATE (n:New) RETURN rand() AS r ORDER BY r, n.score", nil); err == nil {
+				return errors.New("a write the planner refuses was accepted")
+			}
 			_, err := tx.Query(ctx, "CREATE (:Item {v: 2})", nil)
 			return err
 		})
@@ -296,6 +300,9 @@ func TestFailedWriteAbortsTheTransaction(t *testing.T) {
 		}
 		if got := count(t, db); got != int64(2) {
 			t.Errorf("Items = %v, want 2", got)
+		}
+		if got := mustQuery(t, db, "MATCH (n:New) RETURN count(n)", nil).Rows[0][0]; got != int64(0) {
+			t.Errorf("New = %v, want 0: the refused write ran", got)
 		}
 	})
 }
