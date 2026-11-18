@@ -1,8 +1,10 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -194,9 +196,18 @@ func TestSecondFailureStillShedsLeadership(t *testing.T) {
 	createPerson(t, tc.dbs[lead], "first")
 	waitFailed(t, tc.nodes[f])
 
-	// A restore installed from the leader clears the failure, and a second
+	// A snapshot installed from the leader clears the failure, and a second
 	// one follows at once.
-	tc.nodes[f].fsm.failure.Store(nil)
+	var snap bytes.Buffer
+	if err := tc.nodes[lead].store.Backup(&snap); err != nil {
+		t.Fatalf("back up the leader: %v", err)
+	}
+	if err := tc.nodes[f].fsm.Restore(io.NopCloser(&snap)); err != nil {
+		t.Fatalf("restore the failed member: %v", err)
+	}
+	if err := tc.nodes[f].fsm.failed(); err != nil {
+		t.Fatalf("still failed after a restore: %v", err)
+	}
 	failNextApply(tc.nodes[f])
 	createPerson(t, tc.dbs[lead], "second")
 	waitFailed(t, tc.nodes[f])
