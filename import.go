@@ -32,10 +32,16 @@ func WithBatchSize(n int) ImportOption {
 
 // ImportResult reports how far an Import got.
 type ImportResult struct {
-	// Rows is the number of rows committed: the rows before the first
-	// failed batch, all of them on success.
+	// Rows is the number of rows confirmed committed: the rows before the
+	// first failed batch, all of them on success.
+	//
+	// It is where a failed import resumes, unless the error matches
+	// ErrWriteOutcomeUnknown. Then the failed batch, which the error names
+	// as "rows Rows to last" (last inclusive, so rows[Rows:last+1]), may have
+	// been committed too: resuming at Rows would write it a second time. See
+	// Import.
 	Rows int
-	// Batches is the number of transactions committed.
+	// Batches is the number of transactions confirmed committed.
 	Batches int
 }
 
@@ -54,6 +60,27 @@ type ImportResult struct {
 // then names the failed rows (by index in rows) and ImportResult.Rows says
 // how many were committed, so the caller can resume from there. In cluster
 // mode every batch is a replicated write, forwarded to the leader as usual.
+//
+// One error is different. In cluster mode a batch can fail with an error
+// matching ErrWriteOutcomeUnknown: it was sent, and whether it was committed
+// cannot be told. The failed batch is then all or nothing, but which one is
+// not known, so do not simply resume at ImportResult.Rows.
+//
+// The error names the batch as "rows first to last", with last inclusive:
+// the uncertain rows are rows[res.Rows:last+1], and the first row the import
+// did not send is last+1. The safe recovery is to replay that batch with an
+// idempotent query (MERGE on a unique key rather than CREATE) and then go on
+// from last+1. Looking the rows up can confirm that the batch was written,
+// but not finding them proves nothing: a default read may be served by a
+// follower that is behind, and a write whose reply was lost may still be on
+// its way to being committed.
+//
+//	res, err := db.Import(ctx, cypher, rows, nil)
+//	if errors.Is(err, intreccio.ErrWriteOutcomeUnknown) {
+//	    // rows[res.Rows:last+1] may be committed (first and last as named
+//	    // in err): replay them with an idempotent query, then import
+//	    // rows[last+1:].
+//	}
 func (db *DB) Import(ctx context.Context, cypher string, rows any, params map[string]any, opts ...ImportOption) (ImportResult, error) {
 	var res ImportResult
 	o := importOptions{batch: DefaultImportBatch}
