@@ -62,3 +62,45 @@ func TestUpdateReturnsErrConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestUpdateRetriesUntilCommit: a transaction that conflicts on its first
+// attempts is retried and commits once, with its last attempt's writes only.
+// It is the deterministic counterpart of the root package's concurrent
+// counter test (#91).
+func TestUpdateRetriesUntilCommit(t *testing.T) {
+	const conflicts = 5
+	s := newStore(t)
+	key := []byte("k")
+	attempts := 0
+	err := s.Update(func(tx storage.Txn) error {
+		attempts++
+		if _, err := tx.Get(key); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		if attempts <= conflicts {
+			// A concurrent writer commits the key this attempt just read.
+			if err := s.db.Update(func(btx *badger.Txn) error { return btx.Set(key, []byte("other")) }); err != nil {
+				return err
+			}
+		}
+		return tx.Set(key, []byte{byte(attempts)})
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if attempts != conflicts+1 {
+		t.Errorf("attempts = %d, want %d", attempts, conflicts+1)
+	}
+	if err := s.View(func(tx storage.Txn) error {
+		v, err := tx.Get(key)
+		if err != nil {
+			return err
+		}
+		if len(v) != 1 || int(v[0]) != conflicts+1 {
+			t.Errorf("value = %v, want the last attempt's write (%d)", v, conflicts+1)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
