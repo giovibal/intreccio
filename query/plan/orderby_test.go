@@ -89,6 +89,31 @@ func TestSortPlacement(t *testing.T) {
         NodeByLabelScan(p:Person)`,
 		},
 		{
+			// #88: x is the column x.b here, so x.a is not the expression
+			// behind original.
+			"a rebound name is not a repeated expression",
+			"UNWIND $l AS x RETURN x.a AS original, x.b AS x ORDER BY x.a",
+			`Sort(x.a)
+  Project(x.a AS original, x.b AS x)
+    Unwind($l AS x)`,
+		},
+		{
+			// An aggregation's argument is read from the input rows, so a
+			// rebound name inside it does not stop the reuse.
+			"a repeated aggregation over a rebound name",
+			"UNWIND $l AS x RETURN x % 2 AS bucket, sum(x) AS x ORDER BY sum(x) DESC",
+			`Sort(x DESC)
+  Aggregate(group=[x % 2 AS bucket] aggs=[sum(x) AS x])
+    Unwind($l AS x)`,
+		},
+		{
+			"an unaliased variable column is not a rebinding",
+			"MATCH (p:Person) RETURN p, p.age AS age ORDER BY p.age",
+			`Sort(age)
+  Project(p, p.age AS age)
+    NodeByLabelScan(p:Person)`,
+		},
+		{
 			"comprehension variable is not a column reference",
 			"MATCH (p:Person) RETURN p.name AS x ORDER BY size([x IN p.tags WHERE x <> p.name])",
 			`Project(p.name AS x)
