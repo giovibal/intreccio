@@ -507,6 +507,22 @@ func decodeParams(b []byte) (map[string]any, error) {
 // txn. It is the single execution path shared by the local and clustered
 // backends.
 func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any, ctx context.Context, maxRows int64) (*Result, error) {
+	pq, err := prepareQuery(txn, q, columns, params)
+	if err != nil {
+		return nil, err
+	}
+	return pq.run(txn, ctx, maxRows)
+}
+
+// preparedQuery is a query planned and ready to execute. Preparing it reads
+// the catalog but changes nothing.
+type preparedQuery struct {
+	plan    plan.Op
+	columns []string
+	params  map[string]any
+}
+
+func prepareQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string]any) (*preparedQuery, error) {
 	p, err := plan.Plan(q, planCatalog{txn: txn})
 	if err != nil {
 		return nil, err
@@ -515,14 +531,20 @@ func runQuery(txn storage.Txn, q *ast.Query, columns []string, params map[string
 	if err != nil {
 		return nil, err
 	}
-	rows, err := exec.Run(p, columns, &exec.Context{Txn: txn, Params: params, Ctx: ctx, MaxRows: maxRows})
+	return &preparedQuery{plan: p, columns: columns, params: params}, nil
+}
+
+// run executes the query. A write query that fails here may have made part
+// of its changes.
+func (pq *preparedQuery) run(txn storage.Txn, ctx context.Context, maxRows int64) (*Result, error) {
+	rows, err := exec.Run(pq.plan, pq.columns, &exec.Context{Txn: txn, Params: pq.params, Ctx: ctx, MaxRows: maxRows})
 	if err != nil {
 		return nil, err
 	}
 	if err := publicRows(txn, rows); err != nil {
 		return nil, err
 	}
-	return &Result{Columns: columns, Rows: rows}, nil
+	return &Result{Columns: pq.columns, Rows: rows}, nil
 }
 
 // Explain returns the textual physical plan for the given query without running
