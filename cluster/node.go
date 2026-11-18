@@ -304,12 +304,31 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 		n.barrierTerm = term
 	}
 
-	var (
-		result   any
-		writeSet []byte
-	)
+	result, writeSet, err := n.stage(stage)
+	if err != nil {
+		return nil, err
+	}
+	if writeSet == nil {
+		return result, nil // no mutations to replicate
+	}
+
+	if err := n.raft.Apply(writeSet, n.applyTimeout).Error(); err != nil {
+		return nil, replicateError(err)
+	}
+	return result, nil
+}
+
+// stage runs a write against a recording transaction and returns its result
+// and the write-set it produced (nil when it changed nothing). The
+// transaction is always rolled back: the FSM is the only writer.
+//
+// The store's read lock is released however stage ends, a panic in the
+// caller's code included: a Restore takes the lock exclusively and would
+// otherwise wait forever, with every later reader queued behind it.
+func (n *raftNode) stage(stage func(txn storage.Txn) (any, error)) (result any, writeSet []byte, err error) {
 	n.storeMu.RLock()
-	err := n.store.Update(func(real storage.Txn) error {
+	defer n.storeMu.RUnlock()
+	err = n.store.Update(func(real storage.Txn) error {
 		rec := newRecordTxn(real)
 		r, err := stage(rec)
 		if err != nil {
@@ -322,18 +341,10 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 		writeSet = rec.encode()
 		return errStaged // roll back; effects are replicated, not committed here
 	})
-	n.storeMu.RUnlock()
 	if err != nil && !errors.Is(err, errStaged) {
-		return nil, err
+		return nil, nil, err
 	}
-	if writeSet == nil {
-		return result, nil // no mutations to replicate
-	}
-
-	if err := n.raft.Apply(writeSet, n.applyTimeout).Error(); err != nil {
-		return nil, replicateError(err)
-	}
-	return result, nil
+	return result, writeSet, nil
 }
 
 // replicateError turns the failure of a Raft apply into the error of the
