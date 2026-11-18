@@ -751,7 +751,9 @@ func sortKeys(items []ProjItem, merging bool, orderBy []ast.SortItem) (keys []So
 // A sub-expression that reads a name a column has rebound is not a repeat,
 // however alike it looks: in RETURN x.a AS original, x.b AS x ORDER BY x.a
 // the sort key reads the column x, not the variable x that original was
-// computed from.
+// computed from. The arguments of an aggregation are the exception: they
+// are always read from the input rows, so in
+// RETURN sum(x) AS x ORDER BY sum(x) the key is the projected sum.
 func columnRefs(e ast.Expr, items []ProjItem) ast.Expr {
 	rebound := reboundNames(items)
 	return rewriteScoped(e, func(x ast.Expr, locals []string) (ast.Expr, bool) {
@@ -759,13 +761,24 @@ func columnRefs(e ast.Expr, items []ProjItem) ast.Expr {
 		case *ast.Variable, *ast.Literal, *ast.Param:
 			return nil, false
 		}
-		if readsAny(x, locals) || readsAny(x, rebound) {
+		if readsAny(x, locals) || readsAny(withoutAggregates(x), rebound) {
 			return nil, false
 		}
 		for _, it := range items {
 			if ast.Equal(x, it.Expr) {
 				return &ast.Variable{Name: it.Column}, true
 			}
+		}
+		return nil, false
+	})
+}
+
+// withoutAggregates returns e with every aggregation replaced by null, to
+// look at the names e reads from the row it is evaluated on.
+func withoutAggregates(e ast.Expr) ast.Expr {
+	return ast.Rewrite(e, func(x ast.Expr) (ast.Expr, bool) {
+		if fc, ok := x.(*ast.FunctionCall); ok && isAggregate(fc.Name) {
+			return &ast.Literal{}, true
 		}
 		return nil, false
 	})

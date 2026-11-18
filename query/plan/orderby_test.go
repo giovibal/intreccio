@@ -98,6 +98,15 @@ func TestSortPlacement(t *testing.T) {
     Unwind($l AS x)`,
 		},
 		{
+			// An aggregation's argument is read from the input rows, so a
+			// rebound name inside it does not stop the reuse.
+			"a repeated aggregation over a rebound name",
+			"UNWIND $l AS x RETURN x % 2 AS bucket, sum(x) AS x ORDER BY sum(x) DESC",
+			`Sort(x DESC)
+  Aggregate(group=[x % 2 AS bucket] aggs=[sum(x) AS x])
+    Unwind($l AS x)`,
+		},
+		{
 			"an unaliased variable column is not a rebinding",
 			"MATCH (p:Person) RETURN p, p.age AS age ORDER BY p.age",
 			`Sort(age)
