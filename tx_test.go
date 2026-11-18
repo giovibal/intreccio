@@ -190,3 +190,29 @@ func TestUpdateConcurrentReadModifyWrite(t *testing.T) {
 		t.Errorf("counter = %v, want %d (lost updates)", got, writers*per)
 	}
 }
+
+// TestTxQueryRejectsStream covers #90: a STREAM query inside a transaction is
+// refused as it is by DB.Query, instead of running once as a plain read.
+func TestTxQueryRejectsStream(t *testing.T) {
+	db := newDB(t)
+	ctx := context.Background()
+	for _, q := range []string{"STREAM RETURN 1", "STREAM MATCH (n) RETURN n"} {
+		err := db.View(ctx, func(tx *Tx) error {
+			res, err := tx.Query(ctx, q, nil)
+			if !errors.Is(err, ErrStreamQuery) {
+				t.Errorf("View: %s = %v, %v; want ErrStreamQuery", q, res, err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = db.Update(ctx, func(tx *Tx) error {
+			_, err := tx.Query(ctx, q, nil)
+			return err
+		})
+		if !errors.Is(err, ErrStreamQuery) {
+			t.Errorf("Update: %s = %v; want ErrStreamQuery", q, err)
+		}
+	}
+}

@@ -55,6 +55,10 @@ func (tx *Tx) Query(ctx context.Context, cypher string, params map[string]any, o
 	if err != nil {
 		return nil, err
 	}
+	if q.Stream {
+		// A live query has no place in a transaction: it outlives it.
+		return nil, fmt.Errorf("query: %w", ErrStreamQuery)
+	}
 	semaRes, err := sema.Analyze(q)
 	if err != nil {
 		return nil, err
