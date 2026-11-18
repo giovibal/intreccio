@@ -57,7 +57,22 @@ func (f *fsm) Apply(l *raft.Log) any {
 	if hook := f.beforeApply.Load(); hook != nil {
 		(*hook)()
 	}
+	base, checked, err := decodeBase(l.Extensions)
+	if err != nil {
+		return err
+	}
 	apply := func(txn storage.Txn) error {
+		if checked {
+			// Refuse a write-set staged on a state other than this one:
+			// it would overwrite whatever was applied in between.
+			applied, err := catalog.AppliedIndex(txn)
+			if err != nil {
+				return err
+			}
+			if applied != base {
+				return errStaleWrite
+			}
+		}
 		if err := applyWriteSet(l.Data, txn); err != nil {
 			return err
 		}

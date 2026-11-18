@@ -63,6 +63,15 @@ removes every determinism hazard (clock, rand, map iteration order) and preserve
 invariant #1 for free — the leader already emitted all index keys into the
 write-set.
 
+A write-set is only valid on the state it was staged on. Each entry therefore
+carries, in `raft.Log.Extensions`, the applied index of that state (the catalog
+key `A`); the FSM refuses an entry whose base is no longer the applied index,
+and the leader stages the write again. This covers a leadership change between
+staging and proposing, including one that comes back to the same node after
+another leader has committed writes (#98). The refusal depends only on the
+replicated state, so every replica refuses the same entries. Entries without
+the extension, written before it existed, are applied as before.
+
 ### Topology: a small quorum of data nodes plus stateless clients
 A fixed set of **3 or 5 voting data nodes** forms the Raft quorum and holds the
 data. Other service instances join as **stateless clients** that forward writes to

@@ -158,3 +158,41 @@ func clone(b []byte) []byte {
 	}
 	return append([]byte(nil), b...)
 }
+
+// errStaleWrite is the state machine's answer to an entry staged on a state
+// that changed before the entry was applied (see encodeBase). It is decided
+// from the replicated state alone, so every replica refuses the same entries
+// and stays identical.
+var errStaleWrite = errors.New("cluster: write staged on a stale state")
+
+// extBaseV1 tags the version-1 extension of a write-set entry.
+const extBaseV1 byte = 1
+
+// encodeBase is the Raft log extension of a write-set: the applied index
+// (catalog.AppliedIndex) of the state the write was staged on. Layout:
+//
+//	extBaseV1 | uvarint(base)
+//
+// It travels in raft.Log.Extensions, next to the unchanged write-set in Data,
+// so entries written before it existed still decode.
+func encodeBase(base uint64) []byte {
+	b := make([]byte, 1, 1+binary.MaxVarintLen64)
+	b[0] = extBaseV1
+	return binary.AppendUvarint(b, base)
+}
+
+// decodeBase reads encodeBase. ok is false for an entry with no extension,
+// which carries no base to check.
+func decodeBase(ext []byte) (base uint64, ok bool, err error) {
+	if len(ext) == 0 {
+		return 0, false, nil
+	}
+	if ext[0] != extBaseV1 {
+		return 0, false, fmt.Errorf("write-set: unknown extension version %d", ext[0])
+	}
+	base, n := binary.Uvarint(ext[1:])
+	if n <= 0 || 1+n != len(ext) {
+		return 0, false, errors.New("write-set: malformed extension")
+	}
+	return base, true, nil
+}

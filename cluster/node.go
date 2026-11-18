@@ -290,8 +290,33 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	n.writeMu.Lock()
 	defer n.writeMu.Unlock()
 
+	for attempt := 0; ; attempt++ {
+		result, rejected, err := n.applyOnce(stage)
+		if !rejected {
+			return result, err
+		}
+		// The write was staged on a state that changed before the entry was
+		// applied: every replica refused it, so nothing was written. Stage
+		// it again on the current state.
+		if attempt+1 >= maxStaleRetries {
+			return nil, fmt.Errorf("cluster: write kept being staged on a stale state: %w", storage.ErrConflict)
+		}
+	}
+}
+
+// maxStaleRetries bounds how many times ApplyWrite stages a write again after
+// the state machine refused it as stale (see applyOnce). A refusal needs a
+// leadership change between staging and applying, so this is rarely more
+// than one.
+const maxStaleRetries = 10
+
+// applyOnce stages a write and proposes its write-set. rejected reports that
+// the state machine refused the entry because the state it was staged on had
+// changed meanwhile; nothing was applied anywhere, and the caller may stage
+// it again. Called with writeMu held.
+func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result any, rejected bool, err error) {
 	if n.raft.State() != raft.Leader {
-		return nil, errNotLeader
+		return nil, false, errNotLeader
 	}
 	// A newly elected leader can hold committed entries its state machine has
 	// not applied yet. Staging against that store would read stale data and
@@ -299,17 +324,26 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	// each term waits for the state machine to catch up.
 	if term := n.raft.CurrentTerm(); term != n.barrierTerm {
 		if err := n.raft.Barrier(n.applyTimeout).Error(); err != nil {
-			return nil, fmt.Errorf("cluster: leader barrier: %w", err)
+			return nil, false, fmt.Errorf("cluster: leader barrier: %w", err)
 		}
 		n.barrierTerm = term
 	}
 
 	var (
-		result   any
 		writeSet []byte
+		base     uint64
 	)
 	n.storeMu.RLock()
-	err := n.store.Update(func(real storage.Txn) error {
+	err = n.store.Update(func(real storage.Txn) error {
+		// The last command applied to the state staged on. Leadership can
+		// change and come back while the caller's code runs, with another
+		// leader's writes applied meanwhile: the write-set below would then
+		// overwrite them. The state machine refuses it unless the state is
+		// still this one.
+		var err error
+		if base, err = catalog.AppliedIndex(real); err != nil {
+			return err
+		}
 		rec := newRecordTxn(real)
 		r, err := stage(rec)
 		if err != nil {
@@ -324,16 +358,20 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	})
 	n.storeMu.RUnlock()
 	if err != nil && !errors.Is(err, errStaged) {
-		return nil, err
+		return nil, false, err
 	}
 	if writeSet == nil {
-		return result, nil // no mutations to replicate
+		return result, false, nil // no mutations to replicate
 	}
 
-	if err := n.raft.Apply(writeSet, n.applyTimeout).Error(); err != nil {
-		return nil, replicateError(err)
+	future := n.raft.ApplyLog(raft.Log{Data: writeSet, Extensions: encodeBase(base)}, n.applyTimeout)
+	if err := future.Error(); err != nil {
+		return nil, false, replicateError(err)
 	}
-	return result, nil
+	if err, ok := future.Response().(error); ok && errors.Is(err, errStaleWrite) {
+		return nil, true, nil
+	}
+	return result, false, nil
 }
 
 // replicateError turns the failure of a Raft apply into the error of the
