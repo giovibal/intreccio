@@ -13,6 +13,7 @@ import (
 	"github.com/giovibal/intreccio"
 	"github.com/giovibal/intreccio/internal/catalog"
 	"github.com/giovibal/intreccio/internal/storage"
+	"github.com/giovibal/intreccio/internal/wire"
 )
 
 // transferTo moves leadership from node from to node to and waits for it.
@@ -51,6 +52,7 @@ func TestStagedWriteSurvivesTwoLeadershipChanges(t *testing.T) {
 	a := tc.leaderIndex(t)
 	b := (a + 1) % 3
 	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
+	waitStaleChecks(t, tc.nodes[a])
 
 	staged := make(chan struct{})
 	release := make(chan struct{})
@@ -185,5 +187,80 @@ func TestRefusalsDoNotFailTheReplica(t *testing.T) {
 	run(t, tc.dbs[0], "MATCH (c:Counter) SET c.v = c.v + 1")
 	if got := counter(t, tc.dbs[0]); got != 1 {
 		t.Errorf("counter = %d, want 1", got)
+	}
+}
+
+// waitStaleChecks waits until node, as leader, marks its entries for the
+// stale-state check: every other member has answered the version probe.
+func waitStaleChecks(t *testing.T, node *raftNode) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !node.staleChecks() {
+		if time.Now().After(deadline) {
+			t.Fatal("the leader never enabled the stale-state check")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestOlderMemberDisablesStaleChecks covers the upgrade gate of #98: while a
+// member speaks a protocol version older than the check (a rolling upgrade
+// not yet finished), it would apply an entry the upgraded members refuse. So
+// the leader writes entries without the check, and every replica applies the
+// same ones: they may lose the update #98 is about, as before the check, but
+// they never diverge.
+func TestOlderMemberDisablesStaleChecks(t *testing.T) {
+	ctx := context.Background()
+	tc := startCluster(t, 3)
+	a := tc.leaderIndex(t)
+	b := (a + 1) % 3
+	old := (a + 2) % 3
+	oldAddr := tc.peers[old].ForwardAddr
+	for _, nd := range tc.nodes {
+		real := nd.dialVersion
+		nd.probeVersion = func(ctx context.Context, addr string) (uint16, error) {
+			if addr == oldAddr {
+				return wire.VersionStaleWriteCheck - 1, nil
+			}
+			return real(ctx, addr)
+		}
+	}
+	run(t, tc.dbs[a], "CREATE (:Counter {v: 0})")
+	time.Sleep(200 * time.Millisecond) // let the probe answer
+	if tc.nodes[a].staleChecks() {
+		t.Fatal("stale-state checks enabled with a member on an older version")
+	}
+
+	// The #98 sequence.
+	staged := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- tc.dbs[a].Update(ctx, func(tx *intreccio.Tx) error {
+			if _, err := tx.Query(ctx, "MATCH (c:Counter) SET c.v = c.v + 1", nil); err != nil {
+				return err
+			}
+			if calls.Add(1) == 1 {
+				close(staged)
+				<-release
+			}
+			return nil
+		})
+	}()
+	<-staged
+	tc.transferTo(t, a, b)
+	run(t, tc.dbs[b], "MATCH (c:Counter) SET c.v = c.v + 1")
+	tc.transferTo(t, b, a)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the held Update: %v", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("the Update function ran %d times, want 1: an entry was checked and refused", n)
+	}
+	want := counter(t, tc.dbs[a])
+	for i := range tc.dbs {
+		waitForCounter(t, tc.dbs[i], want) // the replicas agree
 	}
 }

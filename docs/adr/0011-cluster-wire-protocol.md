@@ -55,6 +55,11 @@ this invisible to the application:
 The cost is the result set held in memory on the client as well.
 
 ## The protocol as implemented (version 1)
+
+Version 2 keeps every frame and message of version 1 unchanged. It marks the
+members whose state machine refuses a write-set entry staged on a stale state
+(ADR 0007): a leader relies on that check only when every other member answers
+the handshake with version 2 or later.
 Encoding lives in `internal/wire`; scheduling in `cluster` (`mux.go` for the
 dialling side, `server.go` for the accepting side, `pool.go` for one shared
 connection per member address).

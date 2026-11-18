@@ -87,6 +87,15 @@ type raftNode struct {
 
 	// shedding is set while shedLeadership runs (the replica has failed).
 	shedding atomic.Bool
+
+	// peerVersions holds the forwarding-protocol version each other member
+	// answered with, by node ID (see staleChecks).
+	peerVersions sync.Map
+	// probing is set while probePeers runs.
+	probing atomic.Bool
+	// probeVersion asks the member at a forwarding address which protocol
+	// version it speaks. Tests replace it; it is dialVersion otherwise.
+	probeVersion func(ctx context.Context, addr string) (uint16, error)
 }
 
 // newNode starts a clustered node. Phases B–C support RoleVoter. A single node
@@ -202,6 +211,7 @@ func newNode(cfg Config) (*raftNode, error) {
 		pool:            newConnPool(tlsClient),
 		stop:            make(chan struct{}),
 	}
+	n.probeVersion = n.dialVersion
 	self.Store(n)
 	if f.failed() != nil {
 		n.replicaFailed() // failed during the replay above
@@ -321,6 +331,72 @@ func (n *raftNode) ApplyWrite(stage func(txn storage.Txn) (any, error)) (any, er
 	}
 }
 
+// staleChecks reports whether this leader's entries can carry the base of
+// the state they were staged on (encodeBase). A member built before that
+// check ignores the extension and would apply an entry the others refuse, so
+// entries carry it only once every other member of the configuration has
+// answered with a protocol version that checks it. Until then this starts a
+// probe in the background, and entries go without it, as before the check.
+//
+// A member that has answered once is not asked again: replacing it with an
+// older build (a downgrade) is not supported.
+func (n *raftNode) staleChecks() bool {
+	future := n.raft.GetConfiguration()
+	if future.Error() != nil {
+		return false
+	}
+	var unknown []raft.Server
+	for _, srv := range future.Configuration().Servers {
+		if string(srv.ID) == n.cfg.NodeID {
+			continue
+		}
+		if v, ok := n.peerVersions.Load(string(srv.ID)); !ok || v.(uint16) < wire.VersionStaleWriteCheck {
+			unknown = append(unknown, srv)
+		}
+	}
+	if len(unknown) == 0 {
+		return true
+	}
+	if n.probing.CompareAndSwap(false, true) {
+		go n.probePeers(unknown)
+	}
+	return false
+}
+
+// probePeers asks each server which protocol version it speaks and records
+// the answers.
+func (n *raftNode) probePeers(servers []raft.Server) {
+	defer n.probing.Store(false)
+	for _, srv := range servers {
+		addr, ok := n.forwardAddrByID[string(srv.ID)]
+		if !ok {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		v, err := n.probeVersion(ctx, addr)
+		cancel()
+		if err == nil {
+			n.peerVersions.Store(string(srv.ID), v)
+		}
+	}
+}
+
+// dialVersion connects to a member's forwarding address and returns the
+// protocol version it answers the handshake with.
+func (n *raftNode) dialVersion(ctx context.Context, addr string) (uint16, error) {
+	c, err := dialMux(ctx, addr, n.tlsClient, defaultKeepalive)
+	var mismatch *wire.VersionError
+	switch {
+	case err == nil:
+		c.Close()
+		return wire.Version, nil
+	case errors.As(err, &mismatch):
+		return mismatch.Remote, nil
+	default:
+		return 0, err
+	}
+}
+
 // maxStaleRetries bounds how many times ApplyWrite stages a write again after
 // the state machine refused it as stale (see applyOnce). A refusal needs a
 // leadership change between staging and applying, so this is rarely more
@@ -384,7 +460,11 @@ func (n *raftNode) applyOnce(stage func(txn storage.Txn) (any, error)) (result a
 		return result, false, nil // no mutations to replicate
 	}
 
-	future := n.raft.ApplyLog(raft.Log{Data: writeSet, Extensions: encodeBase(base)}, n.applyTimeout)
+	var ext []byte
+	if n.staleChecks() {
+		ext = encodeBase(base)
+	}
+	future := n.raft.ApplyLog(raft.Log{Data: writeSet, Extensions: ext}, n.applyTimeout)
 	if err := future.Error(); err != nil {
 		return nil, false, replicateError(err)
 	}

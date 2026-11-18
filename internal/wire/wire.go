@@ -31,8 +31,19 @@ import (
 )
 
 // Version is the protocol version of this build. Bump it on any incompatible
-// change to the handshake, the frame layout or a message encoding.
-const Version uint16 = 1
+// change to the handshake, the frame layout or a message encoding, or to what
+// members expect of each other.
+//
+//   - 1: the framed protocol (ADR 0011).
+//   - 2: frames unchanged. The member's state machine refuses a write-set
+//     entry staged on a stale state (ADR 0007); a leader marks entries for
+//     that check only once every other member answers with version 2 or
+//     later, since an older one would apply them unchecked.
+const Version uint16 = 2
+
+// VersionStaleWriteCheck is the first version whose members check the base
+// of a write-set entry (see Version).
+const VersionStaleWriteCheck uint16 = 2
 
 // MaxPayload bounds the payload of one frame. Results are split over several
 // Rows frames, so the bound applies to a single row and to a single request.

@@ -72,6 +72,14 @@ another leader has committed writes (#98). The refusal depends only on the
 replicated state, so every replica refuses the same entries. Entries without
 the extension, written before it existed, are applied as before.
 
+A member built before the check ignores the extension and would apply an
+entry the others refuse. So a leader adds the extension only once every other
+member of the Raft configuration has answered the forwarding handshake with
+protocol version 2 or later (`wire.VersionStaleWriteCheck`); until then, as
+during a rolling upgrade, entries go without it and every replica applies the
+same ones. A member's answer is remembered: downgrading a member to an older
+build once the check is on is not supported.
+
 ### Topology: a small quorum of data nodes plus stateless clients
 A fixed set of **3 or 5 voting data nodes** forms the Raft quorum and holds the
 data. Other service instances join as **stateless clients** that forward writes to
