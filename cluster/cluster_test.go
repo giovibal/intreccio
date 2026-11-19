@@ -2,20 +2,51 @@ package cluster
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"net"
+	"sync"
 	"testing"
 )
 
-// freeAddr returns a currently-free loopback address for the Raft transport.
+// Ports for cluster members in tests come from a range below the kernel's
+// ephemeral range (32768-60999 on Linux, 49152-65535 elsewhere). A port taken
+// with :0 comes from the ephemeral range, and so does the local port of every
+// outgoing connection: between freeAddr closing its probe listener and the
+// member binding the port, a connection opened meanwhile could take it, and
+// the member failed with "address already in use". Below that range no
+// outgoing connection can.
+const (
+	testPortFirst = 20000
+	testPortLast  = 32000
+)
+
+var (
+	testPortMu   sync.Mutex
+	testPortNext = testPortFirst + rand.IntN(testPortLast-testPortFirst)
+)
+
+// freeAddr returns a loopback address for a cluster member that is free now
+// and that no other call in this process returns.
 func freeAddr(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	testPortMu.Lock()
+	defer testPortMu.Unlock()
+	for range testPortLast - testPortFirst {
+		port := testPortNext
+		if testPortNext++; testPortNext >= testPortLast {
+			testPortNext = testPortFirst
+		}
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue // in use by another process
+		}
+		_ = l.Close()
+		return addr
 	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
+	t.Fatal("no free port for a cluster member")
+	return ""
 }
 
 // TestSingleVoterReadWriteAndReopen verifies the Phase B vertical slice: a
